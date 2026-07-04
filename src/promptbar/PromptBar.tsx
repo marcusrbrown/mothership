@@ -39,9 +39,13 @@ export interface PromptBarProps {
    * error, documented degradation). */
   store?: SessionStore;
   directory?: string;
-  /** Fired with the dispatched sessionId after a successful submit — the
-   * mount site can use this to select the session in the transcript panel. */
-  onDispatched?: (sessionId: string) => void;
+  /** Fired with the dispatched sessionId (and the DIRECTORY of the project
+   * it was dispatched to) after a successful submit — the mount site uses
+   * both to point the transcript panel at the right session AND the right
+   * directory (bug 4: without directory, backfill targets whatever
+   * directory the transcript panel already had, which may not be the
+   * dispatched project's). */
+  onDispatched?: (sessionId: string, directory: string) => void;
 }
 
 /** Finds the first mention node in the doc whose id/label matches a roster
@@ -87,10 +91,23 @@ export function PromptBar({
   // CURRENT submit closure (current `editor`/`context`/`state`).
   const submitRef = useRef<() => void>(() => {});
 
+  // Bug 3 fix: while the @mention suggestion popup is open, Enter must
+  // pick the highlighted item, not submit the prompt. `handleKeyDown`
+  // below is a single ProseMirror-level interceptor that runs for every
+  // keystroke, so it needs to know "is the popup currently open" to defer
+  // to the suggestion's own Enter/Arrow/Escape handling instead of
+  // hijacking Enter for submit. Threaded into the mention extension's
+  // onStart/onExit (mention-extension.ts) via `setMentionActive`, mirroring
+  // how `getItems` is already threaded through the factory.
+  const mentionActiveRef = useRef(false);
+
   const mentionExtension = useMemo(
     () =>
-      createMentionExtension(() =>
-        buildMentionItems(context, store, directory),
+      createMentionExtension(
+        () => buildMentionItems(context, store, directory),
+        (active) => {
+          mentionActiveRef.current = active;
+        },
       ),
     [context, store, directory],
   );
@@ -102,6 +119,12 @@ export function PromptBar({
     extensions: [StarterKit, mentionExtension],
     editorProps: {
       handleKeyDown: (_view, event) => {
+        // Bug 3 fix: the mention suggestion plugin needs first crack at
+        // Enter/Arrows/Escape while its popup is open — returning `false`
+        // here lets ProseMirror fall through to the suggestion plugin's own
+        // keydown handler (mention-extension.ts's onKeyDown) instead of
+        // this handler submitting the raw "@d" text.
+        if (mentionActiveRef.current) return false;
         const action = decideEnterAction({
           key: event.key,
           shiftKey: event.shiftKey,
@@ -139,7 +162,21 @@ export function PromptBar({
     if (!next.error) {
       editor.commands.clearContent();
       editor.commands.focus();
-      if (next.sessionId) onDispatched?.(next.sessionId);
+      if (next.sessionId) {
+        // Bug 4 fix: resolve the DIRECTORY of the project this actually
+        // dispatched to (the @-mentioned project when present and valid,
+        // else the workspace's default first project — mirrors
+        // dispatchPrompt's own fallback in dispatch.ts) so the mount site
+        // can point the transcript panel at both the right session AND the
+        // right directory, not just the session id.
+        const targetProjectName = project ?? context.roster.projects[0]?.name;
+        const targetDirectory = context.roster.projects.find(
+          (p) => p.name === targetProjectName,
+        )?.expandedPath;
+        if (targetDirectory) {
+          onDispatched?.(next.sessionId, targetDirectory);
+        }
+      }
     }
   };
 
@@ -152,7 +189,21 @@ export function PromptBar({
     };
   });
 
-  const isEmpty = editor?.isEmpty ?? true;
+  // Bug 2 fix: Tiptap editor content changes do NOT trigger React
+  // re-renders on their own — `editor?.isEmpty` read during render stays
+  // stuck at whatever it was on first mount (true), so the Send button
+  // never enabled after typing. Subscribing to the editor's `update` event
+  // and mirroring emptiness into React state makes it reactive.
+  const [isEmpty, setIsEmpty] = useState(true);
+  useEffect(() => {
+    if (!editor) return;
+    setIsEmpty(editor.isEmpty);
+    const onUpdate = () => setIsEmpty(editor.isEmpty);
+    editor.on("update", onUpdate);
+    return () => {
+      editor.off("update", onUpdate);
+    };
+  }, [editor]);
 
   return (
     <div

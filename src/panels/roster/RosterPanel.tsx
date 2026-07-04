@@ -6,7 +6,7 @@
  * (U1.3) will call to re-fetch after reconnect/status events.
  */
 import type { IDockviewPanelProps } from "dockview-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { snapshot } from "../../server/bus";
 import type { SessionStore } from "../../server/session-store";
 import type { BusContext } from "../../server/types";
@@ -61,6 +61,15 @@ function projectsNeedingAttention(
 export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
   const { context, store } = props.params;
   const [state, setState] = useState<RosterViewState>({ status: "loading" });
+  // Bug 1 fix: `store.subscribe` fires on every SSE event on a busy
+  // workspace, so `refresh` runs far more often than "the operator did
+  // something roster-relevant". Resetting to `{status: "loading"}` at the
+  // start of every one of those refreshes flickered the whole panel back
+  // to the loading placeholder and hid the rows, even though the previous
+  // snapshot was still perfectly valid. Only the FIRST load should show
+  // the loading state — every refresh after that keeps showing the last
+  // good rows until the new snapshot resolves, then swaps in place.
+  const hasLoadedRef = useRef(false);
 
   const refresh = useCallback(async () => {
     if (!context) {
@@ -70,9 +79,12 @@ export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
       });
       return;
     }
-    setState({ status: "loading" });
+    if (!hasLoadedRef.current) {
+      setState({ status: "loading" });
+    }
     try {
       const result = await snapshot({ context });
+      hasLoadedRef.current = true;
       setState(
         toRosterViewState(
           result.ok
@@ -84,10 +96,16 @@ export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
         ),
       );
     } catch (err) {
-      setState({
-        status: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      // A transient fetch error on a background refresh shouldn't blow away
+      // rows the operator was already looking at — only surface the error
+      // state on the first load. After that, log-and-keep-showing-stale is
+      // the friendlier failure mode (the next successful refresh recovers).
+      if (!hasLoadedRef.current) {
+        setState({
+          status: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }, [context, store]);
 

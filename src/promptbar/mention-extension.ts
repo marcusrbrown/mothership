@@ -49,7 +49,10 @@ function positionAboveCaret(
   }
 }
 
-export function createMentionExtension(getItems: () => MentionItem[]) {
+export function createMentionExtension(
+  getItems: () => MentionItem[],
+  setMentionActive?: (active: boolean) => void,
+) {
   const suggestion: Partial<SuggestionOptions<MentionItem>> = {
     items: ({ query }) => filterMentionItems(getItems(), query),
     render: () => {
@@ -58,6 +61,7 @@ export function createMentionExtension(getItems: () => MentionItem[]) {
 
       return {
         onStart: (props) => {
+          setMentionActive?.(true);
           component = new ReactRenderer(MentionList, {
             props: { items: props.items, command: props.command },
             editor: props.editor,
@@ -82,11 +86,13 @@ export function createMentionExtension(getItems: () => MentionItem[]) {
         onKeyDown: (props: SuggestionKeyDownProps) => {
           if (props.event.key === "Escape") {
             unmount?.();
+            setMentionActive?.(false);
             return true;
           }
           return component?.ref?.onKeyDown({ event: props.event }) ?? false;
         },
         onExit: () => {
+          setMentionActive?.(false);
           unmount?.();
           component?.destroy();
         },

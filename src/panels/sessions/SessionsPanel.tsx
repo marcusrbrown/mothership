@@ -18,10 +18,16 @@ export interface SessionsPanelParams {
   directory?: string;
   /** Fired when the operator selects a session row. Drives the transcript panel. */
   onSelectSession?: (sessionId: string) => void;
+  /** Bug 5: the sessionID currently driving the transcript panel — kept in
+   * sync by DockviewShell from BOTH onSelectSession and handleDispatched,
+   * so it reflects the active session regardless of how it was selected.
+   * Renders that row with a selected (cyan) treatment, distinct from the
+   * needs-attention (magenta) marker. */
+  activeSessionId?: string;
 }
 
 export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
-  const { store, directory, onSelectSession } = props.params;
+  const { store, directory, onSelectSession, activeSessionId } = props.params;
   const [state, setState] = useState<SessionsViewState>({
     status: "loading",
   });
@@ -63,7 +69,7 @@ export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
         overflow: "auto",
       }}
     >
-      {renderBody(state, onSelectSession)}
+      {renderBody(state, onSelectSession, activeSessionId)}
     </div>
   );
 }
@@ -71,6 +77,7 @@ export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
 function renderBody(
   state: SessionsViewState,
   onSelectSession?: (sessionId: string) => void,
+  activeSessionId?: string,
 ) {
   if (state.status === "loading") {
     return <StatusMessage tone="muted">Loading sessions…</StatusMessage>;
@@ -88,63 +95,73 @@ function renderBody(
 
   return (
     <ul style={{ listStyle: "none", margin: 0, padding: "var(--space-2)" }}>
-      {state.rows.map((row) => (
-        <li
-          key={row.id}
-          role={onSelectSession ? "button" : undefined}
-          tabIndex={onSelectSession ? 0 : undefined}
-          onClick={() => onSelectSession?.(row.id)}
-          onKeyDown={(e) => {
-            if (onSelectSession && (e.key === "Enter" || e.key === " ")) {
-              onSelectSession(row.id);
-            }
-          }}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "var(--space-2)",
-            padding: "var(--space-2)",
-            marginBottom: "var(--space-1)",
-            borderRadius: "var(--radius-sm)",
-            border: row.needsAttention
-              ? "1px solid var(--color-cta)"
-              : "1px solid var(--color-border)",
-            background: "var(--color-surface-raised)",
-            cursor: onSelectSession ? "pointer" : "default",
-          }}
-        >
-          <span
-            aria-label={row.busy ? "busy" : "idle"}
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: row.busy
-                ? "var(--color-accent)"
-                : "var(--color-text-dim)",
-              flexShrink: 0,
+      {state.rows.map((row) => {
+        const selected = row.id === activeSessionId;
+        return (
+          <li
+            key={row.id}
+            role={onSelectSession ? "button" : undefined}
+            tabIndex={onSelectSession ? 0 : undefined}
+            aria-current={selected ? "true" : undefined}
+            onClick={() => onSelectSession?.(row.id)}
+            onKeyDown={(e) => {
+              if (onSelectSession && (e.key === "Enter" || e.key === " ")) {
+                onSelectSession(row.id);
+              }
             }}
-          />
-          <span
-            style={{ fontSize: "var(--text-sm)", color: "var(--color-text)" }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "var(--space-2)",
+              padding: "var(--space-2)",
+              marginBottom: "var(--space-1)",
+              borderRadius: "var(--radius-sm)",
+              border: selected
+                ? "1px solid var(--color-accent)"
+                : row.needsAttention
+                  ? "1px solid var(--color-cta)"
+                  : "1px solid var(--color-border)",
+              background: "var(--color-surface-raised)",
+              boxShadow: selected ? "0 0 6px var(--color-accent)" : "none",
+              cursor: onSelectSession ? "pointer" : "default",
+            }}
           >
-            {row.title || row.id}
-          </span>
-          {row.needsAttention && (
             <span
-              aria-label="needs attention"
+              aria-label={row.busy ? "busy" : "idle"}
               style={{
-                marginLeft: "auto",
                 width: 8,
                 height: 8,
                 borderRadius: "50%",
-                background: "var(--color-cta)",
-                boxShadow: "0 0 6px var(--color-cta)",
+                background: row.busy
+                  ? "var(--color-accent)"
+                  : "var(--color-text-dim)",
+                flexShrink: 0,
               }}
             />
-          )}
-        </li>
-      ))}
+            <span
+              style={{
+                fontSize: "var(--text-sm)",
+                color: "var(--color-text)",
+              }}
+            >
+              {row.title || row.id}
+            </span>
+            {row.needsAttention && (
+              <span
+                aria-label="needs attention"
+                style={{
+                  marginLeft: "auto",
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: "var(--color-cta)",
+                  boxShadow: "0 0 6px var(--color-cta)",
+                }}
+              />
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }

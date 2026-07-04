@@ -396,10 +396,16 @@ export function DockviewShell({
 
   // Bug 3 wiring: sessions row click points the transcript panel at that
   // session, mirroring handleDispatched's pattern exactly.
+  // Bug 5 wiring: mark the selected session active on the sessions panel
+  // (drives the selected-row highlight) alongside pointing the transcript
+  // panel at it — one place updates both so they can never drift.
   const handleSelectSession = useCallback((sessionId: string) => {
     apiRef.current
       ?.getPanel("transcript")
       ?.api.updateParameters({ sessionID: sessionId });
+    apiRef.current
+      ?.getPanel("sessions")
+      ?.api.updateParameters({ activeSessionId: sessionId });
   }, []);
 
   const handleReady = useCallback(
@@ -474,17 +480,31 @@ export function DockviewShell({
   // "transcript" panel id already seeded by seedDefaultLayout: push the
   // dispatched sessionId into that panel's params via updateParameters, the
   // same primitive dockview-core already exposes on IDockviewPanel.api.
-  const handleDispatched = useCallback((sessionId: string) => {
-    const panel = adapterRef.current?.panels.find((p) => p.id === "transcript");
-    if (!panel) return;
-    // adapterRef targets our narrow DockviewAdapter seam, which doesn't
-    // expose per-panel param updates (out of scope to add there for one
-    // caller) — reach the dockview-core panel directly via the event.api
-    // captured in handleReady instead.
-    apiRef.current
-      ?.getPanel("transcript")
-      ?.api.updateParameters({ sessionID: sessionId });
-  }, []);
+  // Bug 4 fix: dispatchPrompt resolves the target PROJECT (the @-mention or
+  // the default), and PromptBar's onDispatched now threads that project's
+  // DIRECTORY through here alongside the sessionId. Updating ONLY
+  // sessionID (the pre-fix behavior) left the transcript panel's
+  // `directory` param pointed at whatever project was previously selected
+  // (or the workspace default), so `listMessages(directory, sessionID)`
+  // backfilled against the WRONG directory whenever the dispatch target
+  // differed — the transcript silently failed to switch until the operator
+  // clicked the target project in the roster (which updates `directory`
+  // via handleSelectProject). Updating both params together closes that
+  // gap. Also re-scopes the sessions panel to the same directory (matches
+  // handleSelectProject) so the new session is visible in that list too,
+  // and marks it as the active session (bug 5) for the selected-row
+  // highlight.
+  const handleDispatched = useCallback(
+    (sessionId: string, directory: string) => {
+      apiRef.current
+        ?.getPanel("transcript")
+        ?.api.updateParameters({ directory, sessionID: sessionId });
+      apiRef.current
+        ?.getPanel("sessions")
+        ?.api.updateParameters({ directory, activeSessionId: sessionId });
+    },
+    [],
+  );
 
   return (
     <>
