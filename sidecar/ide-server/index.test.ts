@@ -17,7 +17,10 @@ function stubBridge(ready: boolean) {
 }
 
 function stubTransport(response: Response) {
-  return { handleRequest: async () => response };
+  return async () => ({
+    handleRequest: async () => response,
+    dispose: async () => {},
+  });
 }
 
 function noopUpgrade() {

@@ -61,6 +61,22 @@ The server binds a random loopback port with a per-launch bearer token, written 
 bun run scripts/ide-mcp-config.ts   # prints the ready-to-paste MCP config
 ```
 
+For persistent wiring — so an agent's config doesn't need updating every time Mothership restarts and issues a new port/token — add a `type: local` MCP server entry that runs `scripts/ide-mcp-bridge.ts`. The bridge re-reads the rendezvous file each time it starts, opens the current streamable-HTTP connection, and proxies the `ide_*` tools over stdio:
+
+```json
+{
+  "mcp": {
+    "mothership-ide": {
+      "type": "local",
+      "command": ["bun", "run", "/path/to/mothership/scripts/ide-mcp-bridge.ts"],
+      "enabled": true
+    }
+  }
+}
+```
+
+`scripts/ide-mcp-config.ts` remains the one-shot inspector for the current launch's endpoint; the bridge is for standing configuration that survives restarts.
+
 Read tools return only panel structure and display names — never filesystem paths or credentials — and agents cannot open a terminal panel (no subprocess reach through `ide_*`).
 
 ## Architecture

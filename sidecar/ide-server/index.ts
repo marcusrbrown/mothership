@@ -25,6 +25,21 @@ interface WsData {
 }
 
 /**
+ * Factory for a fresh, single-use MCP transport (+ connected server) per
+ * `/mcp` request. `WebStandardStreamableHTTPServerTransport` in stateless
+ * mode (`sessionIdGenerator: undefined`) throws on a second `handleRequest`
+ * call ("Stateless transport cannot be reused across requests"), so every
+ * `/mcp` request gets its own transport+server pair; the shared `WsBridge`
+ * (the actual state — the WS connection to the webview) is closed over by
+ * the tool handlers registered inside `createIdeMcpServer` and is NOT
+ * recreated here.
+ */
+export type McpRequestHandlerFactory = () => Promise<{
+  handleRequest: (req: Request) => Promise<Response> | Response;
+  dispose: () => Promise<void>;
+}>;
+
+/**
  * Builds the `Bun.serve` fetch handler. Exported (undocumented, test-only
  * export) so `index.test.ts` can exercise the routing/auth-uniformity
  * contract without booting the real MCP transport or a live WS server:
@@ -34,7 +49,7 @@ interface WsData {
 export function createFetchHandler(
   token: string,
   bridge: Pick<WsBridge, "isReady">,
-  transport: { handleRequest: (req: Request) => Promise<Response> | Response },
+  makeMcpRequestHandler: McpRequestHandlerFactory,
 ) {
   return async function fetch(
     req: Request,
@@ -62,7 +77,43 @@ export function createFetchHandler(
       if (!isAuthorized(req.headers.get("authorization"), token)) {
         return unauthorizedResponse();
       }
-      return transport.handleRequest(req);
+      const { handleRequest, dispose } = await makeMcpRequestHandler();
+      let response: Response;
+      try {
+        response = await handleRequest(req);
+      } catch (err) {
+        await dispose();
+        throw err;
+      }
+      // `handleRequest` resolves as soon as the Response (often a
+      // streaming SSE body) is constructed — the JSON-RPC reply is written
+      // to that stream asynchronously afterwards. Disposing the per-request
+      // transport/server immediately here would tear down the stream mid-
+      // write. Tee the body: return one branch to the caller untouched,
+      // drain the other in the background, and dispose only once the
+      // stream has actually finished (or the response has no body at all).
+      if (!response.body) {
+        await dispose();
+        return response;
+      }
+      const [passthrough, drain] = response.body.tee();
+      void (async () => {
+        const reader = drain.getReader();
+        try {
+          let result = await reader.read();
+          while (!result.done) {
+            result = await reader.read();
+          }
+        } catch {
+          // Stream errored/aborted — still dispose below.
+        } finally {
+          await dispose();
+        }
+      })();
+      return new Response(passthrough, {
+        status: response.status,
+        headers: response.headers,
+      });
     }
 
     // Uniform empty 401 for every other unauthenticated path — no
@@ -78,17 +129,29 @@ if (!token) {
 }
 
 const bridge = createWsBridge(token);
-const mcpServer = createIdeMcpServer(bridge);
 
 // Stateless mode: no MCP session management needed for a single localhost
 // operator/token; every request round-trips through the one WS-bridged
-// webview regardless of MCP session id.
-const transport = new WebStandardStreamableHTTPServerTransport({
-  sessionIdGenerator: undefined,
-});
-await mcpServer.connect(transport);
+// webview regardless of MCP session id. The SDK's stateless transport
+// forbids reuse across requests, so a new McpServer+transport pair is
+// created per `/mcp` request; the shared `bridge` (the actual WS state) is
+// the same instance across every request.
+const makeMcpRequestHandler: McpRequestHandlerFactory = async () => {
+  const mcpServer = createIdeMcpServer(bridge);
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  await mcpServer.connect(transport);
+  return {
+    handleRequest: (req: Request) => transport.handleRequest(req),
+    dispose: async () => {
+      await transport.close();
+      await mcpServer.close();
+    },
+  };
+};
 
-const handleFetch = createFetchHandler(token, bridge, transport);
+const handleFetch = createFetchHandler(token, bridge, makeMcpRequestHandler);
 
 const server: Server = Bun.serve<WsData, Record<string, never>>({
   hostname: "127.0.0.1",
@@ -117,7 +180,6 @@ function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   server.stop();
-  void transport.close();
   process.exit(0);
 }
 
