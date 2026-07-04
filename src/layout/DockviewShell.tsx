@@ -22,7 +22,7 @@ import { PromptBar } from "../promptbar";
 import { type OpencodeClient, createOpencodeClient } from "../server/client";
 import { type Demux, createDemux } from "../server/demux";
 import { type SessionStore, createSessionStore } from "../server/session-store";
-import { type SseClient, connectSse } from "../server/sse";
+import { connectSse } from "../server/sse";
 import type { BusContext } from "../server/types";
 import type { DockviewAdapter } from "./adapter";
 import { type LayoutBridge, connectLayoutBridge } from "./bridge";
@@ -49,31 +49,27 @@ interface LiveWorkspace {
   store: SessionStore;
 }
 
-/** Runs full-state reconciliation for every project in the roster —
- * `listSessions` + `getSessionStatus` + `listQuestions` per directory, fed
- * into `store.reconcile`. Called on every SSE (re)connect. Never trusts
- * deltas across a gap (the `id:`-absent SSE contract fact). */
-async function reconcileAll(
+/** Runs full-state reconciliation for ONE project directory — `listSessions`
+ * + `getSessionStatus` + `listQuestions`, fed into `store.reconcile`. Called
+ * by each per-directory SSE connection's `onReconcile`, scoped to that
+ * connection's own directory (not every project — each stream only ever
+ * carries events for the directory it's connected to). */
+async function reconcileProject(
   client: OpencodeClient,
   store: SessionStore,
-  context: BusContext,
+  directory: string,
 ): Promise<void> {
-  await Promise.all(
-    context.roster.projects.map(async (project) => {
-      const directory = project.expandedPath;
-      const [sessionsRes, statusRes, questionsRes] = await Promise.all([
-        client.listSessions(directory),
-        client.getSessionStatus(directory),
-        client.listQuestions(directory),
-      ]);
-      store.reconcile({
-        directory,
-        sessions: sessionsRes.ok ? sessionsRes.value : [],
-        statuses: statusRes.ok ? statusRes.value : undefined,
-        questions: questionsRes.ok ? questionsRes.value : undefined,
-      });
-    }),
-  );
+  const [sessionsRes, statusRes, questionsRes] = await Promise.all([
+    client.listSessions(directory),
+    client.getSessionStatus(directory),
+    client.listQuestions(directory),
+  ]);
+  store.reconcile({
+    directory,
+    sessions: sessionsRes.ok ? sessionsRes.value : [],
+    statuses: statusRes.ok ? statusRes.value : undefined,
+    questions: questionsRes.ok ? questionsRes.value : undefined,
+  });
 }
 
 /** Constructs the pure, connection-less client/demux/store set for the
@@ -95,28 +91,66 @@ export function createLiveWorkspace(context: BusContext): LiveWorkspace {
   return { client, demux, store };
 }
 
-/** Opens the ONE workspace-wide `/event` SSE connection and wires it into
- * an already-constructed `LiveWorkspace`. This is the side-effecting half
- * of workspace setup — the caller (DockviewShell) owns it inside a
- * `useEffect` so React.StrictMode's mount→cleanup→mount correctly closes
- * AND reopens the connection (see the effect's comment for the full
- * reasoning). Every (re)connect triggers `reconcileAll`. */
+/** A composite handle over N per-directory SSE connections — the only
+ * contract the caller (DockviewShell's effect) needs is `close()`. */
+export interface WorkspaceSseHandle {
+  close(): void;
+}
+
+/** Opens ONE `/event` SSE connection PER UNIQUE project directory and wires
+ * each into the SAME shared demux + store on an already-constructed
+ * `LiveWorkspace`. This is the side-effecting half of workspace setup — the
+ * caller (DockviewShell) owns it inside a `useEffect` so React.StrictMode's
+ * mount→cleanup→mount correctly closes AND reopens every connection (see
+ * the effect's comment for the full reasoning).
+ *
+ * `/event?directory=<dir>` is SERVER-SIDE directory-scoped (a hard filter,
+ * live-verified — see
+ * docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md):
+ * a single connection scoped to one project's directory receives NONE of
+ * another project's events. A prior version of this function opened only
+ * one connection (`projects[0]`'s directory), which meant live streaming
+ * (message.part.updated/delta, session.updated) only ever worked for the
+ * first roster project — every other project's session was created but
+ * never streamed and never appeared in the sessions list. Fixed by opening
+ * one connection per unique directory (deduped — two roster entries
+ * pointing at the same directory must not double-connect), each feeding
+ * the same shared demux/store. Every (re)connect triggers `reconcileProject`
+ * for THAT connection's own directory only (not a full-roster
+ * `reconcileAll` — each stream only ever carries events for the directory
+ * it's scoped to, so reconciling anything else on its reconnect would be
+ * redundant work). */
 export function connectWorkspaceSse(
   live: LiveWorkspace,
   context: BusContext,
-): SseClient {
-  // One connection for the whole workspace: directory-scoped filtering
-  // happens per-project during reconcile, not at the SSE connection level.
-  const primaryDirectory = context.roster.projects[0]?.expandedPath ?? "";
-  return connectSse({
-    baseUrl: context.roster.server.baseUrl,
-    directory: primaryDirectory,
-    credentials: context.credentials,
-    onEvent: (event) => live.demux.dispatch(event),
-    onReconcile: () => {
-      void reconcileAll(live.client, live.store, context);
+  deps: { connect?: typeof connectSse } = {},
+): WorkspaceSseHandle {
+  const connect = deps.connect ?? connectSse;
+  const directories = [
+    ...new Set(
+      context.roster.projects
+        .map((project) => project.expandedPath)
+        .filter((directory): directory is string => Boolean(directory)),
+    ),
+  ];
+
+  const connections = directories.map((directory) =>
+    connect({
+      baseUrl: context.roster.server.baseUrl,
+      directory,
+      credentials: context.credentials,
+      onEvent: (event) => live.demux.dispatch(event),
+      onReconcile: () => {
+        void reconcileProject(live.client, live.store, directory);
+      },
+    }),
+  );
+
+  return {
+    close() {
+      for (const connection of connections) connection.close();
     },
-  });
+  };
 }
 
 /** Seeds a placeholder tab (R5, placeholder-grade — the real Storybook
