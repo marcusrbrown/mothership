@@ -38,10 +38,19 @@ struct PtyExitPayload {
     code: Option<u32>,
 }
 
-fn shell_command() -> CommandBuilder {
+fn shell_command(cwd: Option<&str>) -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(&shell);
     cmd.arg("-l"); // login shell, matches plan's "spawn $SHELL or /bin/zsh login shell"
+    // No cwd previously meant the shell inherited the Tauri process's cwd
+    // (home dir / app bundle dir when double-clicked) instead of the
+    // workspace the user launched/selected — surprising for a terminal
+    // meant to sit alongside that workspace.
+    if let Some(dir) = cwd {
+        if !dir.is_empty() {
+            cmd.cwd(dir);
+        }
+    }
     cmd
 }
 
@@ -54,6 +63,7 @@ pub fn pty_spawn(
     state: State<'_, PtyState>,
     cols: u16,
     rows: u16,
+    cwd: Option<String>,
 ) -> Result<String, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -67,7 +77,7 @@ pub fn pty_spawn(
 
     let child = pair
         .slave
-        .spawn_command(shell_command())
+        .spawn_command(shell_command(cwd.as_deref()))
         .map_err(|e| format!("spawn failed: {e}"))?;
 
     // Drop our copy of the slave once the child owns it; keeping it open
@@ -232,7 +242,7 @@ mod tests {
             })
             .expect("openpty");
 
-        let mut cmd = shell_command();
+        let mut cmd = shell_command(None);
         cmd.env("PS1", "$ ");
         let mut child = pair.slave.spawn_command(cmd).expect("spawn");
         drop(pair.slave);

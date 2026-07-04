@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles/tokens.css";
+import "./styles/global.css";
 
 // Spike harness: `bun run dev` + ?spike=<id> mounts spikes/<id>-*/index.tsx
 // in the real shell (HANDOFF Phase 0). No spike code ships in the app path.

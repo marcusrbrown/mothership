@@ -32,3 +32,10 @@ export async function homeDir(): Promise<string> {
 export function __resetHomeDirCacheForTests(): void {
   cachedHomeDir = undefined;
 }
+
+/** Resolves the workspace directory via the Rust `resolve_workspace_dir`
+ * command: `MOTHERSHIP_WORKSPACE` env var if set, else the app process's
+ * current working directory. Replaces the previous hardcoded fixture path. */
+export async function resolveWorkspaceDir(): Promise<string> {
+  return invoke<string>("resolve_workspace_dir");
+}

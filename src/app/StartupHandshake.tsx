@@ -10,12 +10,13 @@
  * chip reflects live `server://state` events (e.g. a supervised restart)
  * without tearing down the mounted workspace.
  *
- * Workspace directory source (tracer decision — see WORKSPACE_DIR below):
- * defaults to the space-bus fixture workspace path used by the U0.4 spike
- * (`spikes/0c-server-connectivity/index.tsx`'s FIXTURE_DIRECTORY), since
- * that's the only workspace with a live `opencode serve` + spacebus.json
- * verified so far. TODO(U1.9-followup): replace with real workspace
- * selection (open-directory dialog / last-used workspace).
+ * Workspace directory source: when no `workspaceDir` prop is given, resolved
+ * at runtime via the Rust `resolve_workspace_dir` command — the
+ * `MOTHERSHIP_WORKSPACE` env var if set, else the app process's current
+ * working directory (so the workspace + terminal follow wherever the app
+ * was launched from, not a baked-in fixture). TODO(U1.9-followup): replace
+ * with real workspace selection (open-directory dialog / last-used
+ * workspace).
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -26,7 +27,12 @@ import { roster } from "../server/bus";
 import type { BusContext } from "../server/types";
 import { loadWorkspace } from "../workspace/config";
 import { buildBusContext } from "../workspace/context";
-import { homeDir, pathExists, readTextFile } from "../workspace/tauri-fs";
+import {
+  homeDir,
+  pathExists,
+  readTextFile,
+  resolveWorkspaceDir,
+} from "../workspace/tauri-fs";
 import {
   type HandshakeDeps,
   type HandshakeState,
@@ -35,10 +41,6 @@ import {
   reduceLiveStatus,
   runSupervisedHandshake,
 } from "./handshake-machine";
-
-// TODO(U1.9-followup): source from real workspace selection, not a
-// hardcoded fixture path.
-export const WORKSPACE_DIR = "/Users/mrbrown/src/github.com/fro-bot/space-bus";
 
 export interface StartupHandshakeProps {
   workspaceDir?: string;
@@ -148,14 +150,20 @@ const CHIP_COLOR: Record<ServerStatus, string> = {
 };
 
 export function StartupHandshake({
-  workspaceDir = WORKSPACE_DIR,
+  workspaceDir: workspaceDirProp,
   children,
 }: StartupHandshakeProps) {
   const [state, setState] = useState<HandshakeState>({ status: "starting" });
   const [liveStatus, setLiveStatus] = useState<ServerStatus>("running");
   const connectedRef = useRef(false);
+  // Resolved lazily when no explicit prop is given (see resolveWorkspaceDir
+  // docblock above) — undefined until resolution completes, at which point
+  // `attempt` fires via the effect below.
+  const [resolvedWorkspaceDir, setResolvedWorkspaceDir] = useState<
+    string | undefined
+  >(workspaceDirProp);
 
-  const attempt = useCallback(() => {
+  const attempt = useCallback((workspaceDir: string) => {
     connectedRef.current = false;
     setState({ status: "starting" });
     void runHandshake(workspaceDir, setState).then((result) => {
@@ -164,11 +172,31 @@ export function StartupHandshake({
         setLiveStatus("running");
       }
     });
-  }, [workspaceDir]);
+  }, []);
 
   useEffect(() => {
-    attempt();
-  }, [attempt]);
+    if (workspaceDirProp) {
+      setResolvedWorkspaceDir(workspaceDirProp);
+      return;
+    }
+    let cancelled = false;
+    void resolveWorkspaceDir().then((dir) => {
+      if (!cancelled) setResolvedWorkspaceDir(dir);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceDirProp]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt is stable (no deps); retrigger only on the resolved dir changing
+  useEffect(() => {
+    if (resolvedWorkspaceDir === undefined) return;
+    attempt(resolvedWorkspaceDir);
+  }, [resolvedWorkspaceDir]);
+
+  const retry = useCallback(() => {
+    if (resolvedWorkspaceDir !== undefined) attempt(resolvedWorkspaceDir);
+  }, [attempt, resolvedWorkspaceDir]);
 
   // Live status chip: reflects server://state events (e.g. a supervised
   // restart) after the initial connect, without tearing down the mounted
@@ -289,7 +317,7 @@ export function StartupHandshake({
           </span>
           <button
             type="button"
-            onClick={attempt}
+            onClick={retry}
             style={{
               color: "var(--color-bg)",
               background: "var(--color-accent)",

@@ -26,3 +26,21 @@ pub fn path_exists(path: String) -> bool {
 pub fn home_dir() -> Result<String, String> {
     std::env::var("HOME").map_err(|_| "HOME environment variable not set".to_string())
 }
+
+/// Resolves the workspace directory the app should use: `MOTHERSHIP_WORKSPACE`
+/// if set (non-empty), else the process's current working directory. Replaces
+/// the previous hardcoded fixture path in `StartupHandshake.tsx` — the user
+/// expects the workspace (and terminal cwd) to follow wherever the app was
+/// launched from, not a baked-in space-bus fixture.
+#[tauri::command]
+pub fn resolve_workspace_dir() -> String {
+    std::env::var("MOTHERSHIP_WORKSPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(String::from))
+                .unwrap_or_default()
+        })
+}

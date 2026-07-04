@@ -14,7 +14,7 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
  * `getSessionStatus` + `listQuestions`) — deltas are never trusted across a
  * gap (see docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md).
  */
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import "./dockview-theme.css";
 import type { WorkspaceManifest } from "../detect/manifest";
 import { auditStore } from "../panels/audit-log";
@@ -186,7 +186,11 @@ function seedDefaultLayout(
       panelType: "terminal",
       referencePanelId: "sessions",
       direction: "down",
-      params: {},
+      // The workspace dir the app resolved at startup (see
+      // resolveWorkspaceDir) isn't threaded down to seedDefaultLayout — the
+      // first roster project's directory is a reasonable stand-in so the
+      // terminal opens alongside the workspace instead of in $HOME.
+      params: { cwd: firstProject?.expandedPath },
     },
     adapter,
   );
@@ -211,9 +215,32 @@ export function DockviewShell({
   manifest,
 }: DockviewShellProps) {
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
-  const liveRef = useRef<LiveWorkspace | undefined>(undefined);
   const bridgeRef = useRef<LayoutBridge | undefined>(undefined);
   const apiRef = useRef<DockviewApi | undefined>(undefined);
+
+  // Synchronous (not effect-populated) live workspace: seedDefaultLayout
+  // runs inside onReady, which can fire before a `useEffect` creating this
+  // would have run — that raced the roster/sessions/transcript/promptbar
+  // panels ahead of their store/client/demux, seeding them with undefined
+  // (the "No workspace context" bug). useMemo makes `live` available at
+  // first render, keyed on workspacePath (not context identity) to keep
+  // the one-connection-per-workspace invariant. `prevLiveRef` guards
+  // against StrictMode's double-invoke opening two SSE connections by
+  // closing whatever connection preceded this one before replacing it; the
+  // effect below owns final teardown on unmount.
+  const prevLiveRef = useRef<LiveWorkspace | undefined>(undefined);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on workspacePath (one connection per workspace), not context identity
+  const live = useMemo<LiveWorkspace | undefined>(() => {
+    if (!context) return undefined;
+    if (prevLiveRef.current) {
+      prevLiveRef.current.sse.close();
+      prevLiveRef.current = undefined;
+    }
+    const next = createLiveWorkspace(context);
+    prevLiveRef.current = next;
+    return next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspacePath]);
 
   // U1.7 (AE3): mount the ide_* MCP bridge once, torn down on unmount. Any
   // relayed request runs `executeCommand` against whatever adapter is
@@ -241,16 +268,14 @@ export function DockviewShell({
     };
   }, []);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on workspacePath (one connection per workspace), not context identity
+  // Final teardown only — creation happens synchronously in the useMemo
+  // above so it's available at first render (before onReady/seeding).
   useEffect(() => {
-    if (!context) return;
-    const live = createLiveWorkspace(context);
-    liveRef.current = live;
     return () => {
-      live.sse.close();
-      liveRef.current = undefined;
+      live?.sse.close();
+      if (prevLiveRef.current === live) prevLiveRef.current = undefined;
     };
-  }, [workspacePath]);
+  }, [live]);
 
   const handleReady = useCallback(
     (event: DockviewReadyEvent) => {
@@ -261,7 +286,7 @@ export function DockviewShell({
       if (saved) {
         executeCommand({ type: "set_layout", layout: saved }, adapter);
       } else {
-        seedDefaultLayout(adapter, context, liveRef.current, manifest);
+        seedDefaultLayout(adapter, context, live, manifest);
       }
 
       // Coarse panel-set signature (sorted ids), used to de-dupe/throttle
@@ -289,7 +314,7 @@ export function DockviewShell({
         auditStore.recordNativeLayoutChange(`panels=${panelIds.length}`);
       });
     },
-    [workspacePath, context, manifest],
+    [workspacePath, context, manifest, live],
   );
 
   // U1.6: transcript auto-select on dispatch (the U1.5 deferred item).
@@ -322,7 +347,7 @@ export function DockviewShell({
       {/* U1.6: floating prompt bar, not a dockview panel. */}
       <PromptBar
         context={context}
-        store={liveRef.current?.store}
+        store={live?.store}
         directory={context?.roster.projects[0]?.expandedPath}
         onDispatched={handleDispatched}
       />

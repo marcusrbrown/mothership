@@ -31,6 +31,7 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
     status: "spawning",
   });
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cwd is a spawn-time param captured at mount, not a live dependency — respawning on cwd change isn't the intended behavior
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -73,7 +74,7 @@ export function TerminalPanel(props: IDockviewPanelProps<TerminalPanelParams>) {
       void controller.write(data);
     });
 
-    void controller.spawn(term.cols, term.rows);
+    void controller.spawn(term.cols, term.rows, props.params.cwd);
 
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();

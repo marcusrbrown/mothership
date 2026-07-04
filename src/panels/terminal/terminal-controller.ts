@@ -12,8 +12,8 @@ export type TerminalControllerState =
 
 export interface TerminalController {
   getState(): TerminalControllerState;
-  /** Spawns (or respawns) a session at the given dimensions. */
-  spawn(cols: number, rows: number): Promise<void>;
+  /** Spawns (or respawns) a session at the given dimensions, optionally in `cwd`. */
+  spawn(cols: number, rows: number, cwd?: string): Promise<void>;
   /** Writes data to the active session; no-op if not running. */
   write(data: string): Promise<void>;
   /** Propagates a resize to the active session; no-op if not running. */
@@ -44,13 +44,17 @@ export function createTerminalController(
     unsubscribers = [];
   }
 
-  async function spawn(cols: number, rows: number): Promise<void> {
+  async function spawn(
+    cols: number,
+    rows: number,
+    cwd?: string,
+  ): Promise<void> {
     await teardownSession();
     setState({ status: "spawning" });
 
     let sessionId: string;
     try {
-      sessionId = await backend.spawn(cols, rows);
+      sessionId = await backend.spawn(cols, rows, cwd);
     } catch (err) {
       setState({
         status: "error",

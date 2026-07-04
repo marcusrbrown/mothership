@@ -16,6 +16,39 @@ import type { MentionListHandle } from "./MentionList";
 import { MentionList } from "./MentionList";
 import { type MentionItem, filterMentionItems } from "./mention-items";
 
+/**
+ * The prompt bar container is `position: fixed` at the bottom of the
+ * viewport with `zIndex: 900` (see PromptBar.tsx). Tiptap's default
+ * suggestion mount point sits inside the editor DOM near the caret, which
+ * is at the BOTTOM of that fixed bar — there's no room below it, so the
+ * popup gets clipped by the viewport edge and sits at/under the bar's
+ * stacking context. Mounting to `document.body` with an explicit
+ * `position: fixed` + high z-index and flipping the popup ABOVE the caret
+ * (rather than relying on default below-caret placement) fixes both the
+ * clipping and the stacking-order problem in one move.
+ */
+const MENTION_POPUP_Z_INDEX = 1200; // > PromptBar's fixed container (900)
+
+function positionAboveCaret(
+  element: HTMLElement,
+  clientRect: (() => DOMRect | null) | null | undefined,
+) {
+  const rect = clientRect?.();
+  element.style.position = "fixed";
+  element.style.zIndex = String(MENTION_POPUP_Z_INDEX);
+  element.style.maxHeight = "16rem";
+  element.style.overflowY = "auto";
+  if (rect) {
+    // Anchor the popup's bottom edge just above the caret's top edge, and
+    // its left edge at the caret's left edge — i.e. flip above, since the
+    // caret always lives near the bottom of the fixed prompt bar and there
+    // is no room to render below it.
+    element.style.left = `${rect.left}px`;
+    element.style.bottom = `${window.innerHeight - rect.top}px`;
+    element.style.top = "";
+  }
+}
+
 export function createMentionExtension(getItems: () => MentionItem[]) {
   const suggestion: Partial<SuggestionOptions<MentionItem>> = {
     items: ({ query }) => filterMentionItems(getItems(), query),
@@ -29,13 +62,22 @@ export function createMentionExtension(getItems: () => MentionItem[]) {
             props: { items: props.items, command: props.command },
             editor: props.editor,
           });
-          unmount = props.mount(component.element);
+          // Mount to document.body (not props.mount, which attaches inside
+          // the editor DOM / prompt bar's stacking context) so the popup
+          // escapes the prompt bar's z-index and can be positioned above it.
+          document.body.appendChild(component.element);
+          positionAboveCaret(component.element, props.clientRect);
+          unmount = () => {
+            component?.element.remove();
+          };
         },
         onUpdate: (props) => {
           component?.updateProps({
             items: props.items,
             command: props.command,
           });
+          if (component)
+            positionAboveCaret(component.element, props.clientRect);
         },
         onKeyDown: (props: SuggestionKeyDownProps) => {
           if (props.event.key === "Escape") {

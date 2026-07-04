@@ -7,8 +7,8 @@ import { listen } from "@tauri-apps/api/event";
 import type { Terminal, TerminalExitInfo } from "./terminal-interface";
 
 export const tauriTerminal: Terminal = {
-  async spawn(cols, rows) {
-    return invoke<string>("pty_spawn", { cols, rows });
+  async spawn(cols, rows, cwd) {
+    return invoke<string>("pty_spawn", { cols, rows, cwd });
   },
   async write(sessionId, data) {
     await invoke("pty_write", { ptyId: sessionId, data });

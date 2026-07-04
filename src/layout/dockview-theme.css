@@ -6,6 +6,13 @@
 @import "dockview-react/dist/styles/dockview.css";
 
 .mothership-dockview {
+  /* DockviewReact renders a div with this className but sets no intrinsic
+   * size — without an explicit height/width it collapses to content size
+   * inside its flex parent, which is how the shell ended up boxed in the
+   * top-left. Fill the parent (the flex:1/minHeight:0 wrapper in App.tsx). */
+  position: relative;
+  height: 100%;
+  width: 100%;
   --dv-background-color: var(--color-bg);
   --dv-group-view-background-color: var(--color-surface);
   --dv-tabs-and-actions-container-font-size: var(--text-sm);

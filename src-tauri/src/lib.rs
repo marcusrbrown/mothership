@@ -33,6 +33,7 @@ pub fn run() {
             workspace_fs::read_text_file,
             workspace_fs::path_exists,
             workspace_fs::home_dir,
+            workspace_fs::resolve_workspace_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

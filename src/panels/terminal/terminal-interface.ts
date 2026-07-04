@@ -9,8 +9,9 @@ export interface TerminalExitInfo {
 }
 
 export interface Terminal {
-  /** Spawns the backing process/PTY and returns an opaque session id. */
-  spawn(cols: number, rows: number): Promise<string>;
+  /** Spawns the backing process/PTY and returns an opaque session id.
+   * `cwd`, when given, is the working directory the shell should start in. */
+  spawn(cols: number, rows: number, cwd?: string): Promise<string>;
   /** Writes raw bytes/text to the session's stdin. */
   write(sessionId: string, data: string): Promise<void>;
   /** Propagates a terminal resize (rows/cols) to the backing process. */

@@ -22,7 +22,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
  * whatever label it was given at insertion time); it never blocks dispatch.
  */
 import StarterKit from "@tiptap/starter-kit";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SessionStore } from "../server/session-store";
 import type { BusContext } from "../server/types";
 import { initialPromptBarState, submitPrompt } from "./controller";
@@ -54,6 +54,14 @@ export function PromptBar({
 
   const disabled = state.sending || !context;
 
+  // `useEditor`'s `editorProps.handleKeyDown` is created once at editor init
+  // (when `editor` is still null), so it must never call `handleSubmit`
+  // directly — that would capture a stale closure where `editor` is always
+  // null and every submit is silently swallowed. Route through a ref that
+  // is updated on every render so the keydown handler always invokes the
+  // CURRENT submit closure (current `editor`/`context`/`state`).
+  const submitRef = useRef<() => void>(() => {});
+
   const mentionExtension = useMemo(
     () =>
       createMentionExtension(() =>
@@ -63,7 +71,10 @@ export function PromptBar({
   );
 
   const editor = useEditor({
-    extensions: [StarterKit.configure({ hardBreak: false }), mentionExtension],
+    // StarterKit's hardBreak node is required for Shift+Enter to insert a
+    // newline; disabling it (as the previous code did) left Shift+Enter
+    // with nothing to insert, so it fell through to the stale submit path.
+    extensions: [StarterKit, mentionExtension],
     editorProps: {
       handleKeyDown: (_view, event) => {
         const action = decideEnterAction({
@@ -75,7 +86,7 @@ export function PromptBar({
         });
         if (action === "submit") {
           event.preventDefault();
-          void handleSubmit();
+          submitRef.current();
           return true;
         }
         if (action === "newline") {
@@ -96,9 +107,19 @@ export function PromptBar({
     setState(next);
     if (!next.error) {
       editor.commands.clearContent();
+      editor.commands.focus();
       if (next.sessionId) onDispatched?.(next.sessionId);
     }
   };
+
+  // Keep the ref pointing at the latest closure every render — this is what
+  // makes the editorProps.handleKeyDown (created once, at init) call live
+  // code instead of the first-render closure it was created with.
+  useEffect(() => {
+    submitRef.current = () => {
+      void handleSubmit();
+    };
+  });
 
   const isEmpty = editor?.isEmpty ?? true;
 

@@ -67,7 +67,7 @@ describe("terminal-controller", () => {
 
     const state = controller.getState();
     expect(state.status).toBe("running");
-    expect(stub.backend.spawn).toHaveBeenCalledWith(80, 24);
+    expect(stub.backend.spawn).toHaveBeenCalledWith(80, 24, undefined);
     if (state.status === "running") {
       expect(state.sessionId).toBe("session-0");
     }
