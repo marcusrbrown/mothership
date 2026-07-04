@@ -49,6 +49,42 @@ jobs:
           fi
           echo "No UI anti-patterns detected."
 
+  verify:
+    name: ${{ matrix.check }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [typecheck, lint, test]
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: 📦 Install dependencies
+        run: |
+          if [ ! -f package.json ]; then
+            echo "No package.json yet — verify gate armed, nothing to run."
+            exit 0
+          fi
+          bun install --frozen-lockfile
+
+      - name: ✅ ${{ matrix.check }}
+        run: |
+          if [ ! -f package.json ]; then
+            exit 0
+          fi
+          bun run ${{ matrix.check }}
+
   check-workflows:
     name: Check Workflows
     permissions:
