@@ -33,7 +33,12 @@ function projectsNeedingAttention(
   store: SessionStore | undefined,
   projects: { name: string; path: string }[],
 ): ReadonlySet<string> {
-  if (!store) return new Set();
+  // `typeof store.getPendingQuestions !== "function"` guards against a
+  // dead-but-truthy store restored from stale pre-fix localStorage
+  // (JSON.stringify reduces a live SessionStore instance to `{}`).
+  if (!store || typeof store.getPendingQuestions !== "function") {
+    return new Set();
+  }
   const pendingSessionIds = new Set(
     store.getPendingQuestions().map((q) => q.sessionID),
   );
@@ -88,7 +93,7 @@ export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
 
   useEffect(() => {
     void refresh();
-    if (!store) return;
+    if (!store || typeof store.subscribe !== "function") return;
     return store.subscribe(() => void refresh());
   }, [refresh, store]);
 

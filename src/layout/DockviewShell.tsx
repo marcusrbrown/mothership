@@ -148,6 +148,57 @@ function seedDetectedPanels(
   }
 }
 
+/** Live-service inputs shared by seedDefaultLayout and the restore path —
+ * kept as one bag so `liveParamsForPanel` has a single source of truth for
+ * "which live objects/callbacks does panel type X need". */
+interface LiveParamContext {
+  context?: BusContext;
+  live?: LiveWorkspace;
+  directory?: string;
+  callbacks: {
+    onSelectProject: (name: string) => void;
+    onSelectSession: (sessionId: string) => void;
+  };
+}
+
+/** Maps a panel type to the live params it needs, given the current
+ * workspace's live services. This is the ONE place that knows which panel
+ * type needs which live object — seeding a fresh layout and re-injecting
+ * live services into a restored (persisted) layout both call this, so they
+ * can never drift apart. Unknown/no-live-service panel types (terminal's
+ * `cwd` is plain data; audit-log/placeholder need nothing) return `{}`. */
+function liveParamsForPanel(
+  panelType: string,
+  ctx: LiveParamContext,
+): Record<string, unknown> {
+  switch (panelType) {
+    case "roster":
+      return {
+        context: ctx.context,
+        store: ctx.live?.store,
+        onSelectProject: ctx.callbacks.onSelectProject,
+      };
+    case "sessions":
+      return {
+        store: ctx.live?.store,
+        directory: ctx.directory,
+        onSelectSession: ctx.callbacks.onSelectSession,
+      };
+    case "transcript":
+      // sessionID comes from selection/dispatch, not the seed/restore path.
+      return {
+        client: ctx.live?.client,
+        demux: ctx.live?.demux,
+        directory: ctx.directory,
+      };
+    case "terminal":
+      // cwd is plain data — already persisted, may be empty here.
+      return {};
+    default:
+      return {};
+  }
+}
+
 function seedDefaultLayout(
   adapter: DockviewAdapter,
   context: BusContext | undefined,
@@ -157,13 +208,19 @@ function seedDefaultLayout(
   onSelectSession: (sessionId: string) => void,
 ): void {
   const firstProject = context?.roster.projects[0];
+  const liveCtx: LiveParamContext = {
+    context,
+    live,
+    directory: firstProject?.expandedPath,
+    callbacks: { onSelectProject, onSelectSession },
+  };
 
   executeCommand(
     {
       type: "open_panel",
       panelId: "roster",
       panelType: "roster",
-      params: { context, store: live?.store, onSelectProject },
+      params: liveParamsForPanel("roster", liveCtx),
     },
     adapter,
   );
@@ -174,11 +231,7 @@ function seedDefaultLayout(
       panelType: "sessions",
       referencePanelId: "roster",
       direction: "right",
-      params: {
-        store: live?.store,
-        directory: firstProject?.expandedPath,
-        onSelectSession,
-      },
+      params: liveParamsForPanel("sessions", liveCtx),
     },
     adapter,
   );
@@ -189,11 +242,7 @@ function seedDefaultLayout(
       panelType: "transcript",
       referencePanelId: "sessions",
       direction: "right",
-      params: {
-        client: live?.client,
-        demux: live?.demux,
-        directory: firstProject?.expandedPath,
-      },
+      params: liveParamsForPanel("transcript", liveCtx),
     },
     adapter,
   );
@@ -225,6 +274,29 @@ function seedDefaultLayout(
   );
 
   seedDetectedPanels(adapter, manifest);
+}
+
+/** Re-injects live services into panels restored from a persisted layout.
+ * `saveLayout` strips live/sensitive params (see persistence.ts), so a
+ * `set_layout`-restored panel mounts with no client/demux/store/context —
+ * dockview mounts panels SYNCHRONOUSLY during `set_layout`, before this can
+ * run, so there's a brief window where e.g. TranscriptPanel sees no `demux`
+ * (or, for pre-fix stale localStorage, a dead `{}`). TranscriptPanel's
+ * `typeof demux.subscribe === "function"` guard covers that window; this
+ * then triggers a re-render via `updateParameters`, merging live services
+ * in WITHOUT clobbering the persisted plain-data params (directory,
+ * sessionID, cwd) already present on the panel. */
+function reinjectLiveParams(api: DockviewApi, liveCtx: LiveParamContext): void {
+  for (const panel of api.panels) {
+    // seedDefaultLayout keys the well-known live-service panels by a fixed
+    // id (roster/sessions/transcript/terminal) — that id doubles as the
+    // panel-type signal here, matching liveParamsForPanel's switch. Any
+    // other panel (placeholders, detected-interface tabs) has no live
+    // services to re-inject.
+    const liveParams = liveParamsForPanel(panel.id, liveCtx);
+    if (Object.keys(liveParams).length === 0) continue;
+    panel.api.updateParameters({ ...panel.params, ...liveParams });
+  }
 }
 
 export function DockviewShell({
@@ -338,6 +410,19 @@ export function DockviewShell({
       const saved = loadLayout(workspacePath);
       if (saved) {
         executeCommand({ type: "set_layout", layout: saved }, adapter);
+        // Restored panels have no live services (stripped on save, see
+        // persistence.ts) — re-inject them now. dockview already mounted
+        // the panels synchronously above; TranscriptPanel's demux guard
+        // covers the gap between mount and this re-injection.
+        reinjectLiveParams(event.api, {
+          context,
+          live,
+          directory: context?.roster.projects[0]?.expandedPath,
+          callbacks: {
+            onSelectProject: handleSelectProject,
+            onSelectSession: handleSelectSession,
+          },
+        });
       } else {
         seedDefaultLayout(
           adapter,

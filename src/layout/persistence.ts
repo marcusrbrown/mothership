@@ -38,11 +38,67 @@ function storageKey(workspacePath: string): string {
   return `${KEY_PREFIX}${workspacePath}`;
 }
 
+/**
+ * Keys whose values are live service objects, callbacks, or secrets — never
+ * safe to persist. `JSON.stringify` silently drops functions and reduces
+ * class instances (e.g. `Demux`) to `{}`, so persisting these would seed the
+ * next launch with dead-but-truthy stand-ins (a crash, not a clean
+ * "missing" state) — and `context` additionally carries the managed-server
+ * credentials (a secret-at-rest leak into localStorage). Plain-data keys
+ * (`directory`, `sessionID`, `cwd`, `panelType`, `label`, ...) are NOT
+ * denylisted — those should round-trip so reopening a workspace returns to
+ * the same session/directory.
+ */
+const LIVE_PARAM_DENYLIST = new Set([
+  "client",
+  "demux",
+  "store",
+  "context",
+  "onSelectProject",
+  "onSelectSession",
+  "onDispatched",
+]);
+
+interface SanitizablePanel {
+  params?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** Deep-removes denylisted live/sensitive param keys from every panel
+ * before persisting. Returns a sanitized copy — the caller's in-memory
+ * layout (with its live objects) is never mutated. */
+function sanitizeLayoutForPersistence(
+  layout: SerializedLayout,
+): SerializedLayout {
+  const panels = (layout as { panels?: Record<string, SanitizablePanel> })
+    .panels;
+  if (!panels || typeof panels !== "object") return layout;
+
+  const nextPanels: Record<string, SanitizablePanel> = {};
+  for (const [id, panel] of Object.entries(panels)) {
+    if (!panel.params || typeof panel.params !== "object") {
+      nextPanels[id] = panel;
+      continue;
+    }
+    const nextParams: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(panel.params)) {
+      if (LIVE_PARAM_DENYLIST.has(key)) continue;
+      nextParams[key] = value;
+    }
+    nextPanels[id] = { ...panel, params: nextParams };
+  }
+
+  return { ...layout, panels: nextPanels };
+}
+
 export function saveLayout(
   workspacePath: string,
   layout: SerializedLayout,
 ): void {
-  storage.setItem(storageKey(workspacePath), JSON.stringify(layout));
+  storage.setItem(
+    storageKey(workspacePath),
+    JSON.stringify(sanitizeLayoutForPersistence(layout)),
+  );
 }
 
 /**

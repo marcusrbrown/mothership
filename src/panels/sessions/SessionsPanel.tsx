@@ -27,7 +27,10 @@ export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
   });
 
   const refresh = useCallback(() => {
-    if (!store || !directory) {
+    // `typeof store.getSessions !== "function"` guards against a
+    // dead-but-truthy store restored from stale pre-fix localStorage
+    // (JSON.stringify reduces a live SessionStore instance to `{}`).
+    if (!store || !directory || typeof store.getSessions !== "function") {
       setState({
         status: "error",
         message: "No workspace context or project selected.",
@@ -43,7 +46,7 @@ export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
 
   useEffect(() => {
     refresh();
-    if (!store) return;
+    if (!store || typeof store.subscribe !== "function") return;
     return store.subscribe(refresh);
   }, [refresh, store]);
 

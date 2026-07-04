@@ -62,6 +62,82 @@ describe("saveLayout / loadLayout", () => {
   });
 });
 
+describe("saveLayout — strips live/sensitive params", () => {
+  test("persists plain-data params but not live service objects or callbacks", () => {
+    const onSelectProject = () => {};
+    const layout = {
+      panels: {
+        transcript: {
+          id: "transcript",
+          panelType: "transcript",
+          params: {
+            directory: "/repo",
+            sessionID: "sess-1",
+            client: { listMessages: () => {} },
+            demux: { subscribe: () => {} },
+            store: { getSessions: () => [] },
+            context: { credentials: { password: "secret" } },
+            onSelectProject,
+          },
+        },
+      },
+      groups: {},
+    };
+
+    saveLayout("/workspace/a", layout);
+    const loaded = loadLayout("/workspace/a") as {
+      panels: Record<string, { params?: Record<string, unknown> }>;
+    };
+
+    const params = loaded.panels.transcript?.params;
+    expect(params?.directory).toBe("/repo");
+    expect(params?.sessionID).toBe("sess-1");
+    expect(params).not.toHaveProperty("client");
+    expect(params).not.toHaveProperty("demux");
+    expect(params).not.toHaveProperty("store");
+    expect(params).not.toHaveProperty("context");
+    expect(params).not.toHaveProperty("onSelectProject");
+  });
+
+  test("round-trip yields no live keys, and a panel with only a live demux loads with the key absent (not {})", () => {
+    const layout = {
+      panels: {
+        transcript: {
+          id: "transcript",
+          panelType: "transcript",
+          params: { demux: { subscribe: () => {} } },
+        },
+      },
+      groups: {},
+    };
+
+    saveLayout("/workspace/a", layout);
+    const loaded = loadLayout("/workspace/a") as {
+      panels: Record<string, { params?: Record<string, unknown> }>;
+    };
+
+    expect(loaded.panels.transcript?.params).not.toHaveProperty("demux");
+  });
+
+  test("does not mutate the in-memory layout passed to saveLayout", () => {
+    const demux = { subscribe: () => {} };
+    const layout = {
+      panels: {
+        transcript: {
+          id: "transcript",
+          panelType: "transcript",
+          params: { demux },
+        },
+      },
+      groups: {},
+    };
+
+    saveLayout("/workspace/a", layout);
+
+    expect(layout.panels.transcript.params.demux).toBe(demux);
+  });
+});
+
 describe("loadLayout — unregistered panel type substitution", () => {
   test("rewrites an unregistered panel type to 'placeholder', hydration continues", () => {
     const layout = {

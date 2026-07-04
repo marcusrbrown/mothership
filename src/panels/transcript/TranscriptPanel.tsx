@@ -64,7 +64,13 @@ export function TranscriptPanel(
   }, [backfill]);
 
   useEffect(() => {
-    if (!demux || !sessionID) return;
+    // `typeof demux.subscribe !== "function"` (not just `!demux`) is
+    // required to survive stale pre-fix localStorage: JSON.stringify
+    // reduced a persisted `Demux` instance to `{}`, which is truthy but has
+    // no methods. Without this guard a restored session crashes the whole
+    // window on `demux.subscribe is not a function` before the live
+    // re-injection (DockviewShell's reinjectLiveParams) can run.
+    if (!demux || typeof demux.subscribe !== "function" || !sessionID) return;
     const unsubscribe = demux.subscribe(sessionID, (event: SseEvent) => {
       const props = (event.properties ?? {}) as Record<string, unknown>;
 
