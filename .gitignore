@@ -5,3 +5,12 @@ target/
 .DS_Store
 .context/
 .cortexkit/
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Build artifacts
+dist-ssr/
+*.local

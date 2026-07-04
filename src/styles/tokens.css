@@ -1,0 +1,122 @@
+/**
+ * Mothership design tokens — derived from design/systematic.theme.json (Systematic / Fro Bot).
+ * Single source of truth for all component styling: no ad-hoc hex anywhere else.
+ * Imported as src/styles/tokens.css in Phase 1. Dark is the default; light overrides below.
+ */
+
+:root,
+[data-theme='dark'] {
+  /* Surfaces */
+  --color-bg: #0b0b1a;
+  --color-bg-mid: #121b33;
+  --color-surface: #16162d;
+  --color-surface-raised: #1a1a2e;
+  --color-element: #2d2d52;
+
+  /* Text */
+  --color-text: #ffffff;
+  --color-text-secondary: #81e6d9;
+  --color-text-muted: #8aa0c2;
+  --color-text-dim: #55637c;
+
+  /* Accents — cyan = action, magenta = emphasis, orange = highlight */
+  --color-accent: #4fd1c5;
+  --color-accent-light: #81e6d9;
+  --color-cta: #e91e8c;
+  --color-highlight: #f5a623;
+
+  /* Status */
+  --color-success: #63e2a0;
+  --color-warning: #f5a623;
+  --color-error: #ff9595;
+  --color-info: var(--color-accent);
+
+  /* Borders */
+  --color-border: #2d2d52;
+  --color-border-active: #4fd1c5;
+  --color-border-subtle: #1a1a2e;
+
+  /* Diffs (session diffs, CM6 merge) */
+  --color-diff-added: #63e2a0;
+  --color-diff-added-bg: #1b3923;
+  --color-diff-removed: #ff9595;
+  --color-diff-removed-bg: #3d1b1b;
+  --color-diff-context: #8aa0c2;
+  --color-diff-hunk: #55637c;
+  --color-diff-line-number: #55637c;
+
+  /* Identity gradient — banner moments only, never chrome */
+  --gradient-identity: linear-gradient(90deg, #4fd1c5 0%, #e91e8c 50%, #f5a623 100%);
+}
+
+[data-theme='light'] {
+  --color-bg: #f7fafc;
+  --color-bg-mid: #f7fafc;
+  --color-surface: #edf2f7;
+  --color-surface-raised: #edf2f7;
+  --color-element: #e2e8f0;
+
+  --color-text: #1a202c;
+  --color-text-secondary: #2d3748;
+  --color-text-muted: #718096;
+  --color-text-dim: #718096;
+
+  --color-accent: #3ba89e;
+  --color-accent-light: #3ba89e;
+  --color-cta: #c41875;
+  --color-highlight: #d4901f;
+
+  --color-success: #38a169;
+  --color-warning: #d4901f;
+  --color-error: #e53e3e;
+  --color-info: var(--color-accent);
+
+  --color-border: #cbd5e0;
+  --color-border-active: #3ba89e;
+  --color-border-subtle: #e2e8f0;
+
+  --color-diff-added: #38a169;
+  --color-diff-added-bg: #c6f6d5;
+  --color-diff-removed: #e53e3e;
+  --color-diff-removed-bg: #fed7d7;
+  --color-diff-context: #718096;
+  --color-diff-hunk: #718096;
+  --color-diff-line-number: #718096;
+}
+
+:root {
+  /* Spacing — 4px base */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Type scale */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+
+  /* Motion — fast, purposeful; spring is the one sanctioned playful easing */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 250ms;
+  --ease-default: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}
