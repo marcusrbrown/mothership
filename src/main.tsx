@@ -6,6 +6,16 @@ import "./styles/tokens.css";
 // Spike harness: `bun run dev` + ?spike=<id> mounts spikes/<id>-*/index.tsx
 // in the real shell (HANDOFF Phase 0). No spike code ships in the app path.
 const spikeId = new URLSearchParams(window.location.search).get("spike");
+
+// Tauri ships no reload accelerator; dev-only Cmd+R so spike hopping
+// doesn't require quit/relaunch.
+if (import.meta.env.DEV) {
+  window.addEventListener("keydown", (e) => {
+    if (e.metaKey && e.key === "r") window.location.reload();
+    // Cmd+Shift+H: back to the launcher from any spike.
+    if (e.metaKey && e.shiftKey && e.key === "h") window.location.href = "/";
+  });
+}
 const spikes = import.meta.glob<{ default: React.ComponentType }>(
   "../spikes/*/index.tsx",
 );
