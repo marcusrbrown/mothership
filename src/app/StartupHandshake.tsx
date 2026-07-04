@@ -1,43 +1,57 @@
 /**
  * Startup handshake screen (Flow Analysis item 5 / U1.2's handshake
- * requirement): loads the workspace, builds a BusContext, and probes the
- * server with a cheap `roster()` call before mounting the real shell.
- * States: connecting (cyan pulse, connecting-only glow per DESIGN.md) →
- * connected (renders children) or failed (with retry, orange highlight).
+ * requirement, extended by U1.9 for server supervision): ensures
+ * `opencode serve` is running (adopted or spawned via the Rust
+ * server_supervisor), loads the workspace, builds a BusContext, and probes
+ * the server with a cheap `roster()` call before mounting the real shell.
+ * States: starting (spawning opencode serve…) → connecting (cyan pulse,
+ * connecting-only glow per DESIGN.md) → connected (renders children) or
+ * failed (with retry, orange highlight). After connecting, a small status
+ * chip reflects live `server://state` events (e.g. a supervised restart)
+ * without tearing down the mounted workspace.
  *
  * Workspace directory source (tracer decision — see WORKSPACE_DIR below):
  * defaults to the space-bus fixture workspace path used by the U0.4 spike
  * (`spikes/0c-server-connectivity/index.tsx`'s FIXTURE_DIRECTORY), since
  * that's the only workspace with a live `opencode serve` + spacebus.json
- * verified so far. TODO(U1.9): replace with real workspace selection
- * (open-directory dialog / last-used workspace) once server supervision
- * lands and the app can target arbitrary directories.
+ * verified so far. TODO(U1.9-followup): replace with real workspace
+ * selection (open-directory dialog / last-used workspace).
  */
-import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { roster } from "../server/bus";
 import type { BusContext } from "../server/types";
 import { loadWorkspace } from "../workspace/config";
 import { buildBusContext } from "../workspace/context";
 import { homeDir, pathExists, readTextFile } from "../workspace/tauri-fs";
+import {
+  type HandshakeDeps,
+  type HandshakeState,
+  type ServerStateWire,
+  type ServerStatus,
+  reduceLiveStatus,
+  runSupervisedHandshake,
+} from "./handshake-machine";
 
-// TODO(U1.9): source from real workspace selection, not a hardcoded fixture path.
+// TODO(U1.9-followup): source from real workspace selection, not a
+// hardcoded fixture path.
 export const WORKSPACE_DIR = "/Users/mrbrown/src/github.com/fro-bot/space-bus";
-
-export type HandshakeState =
-  | { status: "connecting" }
-  | { status: "connected"; context: BusContext; workspacePath: string }
-  | { status: "failed"; message: string };
 
 export interface StartupHandshakeProps {
   workspaceDir?: string;
   children: (context: BusContext, workspacePath: string) => React.ReactNode;
 }
 
-/** Runs the workspace-load → bus-context → server-probe sequence. Exported
- * so tests can drive it without mounting React. */
-export async function runHandshake(
+/** Existing workspace-load → bus-context → server-probe sequence, run once
+ * `ensure_server` reports the server is running. Exported so tests can
+ * drive it without mounting React. Unchanged in behavior from pre-U1.9. */
+export async function connectServer(
   workspaceDir: string,
-): Promise<HandshakeState> {
+): Promise<
+  | { status: "connected"; context: BusContext; workspacePath: string }
+  | { status: "failed"; message: string }
+> {
   try {
     const home = await homeDir().catch(() => undefined);
     const workspace = await loadWorkspace(workspaceDir, {
@@ -81,23 +95,109 @@ export async function runHandshake(
   }
 }
 
+async function ensureServer(dir?: string): Promise<ServerStateWire> {
+  return invoke<ServerStateWire>("ensure_server", { dir });
+}
+
+const deps: HandshakeDeps = { ensureServer, connectServer };
+
+/** Runs the full supervised handshake (ensure_server → connectServer).
+ * Exported so tests can drive it without mounting React. */
+export async function runHandshake(
+  workspaceDir: string,
+  onUpdate?: (state: HandshakeState) => void,
+): Promise<HandshakeState> {
+  return runSupervisedHandshake(workspaceDir, deps, onUpdate);
+}
+
+const CHIP_LABEL: Record<ServerStatus, string> = {
+  starting: "starting",
+  running: "connected",
+  restarting: "restarting…",
+  failed: "server failed",
+};
+
+const CHIP_COLOR: Record<ServerStatus, string> = {
+  starting: "var(--color-accent)",
+  running: "var(--color-success)",
+  restarting: "var(--color-warning)",
+  failed: "var(--color-error)",
+};
+
 export function StartupHandshake({
   workspaceDir = WORKSPACE_DIR,
   children,
 }: StartupHandshakeProps) {
-  const [state, setState] = useState<HandshakeState>({ status: "connecting" });
+  const [state, setState] = useState<HandshakeState>({ status: "starting" });
+  const [liveStatus, setLiveStatus] = useState<ServerStatus>("running");
+  const connectedRef = useRef(false);
 
   const attempt = useCallback(() => {
-    setState({ status: "connecting" });
-    void runHandshake(workspaceDir).then(setState);
+    connectedRef.current = false;
+    setState({ status: "starting" });
+    void runHandshake(workspaceDir, setState).then((result) => {
+      if (result.status === "connected") {
+        connectedRef.current = true;
+        setLiveStatus("running");
+      }
+    });
   }, [workspaceDir]);
 
   useEffect(() => {
     attempt();
   }, [attempt]);
 
+  // Live status chip: reflects server://state events (e.g. a supervised
+  // restart) after the initial connect, without tearing down the mounted
+  // workspace. Failures here surface as a chip, not a re-render of the
+  // full failed screen — the mounted shell keeps whatever it already has.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<ServerStateWire>("server://state", (event) => {
+      if (!connectedRef.current) return;
+      setLiveStatus((prev) => reduceLiveStatus(prev, event.payload));
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
   if (state.status === "connected") {
-    return <>{children(state.context, state.workspacePath)}</>;
+    return (
+      <>
+        {liveStatus !== "running" && (
+          <div
+            style={{
+              position: "fixed",
+              top: "var(--space-2)",
+              right: "var(--space-2)",
+              zIndex: 1000,
+              display: "flex",
+              alignItems: "center",
+              gap: "var(--space-2)",
+              padding: "var(--space-1) var(--space-3)",
+              borderRadius: "var(--radius-sm)",
+              background: "var(--color-surface-raised)",
+              border: `1px solid ${CHIP_COLOR[liveStatus]}`,
+              color: CHIP_COLOR[liveStatus],
+              fontSize: "var(--text-xs)",
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: CHIP_COLOR[liveStatus],
+                boxShadow: `0 0 6px ${CHIP_COLOR[liveStatus]}`,
+              }}
+            />
+            opencode server: {CHIP_LABEL[liveStatus]}
+          </div>
+        )}
+        {children(state.context as BusContext, state.workspacePath)}
+      </>
+    );
   }
 
   return (
@@ -115,7 +215,7 @@ export function StartupHandshake({
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      {state.status === "connecting" && (
+      {(state.status === "starting" || state.status === "connecting") && (
         <>
           <div
             style={{
@@ -133,7 +233,9 @@ export function StartupHandshake({
               fontSize: "var(--text-sm)",
             }}
           >
-            Connecting to workspace…
+            {state.status === "starting"
+              ? "Starting opencode server…"
+              : "Connecting to workspace…"}
           </span>
         </>
       )}

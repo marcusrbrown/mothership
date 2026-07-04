@@ -21,8 +21,18 @@ mock.module("@tauri-apps/api/core", () => ({
     if (cmd === "read_text_file") throw new Error("ENOENT");
     if (cmd === "path_exists") return true;
     if (cmd === "home_dir") return "/Users/marcus";
+    if (cmd === "ensure_server") return { status: "running", adopted: true };
     throw new Error(`unexpected invoke: ${cmd}`);
   },
+}));
+
+// StartupHandshake also subscribes to `server://state` (post-connect live
+// status chip) — not exercised here (that's runHandshake's ensure_server →
+// connectServer path only), but `listen` must resolve so `import` doesn't
+// throw if a caller happens to render the component. runHandshake itself
+// (the function under test) never calls `listen`.
+mock.module("@tauri-apps/api/event", () => ({
+  listen: async () => () => {},
 }));
 
 const originalFetch = globalThis.fetch;
@@ -59,7 +69,9 @@ describe("runHandshake", () => {
     expect(state.status).toBe("connected");
     if (state.status !== "connected") throw new Error("expected connected");
     expect(state.workspacePath).toBe("/tmp/mothership-handshake-test-ok");
-    expect(state.context.roster.projects).toHaveLength(1);
+    expect(
+      (state.context as { roster: { projects: unknown[] } }).roster.projects,
+    ).toHaveLength(1);
   });
 
   test("server fails -> failed state with a message", async () => {
