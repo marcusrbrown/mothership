@@ -80,11 +80,12 @@ Mitigated by full reconciliation on every reconnect (`listSessions` +
 `getSessionStatus` + `listQuestions`) — correctness holds, but the resume
 optimization the plan assumed does not exist.
 
-### Authenticated SSE unsupported
-The tracer targets an unauthenticated loopback server. If `OPENCODE_SERVER_PASSWORD`
-is set, the native `EventSource` cannot send it (no header support); the handshake
-fails loud rather than silently degrading. A fetch-based SSE parser is the
-documented upgrade path, not built.
+### Authenticated SSE — NOW IMPLEMENTED (was deferred)
+Superseded by space-bus v0.6.0 managed mode, which requires Basic auth. `connectSse`
+is now a fetch + `ReadableStream` reader that sends `Authorization: Basic` from the
+resolved credentials (native `EventSource` can't set headers). Live-verified against
+the managed daemon: authed REST 200 → authed SSE streamed `server.connected`. The
+credentials-from-env → auth path is real, not deferred.
 
 ### dockview popout cut
 `window.open`-based popout is blocked under Tauri WKWebView (spike 0a). Popout is
@@ -104,9 +105,18 @@ silently replaces first (strands pending), restart-cap bypassable via the
 webview reconnect loop, app-crash orphans the loopback sidecar. Proportional
 for a localhost single-operator tracer; none block AE3.
 
-### Workspace directory hardcoded
-The opened workspace is hardcoded to the space-bus fixture path with a `TODO` —
-real workspace selection (directory picker) is a follow-up, not a tracer gate.
+### Workspace directory hardcoded — RESOLVED
+Workspace dir now resolves from `MOTHERSHIP_WORKSPACE` env → else the launch cwd
+(Rust `resolve_workspace_dir`). A directory picker is still a future nicety, but the
+hardcoded fixture path is gone.
+
+### space-bus managed server mode (v0.6.0)
+The workspace roster migrated to `server.managed` (space-bus spawns/supervises
+`harness serve`, 0600 discovery handshake, Basic auth). Mothership attaches to the
+running managed daemon by reading the discovery file in Rust (no server spawn for
+managed rosters — space-bus owns that lifecycle); U1.9's spawn/adopt path now runs
+only for externally-managed (`baseUrl`) and virtual rosters. See
+`architecture`/`config_values` memory and the commit for the discovery mechanism.
 
 ## Live-verification still owed at the window gate (U1.8)
 
