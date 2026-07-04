@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "bun --bun run tauri dev",
     "build": "bun --bun run tauri build",
+    "ui:dev": "vite",
+    "ui:build": "tsc --noEmit && vite build",
+    "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint": "biome check .",
