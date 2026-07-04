@@ -24,6 +24,17 @@ export type BuildBusContextOptions = {
   pathExists?: (path: string) => Promise<boolean>;
 };
 
+/** The resolved server target for a workspace: a concrete loopback
+ * `baseUrl` plus optional `credentials` when the server requires auth
+ * (managed rosters, discovered via `resolveManagedServer`). Callers resolve
+ * this BEFORE calling `buildBusContext` — `workspace.config.server` may be
+ * `managed` (no baseUrl at all), so the manifest alone is no longer enough
+ * to derive the roster's server block. */
+export type ResolvedServer = {
+  baseUrl: string;
+  credentials?: Credentials;
+};
+
 async function defaultPathExists(_path: string): Promise<boolean> {
   return true;
 }
@@ -57,7 +68,7 @@ async function toRosterProject(
  */
 export async function buildBusContext(
   workspace: WorkspaceResult,
-  credentials?: Credentials,
+  resolved: ResolvedServer,
   options: BuildBusContextOptions = {},
 ): Promise<BusContext> {
   const pathExists = options.pathExists ?? defaultPathExists;
@@ -72,10 +83,10 @@ export async function buildBusContext(
     const project = await toRosterProject(workspace.project, pathExists);
     const raw = {
       roster: {
-        server: { baseUrl: "http://127.0.0.1:4096" },
+        server: { baseUrl: resolved.baseUrl },
         projects: [project],
       },
-      credentials,
+      credentials: resolved.credentials,
     };
     return busContextSchema.parse(raw);
   }
@@ -85,10 +96,10 @@ export async function buildBusContext(
   );
   const raw = {
     roster: {
-      server: { baseUrl: workspace.config.server.baseUrl },
+      server: { baseUrl: resolved.baseUrl },
       projects,
     },
-    credentials,
+    credentials: resolved.credentials,
   };
   return busContextSchema.parse(raw);
 }

@@ -1,11 +1,16 @@
 /**
- * Native `EventSource` wrapper for `GET /event?directory=<dir>`.
+ * Fetch-based SSE reader for `GET /event?directory=<dir>`.
  *
- * `EventSource` can't set headers, so `directory` goes in the query string
- * (matching the server SDK's own GET rewrite — see client.ts). Every frame
- * is zod-parsed through `sseEventSchema`; malformed frames are skipped and
- * logged, never kill the stream (open-union SSE posture from Key Technical
- * Decisions).
+ * v0.6.0 MANAGED servers require Basic auth, and native `EventSource`
+ * cannot set an `Authorization` header — so this hand-rolls SSE parsing on
+ * top of `fetch`'s streaming `response.body`, letting us send credentials.
+ * `directory` still goes in the query string (matching the server SDK's
+ * own GET rewrite — see client.ts); auth (when present) goes in a Basic
+ * `Authorization` header.
+ *
+ * Every frame is zod-parsed through `sseEventSchema`; malformed frames are
+ * skipped and logged, never kill the stream (open-union SSE posture from
+ * Key Technical Decisions).
  *
  * Per the live-verified contract
  * (docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md):
@@ -20,6 +25,11 @@ import { type SseEvent, sseEventSchema } from "./types";
 
 export type SseConnectionState = "connecting" | "open" | "reconnecting";
 
+export interface SseCredentials {
+  username?: string;
+  password?: string;
+}
+
 export interface SseClientOptions {
   baseUrl: string;
   directory: string;
@@ -29,8 +39,12 @@ export interface SseClientOptions {
    * a full-state reconciliation here. */
   onReconcile: () => void;
   onStateChange?: (state: SseConnectionState) => void;
-  /** Injectable EventSource constructor, defaults to the global. Used for tests. */
-  EventSourceImpl?: typeof EventSource;
+  /** Basic auth credentials for the managed server. When `password` is
+   * absent, no `Authorization` header is sent (unauthenticated
+   * externally-managed / virtual servers keep working unchanged). */
+  credentials?: SseCredentials;
+  /** Injectable fetch, defaults to the global. Used for tests. */
+  fetchImpl?: typeof fetch;
   /** Initial backoff in ms before the first reconnect attempt. Defaults to 1000. */
   initialBackoffMs?: number;
   /** Backoff cap in ms. Defaults to 10000. */
@@ -42,10 +56,27 @@ export interface SseClient {
   close(): void;
 }
 
+function toBase64(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function authHeader(
+  credentials: SseCredentials | undefined,
+): Record<string, string> {
+  if (!credentials?.password) return {};
+  const username = credentials.username ?? "opencode";
+  return {
+    Authorization: `Basic ${toBase64(`${username}:${credentials.password}`)}`,
+  };
+}
+
 /**
- * Connects to `/event`. Reconnects on error/close with capped exponential
- * backoff. Never throws — parse failures and connection errors are logged
- * (console.warn) and handled internally.
+ * Connects to `/event` via a streamed `fetch`. Reconnects on stream
+ * end/error with capped exponential backoff. Never throws — parse failures
+ * and connection errors are logged (console.warn) and handled internally.
  */
 export function connectSse(options: SseClientOptions): SseClient {
   const {
@@ -54,16 +85,17 @@ export function connectSse(options: SseClientOptions): SseClient {
     onEvent,
     onReconcile,
     onStateChange,
-    EventSourceImpl = globalThis.EventSource,
+    credentials,
+    fetchImpl = globalThis.fetch,
     initialBackoffMs = 1000,
     maxBackoffMs = 10_000,
   } = options;
 
   let state: SseConnectionState = "connecting";
-  let source: EventSource | undefined;
   let closed = false;
   let backoffMs = initialBackoffMs;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let abortController: AbortController | undefined;
 
   function setState(next: SseConnectionState) {
     state = next;
@@ -80,14 +112,14 @@ export function connectSse(options: SseClientOptions): SseClient {
     setState("reconnecting");
     reconnectTimer = setTimeout(() => {
       backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
-      open();
+      void open();
     }, backoffMs);
   }
 
-  function handleMessage(raw: unknown) {
+  function handleMessage(raw: string) {
     let data: unknown;
     try {
-      data = typeof raw === "string" ? JSON.parse(raw) : raw;
+      data = JSON.parse(raw);
     } catch (e) {
       console.warn("[sse] failed to JSON-parse frame", e);
       return;
@@ -103,38 +135,87 @@ export function connectSse(options: SseClientOptions): SseClient {
     onEvent(parsed.data);
   }
 
-  function open() {
+  /** Splits an SSE stream buffer into `data:` payloads. Frames are
+   * separated by a blank line (`\n\n`); within a frame, lines other than
+   * `data:` (e.g. `event:`, `id:` — absent on this server's wire, but kept
+   * generic) are ignored, and multiple `data:` lines are joined per the
+   * SSE spec. */
+  function extractFrames(buffer: string): { frames: string[]; rest: string } {
+    const parts = buffer.split("\n\n");
+    const rest = parts.pop() ?? "";
+    const frames: string[] = [];
+    for (const part of parts) {
+      const dataLines = part
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice("data:".length).trimStart());
+      if (dataLines.length > 0) frames.push(dataLines.join("\n"));
+    }
+    return { frames, rest };
+  }
+
+  async function open() {
     if (closed) return;
-    if (!EventSourceImpl) {
-      console.warn("[sse] no EventSource implementation available");
+    if (!fetchImpl) {
+      console.warn("[sse] no fetch implementation available");
       return;
     }
     setState(state === "connecting" ? "connecting" : "reconnecting");
-    const es = new EventSourceImpl(url());
-    source = es;
 
-    es.onopen = () => {
+    abortController = new AbortController();
+    const signal = abortController.signal;
+
+    let response: Response;
+    try {
+      response = await fetchImpl(url(), {
+        headers: { ...authHeader(credentials), Accept: "text/event-stream" },
+        signal,
+      });
+    } catch (e) {
       if (closed) return;
-      backoffMs = initialBackoffMs;
-      setState("open");
-      // Every (re)connect — first connect included — triggers full
-      // reconciliation. The `id:`-absent gap means deltas across any gap
-      // (including this one) can never be trusted.
-      onReconcile();
-    };
-
-    es.onmessage = (evt: MessageEvent) => {
-      handleMessage(evt.data);
-    };
-
-    es.onerror = () => {
-      if (closed) return;
-      es.close();
+      console.warn("[sse] connection failed", e);
       scheduleReconnect();
-    };
+      return;
+    }
+
+    if (closed) return;
+
+    if (!response.ok || !response.body) {
+      console.warn(`[sse] unexpected response status ${response.status}`);
+      scheduleReconnect();
+      return;
+    }
+
+    backoffMs = initialBackoffMs;
+    setState("open");
+    // Every (re)connect — first connect included — triggers full
+    // reconciliation. The `id:`-absent gap means deltas across any gap
+    // (including this one) can never be trusted.
+    onReconcile();
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const { frames, rest } = extractFrames(buffer);
+        buffer = rest;
+        for (const frame of frames) handleMessage(frame);
+      }
+    } catch (e) {
+      if (closed) return;
+      console.warn("[sse] stream read failed", e);
+    }
+
+    if (closed) return;
+    scheduleReconnect();
   }
 
-  open();
+  void open();
 
   return {
     get state() {
@@ -143,7 +224,7 @@ export function connectSse(options: SseClientOptions): SseClient {
     close() {
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      source?.close();
+      abortController?.abort();
       setState("reconnecting");
     },
   };

@@ -82,7 +82,11 @@ describe("workspace wiring via tauri-fs seams", () => {
     const workspace = await loadWorkspace("/workspace", { readTextFile });
     expect(workspace.kind).toBe("workspace");
 
-    const context = await buildBusContext(workspace, undefined, { pathExists });
+    const context = await buildBusContext(
+      workspace,
+      { baseUrl: "http://127.0.0.1:4096" },
+      { pathExists },
+    );
     expect(context.roster.projects[0]).toMatchObject({
       name: "proj-a",
       exists: false,

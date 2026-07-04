@@ -85,6 +85,7 @@ async function reconcileAll(
 export function createLiveWorkspace(context: BusContext): LiveWorkspace {
   const client = createOpencodeClient({
     baseUrl: context.roster.server.baseUrl,
+    credentials: context.credentials,
   });
   const demux = createDemux();
   const store = createSessionStore();
@@ -110,6 +111,7 @@ export function connectWorkspaceSse(
   return connectSse({
     baseUrl: context.roster.server.baseUrl,
     directory: primaryDirectory,
+    credentials: context.credentials,
     onEvent: (event) => live.demux.dispatch(event),
     onReconcile: () => {
       void reconcileAll(live.client, live.store, context);

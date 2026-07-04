@@ -5,7 +5,7 @@
     "": {
       "name": "mothership",
       "dependencies": {
-        "@fro.bot/space-bus": "0.5.0",
+        "@fro.bot/space-bus": "0.6.0",
         "@modelcontextprotocol/sdk": "1.29.0",
         "@tauri-apps/api": "^2",
         "@tauri-apps/plugin-opener": "^2",
@@ -153,7 +153,7 @@
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.11", "", {}, "sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg=="],
 
-    "@fro.bot/space-bus": ["@fro.bot/space-bus@0.5.0", "", { "dependencies": { "@modelcontextprotocol/sdk": "1.29.0", "zod": "^4.4.3" }, "peerDependencies": { "@opencode-ai/plugin": ">=1.17.13 <2" }, "bin": { "space-bus-mcp": "dist/mcp.js" } }, "sha512-RjZqR17loxRUEo5Xb8Lyt5Tq+HdQSY84FkufsLNt6UbDNWFfsqBlAuXPK1h+NJLujuq2RhLBUmaOwngB6aqx2A=="],
+    "@fro.bot/space-bus": ["@fro.bot/space-bus@0.6.0", "", { "dependencies": { "@modelcontextprotocol/sdk": "1.29.0", "zod": "^4.4.3" }, "peerDependencies": { "@opencode-ai/plugin": ">=1.17.13 <2" }, "bin": { "space-bus-mcp": "dist/mcp.js", "space-bus": "dist/cli.js" } }, "sha512-lYs1vl86udPRnyFYD+9fikB4rK25K8UyGzpwX5ALlE6BrykxZ3TNlwiUSPbOalMY5sOlvhG2faD7SE9lPMXI/Q=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
 

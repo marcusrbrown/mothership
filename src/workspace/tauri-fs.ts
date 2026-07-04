@@ -39,3 +39,21 @@ export function __resetHomeDirCacheForTests(): void {
 export async function resolveWorkspaceDir(): Promise<string> {
   return invoke<string>("resolve_workspace_dir");
 }
+
+export type ManagedServer = {
+  baseUrl: string;
+  username: string;
+  password: string;
+};
+
+/** Resolves a space-bus v0.6.0 MANAGED server's discovery info (baseUrl +
+ * credentials) for the roster at `<rosterDir>/spacebus.json`, via the Rust
+ * `resolve_managed_server` command. Mothership never spawns the managed
+ * daemon itself — it only attaches to the already-running server this
+ * discovers. Throws (rejects) with the Rust command's actionable error
+ * message when the daemon isn't running or the roster is missing. */
+export async function resolveManagedServer(
+  rosterDir: string,
+): Promise<ManagedServer> {
+  return invoke<ManagedServer>("resolve_managed_server", { rosterDir });
+}

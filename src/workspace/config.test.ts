@@ -124,6 +124,53 @@ describe("loadWorkspace", () => {
     }
   });
 
+  test("managed-only server (no baseUrl) -> valid workspace", async () => {
+    const manifest = {
+      server: { managed: { command: ["harness", "serve"] } },
+      projects: [],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("workspace");
+    if (result.kind !== "workspace") throw new Error("expected workspace");
+    expect(result.config.server.managed).toEqual({
+      command: ["harness", "serve"],
+    });
+  });
+
+  test("both baseUrl and managed present -> error kind", async () => {
+    const manifest = {
+      server: {
+        baseUrl: "http://127.0.0.1:4096",
+        managed: { command: ["harness", "serve"] },
+      },
+      projects: [],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).toContain("exactly one of baseUrl or managed");
+  });
+
+  test("neither baseUrl nor managed present -> error kind", async () => {
+    const manifest = { server: {}, projects: [] };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).toContain("exactly one of baseUrl or managed");
+  });
+
   test('default reader throws "not wired" when none injected', async () => {
     // No file at this path with the default reader, so loadWorkspace treats the throw
     // as "missing file" and falls back to a virtual workspace — verifying the default

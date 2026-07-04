@@ -26,11 +26,12 @@ import type { WorkspaceManifest } from "../detect/manifest";
 import { roster } from "../server/bus";
 import type { BusContext } from "../server/types";
 import { loadWorkspace } from "../workspace/config";
-import { buildBusContext } from "../workspace/context";
+import { type ResolvedServer, buildBusContext } from "../workspace/context";
 import {
   homeDir,
   pathExists,
   readTextFile,
+  resolveManagedServer,
   resolveWorkspaceDir,
 } from "../workspace/tauri-fs";
 import {
@@ -54,6 +55,66 @@ export interface StartupHandshakeProps {
 /** Existing workspace-load → bus-context → server-probe sequence, run once
  * `ensure_server` reports the server is running. Exported so tests can
  * drive it without mounting React. Unchanged in behavior from pre-U1.9. */
+/** Resolves the concrete server target (baseUrl + optional credentials) for
+ * a loaded workspace: `managed` rosters attach via space-bus discovery
+ * (never spawning anything themselves), `baseUrl` rosters use the
+ * externally-managed URL directly, and `virtual` workspaces (no
+ * spacebus.json) fall back to the U1.9 default loopback port. */
+async function resolveServerTarget(
+  workspace: Extract<
+    Awaited<ReturnType<typeof loadWorkspace>>,
+    { kind: "workspace" | "virtual" }
+  >,
+  workspaceDir: string,
+): Promise<
+  { ok: true; resolved: ResolvedServer } | { ok: false; message: string }
+> {
+  if (workspace.kind === "virtual") {
+    return { ok: true, resolved: { baseUrl: "http://127.0.0.1:4096" } };
+  }
+  const { server } = workspace.config;
+  if (server.managed) {
+    try {
+      const { baseUrl, username, password } =
+        await resolveManagedServer(workspaceDir);
+      return {
+        ok: true,
+        resolved: { baseUrl, credentials: { username, password } },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+  // Schema guarantees exactly one of baseUrl/managed is set.
+  return { ok: true, resolved: { baseUrl: server.baseUrl as string } };
+}
+
+/** Returns true when the workspace's spacebus.json declares a `managed`
+ * server — used to skip U1.9's `ensure_server` spawn/adopt entirely for
+ * managed rosters, since space-bus (not mothership) owns that daemon's
+ * lifecycle. Any load failure (including "no spacebus.json") is treated as
+ * not-managed, deferring to the existing external/virtual flow. */
+export async function isManagedWorkspace(
+  workspaceDir: string,
+): Promise<boolean> {
+  try {
+    const home = await homeDir().catch(() => undefined);
+    const workspace = await loadWorkspace(workspaceDir, {
+      readTextFile,
+      homeDir: home,
+    });
+    return (
+      workspace.kind === "workspace" &&
+      workspace.config.server.managed !== undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function connectServer(workspaceDir: string): Promise<
   | {
       status: "connected";
@@ -74,7 +135,14 @@ export async function connectServer(workspaceDir: string): Promise<
       return { status: "failed", message: workspace.message };
     }
 
-    const context = await buildBusContext(workspace, undefined, { pathExists });
+    const target = await resolveServerTarget(workspace, workspaceDir);
+    if (!target.ok) {
+      return { status: "failed", message: target.message };
+    }
+
+    const context = await buildBusContext(workspace, target.resolved, {
+      pathExists,
+    });
 
     const probe = await roster({ context });
     if (!probe.ok) {
@@ -124,7 +192,11 @@ async function ensureServer(dir?: string): Promise<ServerStateWire> {
   return invoke<ServerStateWire>("ensure_server", { dir });
 }
 
-const deps: HandshakeDeps = { ensureServer, connectServer };
+const deps: HandshakeDeps = {
+  ensureServer,
+  connectServer,
+  isManaged: isManagedWorkspace,
+};
 
 /** Runs the full supervised handshake (ensure_server → connectServer).
  * Exported so tests can drive it without mounting React. */

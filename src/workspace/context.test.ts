@@ -23,7 +23,11 @@ describe("buildBusContext", () => {
     };
     const pathExists = async (path: string) =>
       path === "/Users/marcus/src/proj-a";
-    const ctx = await buildBusContext(workspace, undefined, { pathExists });
+    const ctx = await buildBusContext(
+      workspace,
+      { baseUrl: "http://127.0.0.1:4096" },
+      { pathExists },
+    );
     expect(ctx.roster.server.baseUrl).toBe("http://127.0.0.1:4096");
     expect(ctx.roster.projects).toHaveLength(1);
     expect(ctx.roster.projects[0]).toMatchObject({
@@ -43,9 +47,11 @@ describe("buildBusContext", () => {
         expandedPath: "/opened/dir",
       },
     };
-    const ctx = await buildBusContext(workspace, undefined, {
-      pathExists: async () => true,
-    });
+    const ctx = await buildBusContext(
+      workspace,
+      { baseUrl: "http://127.0.0.1:4096" },
+      { pathExists: async () => true },
+    );
     expect(ctx.roster.projects).toHaveLength(1);
     expect(ctx.roster.projects[0]).toMatchObject({
       name: "opened-dir",
@@ -78,9 +84,11 @@ describe("buildBusContext", () => {
         },
       ],
     };
-    const ctx = await buildBusContext(workspace, undefined, {
-      pathExists: async (p) => p === "/a",
-    });
+    const ctx = await buildBusContext(
+      workspace,
+      { baseUrl: "http://127.0.0.1:4096" },
+      { pathExists: async (p) => p === "/a" },
+    );
     const byName = Object.fromEntries(
       ctx.roster.projects.map((p) => [p.name, p.exists]),
     );
@@ -100,7 +108,11 @@ describe("buildBusContext", () => {
       projects: [],
     };
     await expect(
-      buildBusContext(workspace, undefined, { pathExists: async () => true }),
+      buildBusContext(
+        workspace,
+        { baseUrl: "not-a-url" },
+        { pathExists: async () => true },
+      ),
     ).rejects.toThrow();
   });
 
@@ -109,8 +121,8 @@ describe("buildBusContext", () => {
       kind: "error",
       message: "spacebus.json is not valid JSON",
     };
-    await expect(buildBusContext(workspace)).rejects.toThrow(
-      /cannot build bus context/,
-    );
+    await expect(
+      buildBusContext(workspace, { baseUrl: "http://127.0.0.1:4096" }),
+    ).rejects.toThrow(/cannot build bus context/);
   });
 });

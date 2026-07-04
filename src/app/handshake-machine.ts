@@ -40,6 +40,13 @@ export interface HandshakeDeps {
       }
     | { status: "failed"; message: string }
   >;
+  /** Reports whether `workspaceDir`'s spacebus.json declares a `managed`
+   * server. When true, `ensureServer` (U1.9 spawn/adopt) is skipped
+   * entirely — space-bus, not mothership, owns that daemon's lifecycle;
+   * mothership only attaches via discovery inside `connectServer`.
+   * Optional so existing callers/tests that never see managed rosters are
+   * unaffected (defaults to "not managed"). */
+  isManaged?: (dir: string) => Promise<boolean>;
 }
 
 /**
@@ -61,25 +68,31 @@ export async function runSupervisedHandshake(
   onUpdate?: (state: HandshakeState) => void,
 ): Promise<HandshakeState> {
   onUpdate?.({ status: "starting" });
-  let wire: ServerStateWire;
-  try {
-    wire = await deps.ensureServer(workspaceDir);
-  } catch (err) {
-    const failed: HandshakeState = {
-      status: "failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-    onUpdate?.(failed);
-    return failed;
-  }
 
-  if (wire.status !== "running") {
-    const failed: HandshakeState = {
-      status: "failed",
-      message: wire.reason ?? "opencode serve failed to start",
-    };
-    onUpdate?.(failed);
-    return failed;
+  const managed =
+    (await deps.isManaged?.(workspaceDir).catch(() => false)) ?? false;
+
+  if (!managed) {
+    let wire: ServerStateWire;
+    try {
+      wire = await deps.ensureServer(workspaceDir);
+    } catch (err) {
+      const failed: HandshakeState = {
+        status: "failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+      onUpdate?.(failed);
+      return failed;
+    }
+
+    if (wire.status !== "running") {
+      const failed: HandshakeState = {
+        status: "failed",
+        message: wire.reason ?? "opencode serve failed to start",
+      };
+      onUpdate?.(failed);
+      return failed;
+    }
   }
 
   onUpdate?.({ status: "connecting" });

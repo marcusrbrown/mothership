@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod ide_sidecar;
+mod managed_discovery;
 mod pty;
 mod server_supervisor;
 mod workspace_fs;
@@ -34,6 +35,7 @@ pub fn run() {
             workspace_fs::path_exists,
             workspace_fs::home_dir,
             workspace_fs::resolve_workspace_dir,
+            managed_discovery::resolve_managed_server,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
