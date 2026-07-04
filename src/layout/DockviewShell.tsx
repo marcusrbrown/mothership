@@ -22,6 +22,7 @@ import { type SessionStore, createSessionStore } from "../server/session-store";
 import { type SseClient, connectSse } from "../server/sse";
 import type { BusContext } from "../server/types";
 import type { DockviewAdapter } from "./adapter";
+import { type LayoutBridge, connectLayoutBridge } from "./bridge";
 import { createDockviewAdapter } from "./dockview-adapter";
 import { executeCommand } from "./executor";
 import { loadLayout, saveLayout } from "./persistence";
@@ -156,10 +157,10 @@ function seedDefaultLayout(
     {
       type: "split",
       panelId: "audit-log",
-      panelType: "placeholder",
+      panelType: "audit-log",
       referencePanelId: "transcript",
       direction: "down",
-      params: { panelType: "audit-log" },
+      params: {},
     },
     adapter,
   );
@@ -168,6 +169,33 @@ function seedDefaultLayout(
 export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
   const liveRef = useRef<LiveWorkspace | undefined>(undefined);
+  const bridgeRef = useRef<LayoutBridge | undefined>(undefined);
+
+  // U1.7 (AE3): mount the ide_* MCP bridge once, torn down on unmount. Any
+  // relayed request runs `executeCommand` against whatever adapter is
+  // current at call time (adapterRef survives across onReady re-invocation).
+  useEffect(() => {
+    const bridge = connectLayoutBridge({
+      get panels() {
+        return adapterRef.current?.panels ?? [];
+      },
+      get activePanel() {
+        return adapterRef.current?.activePanel;
+      },
+      addPanel: (spec) => adapterRef.current?.addPanel(spec),
+      removePanel: (id) => adapterRef.current?.removePanel(id),
+      movePanel: (spec) => adapterRef.current?.movePanel(spec),
+      focus: (id) => adapterRef.current?.focus(id),
+      toJSON: () => adapterRef.current?.toJSON() ?? {},
+      fromJSON: (layout) => adapterRef.current?.fromJSON(layout),
+      hasPanel: (id) => adapterRef.current?.hasPanel(id) ?? false,
+    });
+    bridgeRef.current = bridge;
+    return () => {
+      bridge.close();
+      bridgeRef.current = undefined;
+    };
+  }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on workspacePath (one connection per workspace), not context identity
   useEffect(() => {

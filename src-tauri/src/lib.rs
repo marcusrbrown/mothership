@@ -1,8 +1,10 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod ide_sidecar;
 mod pty;
 mod server_supervisor;
 mod workspace_fs;
 
+use ide_sidecar::IdeSidecar;
 use pty::PtyState;
 use server_supervisor::ServerSupervisor;
 use tauri::Manager;
@@ -18,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(PtyState::default())
         .manage(ServerSupervisor::default())
+        .manage(IdeSidecar::default())
         .invoke_handler(tauri::generate_handler![
             greet,
             pty::pty_spawn,
@@ -26,6 +29,7 @@ pub fn run() {
             pty::pty_kill,
             server_supervisor::ensure_server,
             server_supervisor::server_state,
+            ide_sidecar::ide_bridge_info,
             workspace_fs::read_text_file,
             workspace_fs::path_exists,
             workspace_fs::home_dir,
@@ -40,6 +44,8 @@ pub fn run() {
                 pty::kill_all(&state);
                 let server_state = app_handle.state::<ServerSupervisor>();
                 server_supervisor::shutdown(&server_state);
+                let ide_state = app_handle.state::<IdeSidecar>();
+                ide_sidecar::shutdown(&ide_state);
             }
         });
 }

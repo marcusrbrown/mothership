@@ -4,6 +4,7 @@
  * sessions, transcript, terminal, ...) register themselves here as they land
  * in later units.
  */
+import { AuditLogPanel } from "../panels/audit-log";
 import { PlaceholderPanel } from "../panels/placeholder";
 import { RosterPanel } from "../panels/roster";
 import { SessionsPanel } from "../panels/sessions";
@@ -34,4 +35,9 @@ registerPanelType("sessions", {
 registerPanelType("transcript", {
   component: TranscriptPanel,
   title: "Transcript",
+});
+
+registerPanelType("audit-log", {
+  component: AuditLogPanel,
+  title: "Audit Log",
 });
