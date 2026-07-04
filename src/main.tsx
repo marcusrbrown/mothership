@@ -11,7 +11,10 @@ const spikeId = new URLSearchParams(window.location.search).get("spike");
 // doesn't require quit/relaunch.
 if (import.meta.env.DEV) {
   window.addEventListener("keydown", (e) => {
-    if (e.metaKey && e.key === "r") window.location.reload();
+    // assign(href) instead of reload(): WKWebView reload drops the query
+    // string (returns to the launcher instead of the active spike).
+    if (e.metaKey && e.key === "r")
+      window.location.assign(window.location.href);
     // Cmd+Shift+H: back to the launcher from any spike.
     if (e.metaKey && e.shiftKey && e.key === "h") window.location.href = "/";
   });

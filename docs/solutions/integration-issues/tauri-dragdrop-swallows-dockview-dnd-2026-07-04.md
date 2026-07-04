@@ -90,12 +90,16 @@ Interactive run (macOS WKWebView, Tauri v2, 1440×900, opencode
 v1.17.13+harness.ee55e157 on `127.0.0.1:4096`):
 
 - Memory: ~42MB WebContent baseline → ~420MB settled after scenarios (380–450MB
-  hover). Partial stress coverage (drag was broken); refresh numbers on re-run.
-- No crashes, no frozen frames at any point.
-- `src=`-iframe reload-on-reparent vs `srcdoc` continuity: not yet observed
-  (no reparent occurred with drag broken) — pending re-run.
-- STOP-gate status: **pending drag re-verification** after the
-  `dragDropEnabled` fix; no evidence of platform-level instability so far.
+  hover), no unbounded growth.
+- No crashes, no frozen frames across either run.
+- Re-run after the `dragDropEnabled` fix: **drag/dock works**. Caveat worth
+  keeping: edge drag-splits are finicky — occasionally a tab group had to be
+  split before a drag-split would register; dragging tabs onto/around the tab
+  strip is reliable and positions on any side. Treat tab-strip drops as the
+  dependable gesture; edge-split hit zones as best-effort (dockview hit-zone
+  sizing, not a platform issue).
+- STOP-gate status: **CLEARED** — the single-webview dockview bet holds on
+  WKWebView. Popout remains cut (window.open blocked).
 
 dockview 7.0.2 API notes (vs 6.x expectations): `dockview` npm package is now
 core-only (`export * from 'dockview-core'`); React bindings live in the
