@@ -1,4 +1,5 @@
 import "./layout/bootstrap";
+import { StartupHandshake } from "./app/StartupHandshake";
 import { DockviewShell } from "./layout";
 
 const spikes = import.meta.env.DEV
@@ -8,9 +9,6 @@ const spikes = import.meta.env.DEV
       { id: "0c", label: "0c — server connectivity" },
     ]
   : [];
-
-// TODO(U1.2): replace with the real handshake screen + workspace path from spacebus.json discovery.
-const WORKSPACE_PATH = "dev";
 
 function App() {
   return (
@@ -65,7 +63,11 @@ function App() {
         </header>
       )}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <DockviewShell workspacePath={WORKSPACE_PATH} />
+        <StartupHandshake>
+          {(context, workspacePath) => (
+            <DockviewShell workspacePath={workspacePath} context={context} />
+          )}
+        </StartupHandshake>
       </div>
     </div>
   );

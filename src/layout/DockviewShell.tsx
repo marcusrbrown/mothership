@@ -8,6 +8,7 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
  */
 import { useCallback, useRef } from "react";
 import "./dockview-theme.css";
+import type { BusContext } from "../server/types";
 import type { DockviewAdapter } from "./adapter";
 import { createDockviewAdapter } from "./dockview-adapter";
 import { executeCommand } from "./executor";
@@ -17,15 +18,23 @@ import { panelComponents } from "./registry";
 export interface DockviewShellProps {
   /** Absolute workspace path — the persistence key. */
   workspacePath: string;
+  /** Live BusContext for the roster/sessions panels; absent → those panels
+   * render their own config-missing error state (no crash). */
+  context?: BusContext;
 }
 
-function seedDefaultLayout(adapter: DockviewAdapter): void {
+function seedDefaultLayout(
+  adapter: DockviewAdapter,
+  context: BusContext | undefined,
+): void {
+  const firstProjectName = context?.roster.projects[0]?.name;
+
   executeCommand(
     {
       type: "open_panel",
       panelId: "roster",
-      panelType: "placeholder",
-      params: { panelType: "roster" },
+      panelType: "roster",
+      params: { context, onSelectProject: undefined },
     },
     adapter,
   );
@@ -33,10 +42,10 @@ function seedDefaultLayout(adapter: DockviewAdapter): void {
     {
       type: "split",
       panelId: "sessions",
-      panelType: "placeholder",
+      panelType: "sessions",
       referencePanelId: "roster",
       direction: "right",
-      params: { panelType: "sessions" },
+      params: { context, projectName: firstProjectName },
     },
     adapter,
   );
@@ -75,7 +84,7 @@ function seedDefaultLayout(adapter: DockviewAdapter): void {
   );
 }
 
-export function DockviewShell({ workspacePath }: DockviewShellProps) {
+export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
 
   const handleReady = useCallback(
@@ -87,14 +96,14 @@ export function DockviewShell({ workspacePath }: DockviewShellProps) {
       if (saved) {
         executeCommand({ type: "set_layout", layout: saved }, adapter);
       } else {
-        seedDefaultLayout(adapter);
+        seedDefaultLayout(adapter, context);
       }
 
       event.api.onDidLayoutChange(() => {
         saveLayout(workspacePath, adapter.toJSON());
       });
     },
-    [workspacePath],
+    [workspacePath, context],
   );
 
   return (

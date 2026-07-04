@@ -5,6 +5,8 @@
  * in later units.
  */
 import { PlaceholderPanel } from "../panels/placeholder";
+import { RosterPanel } from "../panels/roster";
+import { SessionsPanel } from "../panels/sessions";
 import { TerminalPanel } from "../panels/terminal";
 import { registerPanelType } from "./registry";
 
@@ -16,4 +18,14 @@ registerPanelType("placeholder", {
 registerPanelType("terminal", {
   component: TerminalPanel,
   title: "Terminal",
+});
+
+registerPanelType("roster", {
+  component: RosterPanel,
+  title: "Roster",
+});
+
+registerPanelType("sessions", {
+  component: SessionsPanel,
+  title: "Sessions",
 });

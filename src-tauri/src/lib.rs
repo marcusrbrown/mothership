@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod pty;
+mod workspace_fs;
 
 use pty::PtyState;
 use tauri::Manager;
@@ -20,6 +21,9 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            workspace_fs::read_text_file,
+            workspace_fs::path_exists,
+            workspace_fs::home_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
