@@ -2,16 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { createDemux } from "../server/demux";
 import { createSessionStore } from "../server/session-store";
 import type { BusContext, SseEvent } from "../server/types";
-import { connectWorkspaceSse } from "./DockviewShell";
+import { connectActiveDirectorySse } from "./DockviewShell";
 
 /**
- * Regression coverage for the "only the first roster project streams"
- * bug: `GET /event?directory=<dir>` is server-side directory-scoped, so a
- * single workspace-wide connection scoped to `projects[0]` never receives
- * events for any other project. `connectWorkspaceSse` must open one
- * connection per UNIQUE project directory, fanning all of them into the
- * same shared demux/store, and its composite `close()` must tear down
- * every underlying connection.
+ * Regression coverage for the connection-cap hang (fixed after commit
+ * 0842050's per-project-permanent-SSE regression): `connectActiveDirectorySse`
+ * must hold open AT MOST ONE underlying `/event` connection at a time.
+ * Cross-project freshness now comes from the reconcile poller
+ * (`reconcile-poller.test.ts`) — this controller's only job is the single
+ * live transcript stream, switched via `setActiveDirectory`.
  */
 
 function context(
@@ -57,51 +56,12 @@ function fakeClient(recordedDirectories: string[]) {
   } as any;
 }
 
-describe("connectWorkspaceSse", () => {
-  test("opens one connection per unique project directory, with correct directory/baseUrl/credentials", () => {
+describe("connectActiveDirectorySse", () => {
+  test("opens exactly one connection, scoped to the initial directory", () => {
     const ctx = context([
       { name: "a", expandedPath: "/repo/a" },
       { name: "b", expandedPath: "/repo/b" },
       { name: "c", expandedPath: "/repo/c" },
-    ]);
-    const calls: unknown[] = [];
-    const connect = (options: unknown) => {
-      calls.push(options);
-      return { state: "open" as const, close: () => {} };
-    };
-
-    const demux = createDemux();
-    const store = createSessionStore();
-    const live = {
-      client: fakeClient([]),
-      demux,
-      store,
-    };
-
-    connectWorkspaceSse(live, ctx, { connect });
-
-    expect(calls).toHaveLength(3);
-    const directories = calls.map(
-      (c) => (c as { directory: string }).directory,
-    );
-    expect(directories.sort()).toEqual(["/repo/a", "/repo/b", "/repo/c"]);
-    for (const c of calls) {
-      const opts = c as {
-        baseUrl: string;
-        credentials?: { username?: string; password?: string };
-      };
-      expect(opts.baseUrl).toBe("http://127.0.0.1:4096");
-      expect(opts.credentials).toEqual({
-        username: "opencode",
-        password: "secret",
-      });
-    }
-  });
-
-  test("dedupes two projects sharing the same directory into one connection", () => {
-    const ctx = context([
-      { name: "a", expandedPath: "/repo/shared" },
-      { name: "b", expandedPath: "/repo/shared" },
     ]);
     const calls: unknown[] = [];
     const connect = (options: unknown) => {
@@ -115,21 +75,87 @@ describe("connectWorkspaceSse", () => {
       store: createSessionStore(),
     };
 
-    connectWorkspaceSse(live, ctx, { connect });
+    connectActiveDirectorySse(live, ctx, "/repo/a", { connect });
 
     expect(calls).toHaveLength(1);
-    expect((calls[0] as { directory: string }).directory).toBe("/repo/shared");
+    expect((calls[0] as { directory: string }).directory).toBe("/repo/a");
+    const opts = calls[0] as {
+      baseUrl: string;
+      credentials?: { username?: string; password?: string };
+    };
+    expect(opts.baseUrl).toBe("http://127.0.0.1:4096");
+    expect(opts.credentials).toEqual({
+      username: "opencode",
+      password: "secret",
+    });
   });
 
-  test("routes events from any connection's onEvent into the shared demux/store", () => {
+  test("setActiveDirectory closes the previous connection before opening the new one — never more than one open", () => {
+    const ctx = context([
+      { name: "a", expandedPath: "/repo/a" },
+      { name: "b", expandedPath: "/repo/b" },
+    ]);
+    const opened: string[] = [];
+    const closed: string[] = [];
+    const connect = (options: { directory: string }) => {
+      opened.push(options.directory);
+      return {
+        state: "open" as const,
+        close: () => closed.push(options.directory),
+      };
+    };
+
+    const live = {
+      client: fakeClient([]),
+      demux: createDemux(),
+      store: createSessionStore(),
+    };
+
+    const handle = connectActiveDirectorySse(live, ctx, "/repo/a", {
+      connect,
+    });
+    expect(opened).toEqual(["/repo/a"]);
+    expect(closed).toEqual([]);
+
+    handle.setActiveDirectory("/repo/b");
+
+    // The old connection must be closed BEFORE (or at least by the time)
+    // the new one opens — asserting both happened, and that at no point
+    // were two connections open: opened.length - closed.length <= 1.
+    expect(opened).toEqual(["/repo/a", "/repo/b"]);
+    expect(closed).toEqual(["/repo/a"]);
+    expect(opened.length - closed.length).toBe(1);
+  });
+
+  test("setActiveDirectory is a no-op when the directory is unchanged", () => {
+    const ctx = context([{ name: "a", expandedPath: "/repo/a" }]);
+    const opened: string[] = [];
+    const connect = (options: { directory: string }) => {
+      opened.push(options.directory);
+      return { state: "open" as const, close: () => {} };
+    };
+
+    const live = {
+      client: fakeClient([]),
+      demux: createDemux(),
+      store: createSessionStore(),
+    };
+
+    const handle = connectActiveDirectorySse(live, ctx, "/repo/a", {
+      connect,
+    });
+    handle.setActiveDirectory("/repo/a");
+
+    expect(opened).toEqual(["/repo/a"]);
+  });
+
+  test("routes events from the active connection's onEvent into the shared demux/store", () => {
     const ctx = context([
       { name: "a", expandedPath: "/repo/a" },
       { name: "b", expandedPath: "/repo/b" },
     ]);
     const onEvents: ((event: SseEvent) => void)[] = [];
-    const connect = (options: {
-      onEvent: (event: SseEvent) => void;
-    }) => {
+    const connect = (options: { onEvent: (event: SseEvent) => void }) => {
       onEvents.push(options.onEvent);
       return { state: "open" as const, close: () => {} };
     };
@@ -139,12 +165,15 @@ describe("connectWorkspaceSse", () => {
     demux.subscribeFirehose((event) => store.applyEvent(event));
     const live = { client: fakeClient([]), demux, store };
 
-    connectWorkspaceSse(live, ctx, { connect });
+    const handle = connectActiveDirectorySse(live, ctx, "/repo/a", {
+      connect,
+    });
+    handle.setActiveDirectory("/repo/b");
 
+    // Only the CURRENT (second) connection's onEvent should be wired to
+    // matter going forward — dispatch through it and confirm it lands in
+    // the shared store.
     expect(onEvents).toHaveLength(2);
-    // Connection #2 (index 1) corresponds to project "b" — dispatch an
-    // event through it and confirm it lands in the shared store, proving
-    // cross-project events (the bug's symptom) now reach the store.
     onEvents[1]?.({
       type: "session.updated",
       properties: { id: "sess-b", directory: "/repo/b" },
@@ -157,11 +186,8 @@ describe("connectWorkspaceSse", () => {
     });
   });
 
-  test("composite close() closes every underlying connection", () => {
-    const ctx = context([
-      { name: "a", expandedPath: "/repo/a" },
-      { name: "b", expandedPath: "/repo/b" },
-    ]);
+  test("close() closes the currently-open connection", () => {
+    const ctx = context([{ name: "a", expandedPath: "/repo/a" }]);
     const closeCalls: string[] = [];
     const connect = (options: { directory: string }) => {
       return {
@@ -176,13 +202,15 @@ describe("connectWorkspaceSse", () => {
       store: createSessionStore(),
     };
 
-    const handle = connectWorkspaceSse(live, ctx, { connect });
+    const handle = connectActiveDirectorySse(live, ctx, "/repo/a", {
+      connect,
+    });
     handle.close();
 
-    expect(closeCalls.sort()).toEqual(["/repo/a", "/repo/b"]);
+    expect(closeCalls).toEqual(["/repo/a"]);
   });
 
-  test("each connection's onReconcile reconciles only its own directory", async () => {
+  test("each (re)connect's onReconcile reconciles only its own current directory", async () => {
     const ctx = context([
       { name: "a", expandedPath: "/repo/a" },
       { name: "b", expandedPath: "/repo/b" },
@@ -200,14 +228,39 @@ describe("connectWorkspaceSse", () => {
       store: createSessionStore(),
     };
 
-    connectWorkspaceSse(live, ctx, { connect });
+    const handle = connectActiveDirectorySse(live, ctx, "/repo/a", {
+      connect,
+    });
+    handle.setActiveDirectory("/repo/b");
 
     expect(onReconciles).toHaveLength(2);
     onReconciles[1]?.();
-    // onReconcile fires an async reconcile — flush microtasks.
     await Promise.resolve();
     await Promise.resolve();
 
     expect(recordedDirectories).toEqual(["/repo/b"]);
+  });
+
+  test("no initial directory (empty roster) opens no connection until setActiveDirectory is called", () => {
+    const ctx = context([]);
+    const opened: string[] = [];
+    const connect = (options: { directory: string }) => {
+      opened.push(options.directory);
+      return { state: "open" as const, close: () => {} };
+    };
+
+    const live = {
+      client: fakeClient([]),
+      demux: createDemux(),
+      store: createSessionStore(),
+    };
+
+    const handle = connectActiveDirectorySse(live, ctx, undefined, {
+      connect,
+    });
+    expect(opened).toEqual([]);
+
+    handle.setActiveDirectory("/repo/a");
+    expect(opened).toEqual(["/repo/a"]);
   });
 });

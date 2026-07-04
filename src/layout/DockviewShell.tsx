@@ -21,6 +21,7 @@ import { auditStore } from "../panels/audit-log";
 import { PromptBar } from "../promptbar";
 import { type OpencodeClient, createOpencodeClient } from "../server/client";
 import { type Demux, createDemux } from "../server/demux";
+import { startReconcilePoller } from "../server/reconcile-poller";
 import { type SessionStore, createSessionStore } from "../server/session-store";
 import { connectSse } from "../server/sse";
 import type { BusContext } from "../server/types";
@@ -50,11 +51,12 @@ interface LiveWorkspace {
 }
 
 /** Runs full-state reconciliation for ONE project directory — `listSessions`
- * + `getSessionStatus` + `listQuestions`, fed into `store.reconcile`. Called
- * by each per-directory SSE connection's `onReconcile`, scoped to that
- * connection's own directory (not every project — each stream only ever
- * carries events for the directory it's connected to). */
-async function reconcileProject(
+ * + `getSessionStatus` + `listQuestions`, fed into `store.reconcile`. Used
+ * both by the reconcile poller (every roster project, every tick) and by
+ * the active-directory SSE connection's `onReconcile` (immediate freshness
+ * on (re)connect, scoped to that connection's own directory). Exported for
+ * `reconcile-poller.ts` and tests. */
+export async function reconcileProject(
   client: OpencodeClient,
   store: SessionStore,
   directory: string,
@@ -91,51 +93,48 @@ export function createLiveWorkspace(context: BusContext): LiveWorkspace {
   return { client, demux, store };
 }
 
-/** A composite handle over N per-directory SSE connections — the only
- * contract the caller (DockviewShell's effect) needs is `close()`. */
-export interface WorkspaceSseHandle {
+/** A single-stream SSE controller bound to ONE "active directory" at a
+ * time — never more than one underlying `/event` connection open. The only
+ * contract the caller (DockviewShell) needs: `setActiveDirectory(dir)` to
+ * switch (or open, on first call) the live stream, and `close()` to tear
+ * it down entirely. */
+export interface ActiveDirectorySseHandle {
+  setActiveDirectory(directory: string): void;
   close(): void;
 }
 
-/** Opens ONE `/event` SSE connection PER UNIQUE project directory and wires
- * each into the SAME shared demux + store on an already-constructed
- * `LiveWorkspace`. This is the side-effecting half of workspace setup — the
- * caller (DockviewShell) owns it inside a `useEffect` so React.StrictMode's
- * mount→cleanup→mount correctly closes AND reopens every connection (see
- * the effect's comment for the full reasoning).
+/** Replaces the removed per-project-permanent-connection model (one
+ * `/event` stream per roster project — regressed by commit 0842050) with a
+ * single stream scoped to whichever directory is currently "active" (the
+ * project/session the operator is looking at, or just dispatched to).
  *
  * `/event?directory=<dir>` is SERVER-SIDE directory-scoped (a hard filter,
  * live-verified — see
- * docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md):
- * a single connection scoped to one project's directory receives NONE of
- * another project's events. A prior version of this function opened only
- * one connection (`projects[0]`'s directory), which meant live streaming
- * (message.part.updated/delta, session.updated) only ever worked for the
- * first roster project — every other project's session was created but
- * never streamed and never appeared in the sessions list. Fixed by opening
- * one connection per unique directory (deduped — two roster entries
- * pointing at the same directory must not double-connect), each feeding
- * the same shared demux/store. Every (re)connect triggers `reconcileProject`
- * for THAT connection's own directory only (not a full-roster
- * `reconcileAll` — each stream only ever carries events for the directory
- * it's scoped to, so reconciling anything else on its reconnect would be
- * redundant work). */
-export function connectWorkspaceSse(
+ * docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md),
+ * so one connection per project was the correct fix for "only the first
+ * project streams" — but with ~6 roster projects, 6 permanent streaming
+ * fetches saturate WKWebView's ~6-connections-per-host limit and starve
+ * every REST call (client.ts's `AbortSignal.timeout(30s)` → synthesized
+ * `status:599`), hanging the roster/sessions/transcript. Cross-project
+ * freshness now comes from `reconcile-poller.ts` polling ALL projects via
+ * short-lived REST instead; this controller keeps exactly ONE streaming
+ * socket open, for live transcript delivery to whatever directory is
+ * "active" — `setActiveDirectory` tears down the previous stream (if any)
+ * before opening the new one, and is a no-op if the directory is
+ * unchanged. Every (re)connect still triggers `reconcileProject` for that
+ * one directory (immediate freshness on switch, same as before). */
+export function connectActiveDirectorySse(
   live: LiveWorkspace,
   context: BusContext,
+  initialDirectory: string | undefined,
   deps: { connect?: typeof connectSse } = {},
-): WorkspaceSseHandle {
+): ActiveDirectorySseHandle {
   const connect = deps.connect ?? connectSse;
-  const directories = [
-    ...new Set(
-      context.roster.projects
-        .map((project) => project.expandedPath)
-        .filter((directory): directory is string => Boolean(directory)),
-    ),
-  ];
+  let current: ReturnType<typeof connectSse> | undefined;
+  let currentDirectory: string | undefined;
 
-  const connections = directories.map((directory) =>
-    connect({
+  function open(directory: string): void {
+    current = connect({
       baseUrl: context.roster.server.baseUrl,
       directory,
       credentials: context.credentials,
@@ -143,12 +142,20 @@ export function connectWorkspaceSse(
       onReconcile: () => {
         void reconcileProject(live.client, live.store, directory);
       },
-    }),
-  );
+    });
+    currentDirectory = directory;
+  }
+
+  if (initialDirectory) open(initialDirectory);
 
   return {
+    setActiveDirectory(directory: string) {
+      if (directory === currentDirectory) return;
+      current?.close();
+      open(directory);
+    },
     close() {
-      for (const connection of connections) connection.close();
+      current?.close();
     },
   };
 }
@@ -341,6 +348,11 @@ export function DockviewShell({
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
   const bridgeRef = useRef<LayoutBridge | undefined>(undefined);
   const apiRef = useRef<DockviewApi | undefined>(undefined);
+  // The single active-directory SSE controller (see
+  // `connectActiveDirectorySse`) — populated by the effect below, read by
+  // handleSelectProject/handleSelectSession/handleDispatched to switch the
+  // live stream to whichever directory the operator is now looking at.
+  const activeSseRef = useRef<ActiveDirectorySseHandle | undefined>(undefined);
 
   // Synchronous (not effect-populated) live workspace: seedDefaultLayout
   // runs inside onReady, which can fire before a `useEffect` creating this
@@ -394,22 +406,34 @@ export function DockviewShell({
     };
   }, []);
 
-  // The SSE connection: creation AND teardown live in this ONE effect, so
-  // React.StrictMode's mount→cleanup→mount is symmetric and self-healing.
-  // Reasoning through the sequence: mount → connectWorkspaceSse opens
-  // connection A; StrictMode's synthetic cleanup runs → A.close(); the
-  // guaranteed StrictMode remount re-runs this effect body → opens
-  // connection B, which stays open (no third invocation follows). Every
-  // (re)open — A and B alike — fires `onReconcile` (see connectSse), so B
-  // fully reconciles the store even though A's reconcile was thrown away
-  // with A itself. Keyed on `[live, context]` — `live`'s identity already
-  // changes with `workspacePath` (see the useMemo above), so this effect
-  // reconnects whenever the workspace (or context) changes too.
+  // The poller + single active-directory SSE stream: creation AND teardown
+  // live in this ONE effect, so React.StrictMode's mount→cleanup→mount is
+  // symmetric and self-healing for BOTH halves of the hybrid model.
+  // Reasoning through the sequence: mount → starts poller A + opens SSE
+  // stream A (scoped to projects[0]'s directory); StrictMode's synthetic
+  // cleanup runs → poller A.stop() + stream A.close(); the guaranteed
+  // StrictMode remount re-runs this effect body → starts poller B + opens
+  // stream B, which both stay alive (no third invocation follows). Every
+  // stream (re)open — A and B alike — fires `onReconcile` for its own
+  // directory (see connectSse); poller B's own first tick (immediate, no
+  // wait) reconciles every roster project regardless. Keyed on
+  // `[live, context]` — `live`'s identity already changes with
+  // `workspacePath` (see the useMemo above), so this effect restarts both
+  // the poller and the stream whenever the workspace (or context) changes.
   useEffect(() => {
     if (!live || !context) return;
-    const sse = connectWorkspaceSse(live, context);
+    const initialDirectory = context.roster.projects[0]?.expandedPath;
+    const sse = connectActiveDirectorySse(live, context, initialDirectory);
+    activeSseRef.current = sse;
+    const poller = startReconcilePoller({
+      projects: context.roster.projects,
+      reconcileProject: (directory) =>
+        reconcileProject(live.client, live.store, directory),
+    });
     return () => {
+      poller.stop();
       sse.close();
+      activeSseRef.current = undefined;
     };
   }, [live, context]);
 
@@ -424,6 +448,9 @@ export function DockviewShell({
       apiRef.current
         ?.getPanel("sessions")
         ?.api.updateParameters({ directory: project.expandedPath });
+      // Switch the one live SSE stream to the newly-selected project so
+      // its transcript/session events stream immediately.
+      activeSseRef.current?.setActiveDirectory(project.expandedPath);
     },
     [context],
   );
@@ -433,6 +460,12 @@ export function DockviewShell({
   // Bug 5 wiring: mark the selected session active on the sessions panel
   // (drives the selected-row highlight) alongside pointing the transcript
   // panel at it — one place updates both so they can never drift.
+  //
+  // The sessions panel is already scoped to a directory (its own
+  // `directory` param — see SessionsPanel), so the session the operator
+  // just clicked necessarily belongs to that directory. Look it up from
+  // the sessions panel's current params rather than threading a second
+  // argument through every SessionsPanel call site.
   const handleSelectSession = useCallback((sessionId: string) => {
     apiRef.current
       ?.getPanel("transcript")
@@ -440,6 +473,14 @@ export function DockviewShell({
     apiRef.current
       ?.getPanel("sessions")
       ?.api.updateParameters({ activeSessionId: sessionId });
+    const sessionsDirectory = (
+      apiRef.current?.getPanel("sessions")?.params as
+        | { directory?: string }
+        | undefined
+    )?.directory;
+    if (sessionsDirectory) {
+      activeSseRef.current?.setActiveDirectory(sessionsDirectory);
+    }
   }, []);
 
   const handleReady = useCallback(
@@ -536,6 +577,11 @@ export function DockviewShell({
       apiRef.current
         ?.getPanel("sessions")
         ?.api.updateParameters({ directory, activeSessionId: sessionId });
+      // The exact case the hybrid model exists for: a cross-project
+      // dispatch (e.g. @dashboard) must stream live immediately, not wait
+      // for the next poll tick — switch the one active SSE stream to the
+      // dispatched-to directory.
+      activeSseRef.current?.setActiveDirectory(directory);
     },
     [],
   );
