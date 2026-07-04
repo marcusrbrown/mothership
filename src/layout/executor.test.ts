@@ -275,6 +275,161 @@ describe("executeCommand — edge cases", () => {
   });
 });
 
+describe("executeCommand — mcp_tool panel capability gating", () => {
+  test("mcp_tool open_panel targeting a non-mcpOpenable type is rejected without mounting", () => {
+    __resetRegistryForTests();
+    registerPanelType("terminal", {
+      component: DummyComponent,
+      title: "Terminal",
+      mcpOpenable: false,
+    });
+    const adapter = new StubDockviewAdapter();
+
+    const result = executeCommand(
+      { type: "open_panel", panelId: "p1", panelType: "terminal" },
+      adapter,
+      { source: "mcp_tool" },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "panel_not_mcp_openable", message: expect.any(String) },
+    });
+    expect(adapter.calls.some((c) => c.method === "addPanel")).toBe(false);
+  });
+
+  test("ui open_panel targeting the same type is allowed", () => {
+    __resetRegistryForTests();
+    registerPanelType("terminal", {
+      component: DummyComponent,
+      title: "Terminal",
+      mcpOpenable: false,
+    });
+    const adapter = new StubDockviewAdapter();
+
+    const result = executeCommand(
+      { type: "open_panel", panelId: "p1", panelType: "terminal" },
+      adapter,
+      { source: "ui" },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(adapter.hasPanel("p1")).toBe(true);
+  });
+
+  test("mcp_tool open_panel targeting an openable type (roster) is allowed", () => {
+    __resetRegistryForTests();
+    registerPanelType("roster", { component: DummyComponent, title: "Roster" });
+    const adapter = new StubDockviewAdapter();
+
+    const result = executeCommand(
+      { type: "open_panel", panelId: "p1", panelType: "roster" },
+      adapter,
+      { source: "mcp_tool" },
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  test("mcp_tool split targeting a non-mcpOpenable type is rejected", () => {
+    __resetRegistryForTests();
+    registerPanelType("roster", { component: DummyComponent, title: "Roster" });
+    registerPanelType("terminal", {
+      component: DummyComponent,
+      title: "Terminal",
+      mcpOpenable: false,
+    });
+    const adapter = new StubDockviewAdapter();
+    executeCommand(
+      { type: "open_panel", panelId: "p1", panelType: "roster" },
+      adapter,
+      { source: "ui" },
+    );
+
+    const result = executeCommand(
+      {
+        type: "split",
+        panelId: "p2",
+        panelType: "terminal",
+        referencePanelId: "p1",
+        direction: "down",
+      },
+      adapter,
+      { source: "mcp_tool" },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "panel_not_mcp_openable", message: expect.any(String) },
+    });
+    expect(adapter.hasPanel("p2")).toBe(false);
+  });
+
+  test("mcp_tool set_layout containing a non-mcpOpenable panel is rejected wholesale", () => {
+    __resetRegistryForTests();
+    registerPanelType("roster", { component: DummyComponent, title: "Roster" });
+    registerPanelType("terminal", {
+      component: DummyComponent,
+      title: "Terminal",
+      mcpOpenable: false,
+    });
+    const seed = new StubDockviewAdapter();
+    executeCommand(
+      { type: "open_panel", panelId: "p1", panelType: "roster" },
+      seed,
+      { source: "ui" },
+    );
+    executeCommand(
+      { type: "open_panel", panelId: "p2", panelType: "terminal" },
+      seed,
+      { source: "ui" },
+    );
+    const layoutWithTerminal = seed.toJSON();
+
+    const target = new StubDockviewAdapter();
+    const before = target.toJSON();
+
+    const result = executeCommand(
+      { type: "set_layout", layout: layoutWithTerminal },
+      target,
+      { source: "mcp_tool" },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "panel_not_mcp_openable", message: expect.any(String) },
+    });
+    expect(target.toJSON()).toEqual(before);
+  });
+
+  test("ui set_layout containing a terminal panel is allowed", () => {
+    __resetRegistryForTests();
+    registerPanelType("roster", { component: DummyComponent, title: "Roster" });
+    registerPanelType("terminal", {
+      component: DummyComponent,
+      title: "Terminal",
+      mcpOpenable: false,
+    });
+    const seed = new StubDockviewAdapter();
+    executeCommand(
+      { type: "open_panel", panelId: "p2", panelType: "terminal" },
+      seed,
+      { source: "ui" },
+    );
+    const layoutWithTerminal = seed.toJSON();
+
+    const target = new StubDockviewAdapter();
+    const result = executeCommand(
+      { type: "set_layout", layout: layoutWithTerminal },
+      target,
+      { source: "ui" },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(target.hasPanel("p2")).toBe(true);
+  });
+});
+
 describe("executeCommand — error path", () => {
   test("set_layout with malformed JSON returns invalid_layout, layout untouched", () => {
     const adapter = new StubDockviewAdapter();
@@ -336,5 +491,35 @@ describe("onCommandExecuted subscription", () => {
 
     unsubscribe();
     expect(captured).toBe("ui");
+  });
+
+  test("a throwing adapter call still emits an audit entry with result:error, never vanishes", () => {
+    const adapter = new StubDockviewAdapter();
+    executeCommand(
+      { type: "open_panel", panelId: "p1", panelType: "roster" },
+      adapter,
+    );
+    const throwingAdapter: typeof adapter = Object.assign(
+      Object.create(Object.getPrototypeOf(adapter)),
+      adapter,
+      {
+        focus() {
+          throw new Error("boom");
+        },
+      },
+    );
+
+    const events: CommandExecutedEvent[] = [];
+    const unsubscribe = onCommandExecuted((event) => events.push(event));
+
+    const result = executeCommand(
+      { type: "focus", panelId: "p1" },
+      throwingAdapter,
+    );
+
+    unsubscribe();
+    expect(result.ok).toBe(false);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.result.ok).toBe(false);
   });
 });

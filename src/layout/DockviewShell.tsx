@@ -16,6 +16,7 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
  */
 import { useCallback, useEffect, useRef } from "react";
 import "./dockview-theme.css";
+import { auditStore } from "../panels/audit-log";
 import { PromptBar } from "../promptbar";
 import { type OpencodeClient, createOpencodeClient } from "../server/client";
 import { type Demux, createDemux } from "../server/demux";
@@ -25,7 +26,7 @@ import type { BusContext } from "../server/types";
 import type { DockviewAdapter } from "./adapter";
 import { type LayoutBridge, connectLayoutBridge } from "./bridge";
 import { createDockviewAdapter } from "./dockview-adapter";
-import { executeCommand } from "./executor";
+import { executeCommand, isCommandExecuting } from "./executor";
 import { loadLayout, saveLayout } from "./persistence";
 import { panelComponents } from "./registry";
 
@@ -222,8 +223,29 @@ export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
         seedDefaultLayout(adapter, context, liveRef.current);
       }
 
+      // Coarse panel-set signature (sorted ids), used to de-dupe/throttle
+      // native-layout-change audit entries — dockview's onDidLayoutChange
+      // fires on every drag frame, not just on committed changes.
+      let lastPanelSignature = [...event.api.panels]
+        .map((p) => p.id)
+        .sort()
+        .join(",");
+
       event.api.onDidLayoutChange(() => {
         saveLayout(workspacePath, adapter.toJSON());
+
+        // Command-origin mutations (UI or mcp_tool) already emit an
+        // executor audit entry — don't double-count the layout-change
+        // event dockview-core fires synchronously as a side effect of
+        // that same command (U1.7 audit-completeness fix).
+        if (isCommandExecuting()) return;
+
+        const panelIds = [...event.api.panels].map((p) => p.id).sort();
+        const signature = panelIds.join(",");
+        if (signature === lastPanelSignature) return;
+        lastPanelSignature = signature;
+
+        auditStore.recordNativeLayoutChange(`panels=${panelIds.length}`);
       });
     },
     [workspacePath, context],

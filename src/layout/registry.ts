@@ -12,6 +12,13 @@ export interface PanelRegistration {
   component: FunctionComponent<IDockviewPanelProps>;
   /** Default tab title when a command omits one. */
   title: string;
+  /**
+   * Whether an `mcp_tool`-origin command may open this panel type. Defaults
+   * to `true` when omitted — panel types must opt OUT explicitly (e.g.
+   * terminal, which mounts a real shell via pty_spawn). UI-origin commands
+   * are never gated by this flag. Enforced in `executor.ts`.
+   */
+  mcpOpenable?: boolean;
 }
 
 const registry = new Map<string, PanelRegistration>();
@@ -21,6 +28,15 @@ export function registerPanelType(
   registration: PanelRegistration,
 ): void {
   registry.set(type, registration);
+}
+
+/** Whether `type` may be opened by an `mcp_tool`-origin command. Unknown
+ * types are treated as not openable (fails closed); registered types
+ * default to openable unless `mcpOpenable: false` is set explicitly. */
+export function isMcpOpenable(type: string): boolean {
+  const reg = registry.get(type);
+  if (!reg) return false;
+  return reg.mcpOpenable ?? true;
 }
 
 export function getPanelType(type: string): PanelRegistration | undefined {

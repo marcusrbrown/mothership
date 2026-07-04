@@ -17,7 +17,59 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { Server, ServerWebSocket } from "bun";
 import { isAuthorized, unauthorizedResponse } from "./http-auth";
 import { createIdeMcpServer } from "./mcp-server";
+import type { WsBridge } from "./ws-bridge";
 import { createWsBridge } from "./ws-bridge";
+
+interface WsData {
+  authed?: boolean;
+}
+
+/**
+ * Builds the `Bun.serve` fetch handler. Exported (undocumented, test-only
+ * export) so `index.test.ts` can exercise the routing/auth-uniformity
+ * contract without booting the real MCP transport or a live WS server:
+ * every pre-auth HTTP response that isn't a valid WS upgrade or an authed
+ * `/mcp`|`/health` is an indistinguishable empty 401.
+ */
+export function createFetchHandler(
+  token: string,
+  bridge: Pick<WsBridge, "isReady">,
+  transport: { handleRequest: (req: Request) => Promise<Response> | Response },
+) {
+  return async function fetch(
+    req: Request,
+    srv: { upgrade: (req: Request, opts: { data: WsData }) => boolean },
+  ): Promise<Response> {
+    const url = new URL(req.url);
+
+    if (url.pathname === "/ws") {
+      const upgraded = srv.upgrade(req, { data: {} });
+      if (upgraded) return undefined as unknown as Response;
+      // A non-upgrade request to /ws is indistinguishable from any other
+      // unauthed path — no distinct status/body revealing the path exists.
+      return unauthorizedResponse();
+    }
+
+    if (url.pathname === "/health") {
+      if (!isAuthorized(req.headers.get("authorization"), token)) {
+        return unauthorizedResponse();
+      }
+      const healthy = bridge.isReady();
+      return new Response(null, { status: healthy ? 200 : 503 });
+    }
+
+    if (url.pathname === "/mcp") {
+      if (!isAuthorized(req.headers.get("authorization"), token)) {
+        return unauthorizedResponse();
+      }
+      return transport.handleRequest(req);
+    }
+
+    // Uniform empty 401 for every other unauthenticated path — no
+    // information leakage about which paths exist (plan requirement).
+    return unauthorizedResponse();
+  };
+}
 
 const token = process.env.MOTHERSHIP_IDE_TOKEN;
 if (!token) {
@@ -36,38 +88,12 @@ const transport = new WebStandardStreamableHTTPServerTransport({
 });
 await mcpServer.connect(transport);
 
-interface WsData {
-  authed?: boolean;
-}
+const handleFetch = createFetchHandler(token, bridge, transport);
 
 const server: Server = Bun.serve<WsData, Record<string, never>>({
   hostname: "127.0.0.1",
   port: 0,
-  async fetch(req, srv) {
-    const url = new URL(req.url);
-
-    if (url.pathname === "/ws") {
-      const upgraded = srv.upgrade(req, { data: {} });
-      if (upgraded) return undefined as unknown as Response;
-      return new Response("WebSocket upgrade failed", { status: 400 });
-    }
-
-    if (url.pathname === "/health") {
-      const healthy = bridge.isReady();
-      return new Response(null, { status: healthy ? 200 : 503 });
-    }
-
-    if (url.pathname === "/mcp") {
-      if (!isAuthorized(req.headers.get("authorization"), token)) {
-        return unauthorizedResponse();
-      }
-      return transport.handleRequest(req);
-    }
-
-    // Uniform empty 401 for every other unauthenticated path — no
-    // information leakage about which paths exist (plan requirement).
-    return unauthorizedResponse();
-  },
+  fetch: handleFetch as never,
   websocket: {
     open(ws: ServerWebSocket<WsData>) {
       bridge.onOpen(ws);

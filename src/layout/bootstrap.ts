@@ -20,6 +20,9 @@ registerPanelType("placeholder", {
 registerPanelType("terminal", {
   component: TerminalPanel,
   title: "Terminal",
+  // Terminal mounts a real shell via pty_spawn — ide_* (mcp_tool-origin)
+  // commands must never be able to reach it (see executor.ts enforcement).
+  mcpOpenable: false,
 });
 
 registerPanelType("roster", {

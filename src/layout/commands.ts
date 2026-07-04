@@ -72,7 +72,8 @@ export type LayoutErrorCode =
   | "panel_not_found"
   | "unknown_panel_type"
   | "invalid_layout"
-  | "reference_panel_not_found";
+  | "reference_panel_not_found"
+  | "panel_not_mcp_openable";
 
 export interface LayoutError {
   code: LayoutErrorCode;

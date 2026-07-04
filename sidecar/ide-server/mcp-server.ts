@@ -17,7 +17,7 @@ import {
   setLayoutCommandSchema,
   splitCommandSchema,
 } from "../../src/layout/commands";
-import { redactForRead } from "./redact";
+import { layoutStructureView, listPanelsView } from "./redact";
 import type { WsBridge } from "./ws-bridge";
 
 function toolTextResult(payload: unknown, isError = false) {
@@ -39,12 +39,25 @@ async function relayMutation(bridge: WsBridge, tool: string, params: unknown) {
   return toolTextResult({ error: res.error }, true);
 }
 
-async function relayRead(bridge: WsBridge, tool: string) {
+/** Relays `ide_list_panels`: returns ONLY [{id, panelType, title}] — no
+ * params, no paths, no layout geometry (disclosure boundary, U1.7). */
+async function relayListPanels(bridge: WsBridge, tool: string) {
   const res = await bridge.dispatch(tool, {});
   if (!res.ok) {
     return toolTextResult({ error: res.error }, true);
   }
-  return toolTextResult(redactForRead({ layout: res.layout }));
+  return toolTextResult({ panels: listPanelsView(res.layout) });
+}
+
+/** Relays `ide_get_layout`: returns the grid/group/panel structure agents
+ * need (ordering/positioning + per-panel id/panelType/title) with ALL panel
+ * `params` dropped — the allowlist gate for the disclosure boundary. */
+async function relayGetLayout(bridge: WsBridge, tool: string) {
+  const res = await bridge.dispatch(tool, {});
+  if (!res.ok) {
+    return toolTextResult({ error: res.error }, true);
+  }
+  return toolTextResult({ layout: layoutStructureView(res.layout) });
 }
 
 export function createIdeMcpServer(bridge: WsBridge): McpServer {
@@ -111,7 +124,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
         "List panels currently open in the workspace (panel types/titles only).",
       inputSchema: z.object({}).shape,
     },
-    () => relayRead(bridge, "ide_list_panels"),
+    () => relayListPanels(bridge, "ide_list_panels"),
   );
 
   server.registerTool(
@@ -121,7 +134,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
         "Get the current serialized workspace layout (paths redacted to names).",
       inputSchema: z.object({}).shape,
     },
-    () => relayRead(bridge, "ide_get_layout"),
+    () => relayGetLayout(bridge, "ide_get_layout"),
   );
 
   return server;

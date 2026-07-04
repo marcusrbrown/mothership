@@ -106,20 +106,49 @@ fn rendezvous_path(app_data_dir: &std::path::Path) -> std::path::PathBuf {
     app_data_dir.join(RENDEZVOUS_FILE)
 }
 
+/// Writes `{port, token}` to the rendezvous file such that the file is
+/// never observably world/group-readable, even for an instant: on Unix we
+/// write to a sibling temp file created with mode 0600 from the start
+/// (`OpenOptions::mode`, not a post-hoc `set_permissions` after a plain
+/// `fs::write`), then atomically rename it over the target. The parent
+/// app-data dir is also tightened to 0700 (best-effort — a failure here
+/// isn't fatal, since the file itself is still 0600).
 fn write_rendezvous_file(app_data_dir: &std::path::Path, info: &IdeBridgeInfo) -> std::io::Result<()> {
     std::fs::create_dir_all(app_data_dir)?;
-    let path = rendezvous_path(app_data_dir);
-    let contents = serde_json::to_string(info).unwrap_or_default();
-    std::fs::write(&path, contents)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&path, perms)?;
+        let _ = std::fs::set_permissions(app_data_dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    Ok(())
+    let path = rendezvous_path(app_data_dir);
+    let contents = serde_json::to_string(info).unwrap_or_default();
+
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let tmp_path = app_data_dir.join(format!("{RENDEZVOUS_FILE}.tmp"));
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, &path)?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, contents)?;
+        Ok(())
+    }
 }
 
 /// Spawns `bun run <sidecar_dir>/index.ts` with the token in env (never
@@ -184,7 +213,9 @@ fn spawn_and_await_port(
     }
 }
 
-fn probe_health(port: u16) -> bool {
+/// Probes `/health` with the bearer token (the endpoint requires auth like
+/// every other pre-auth surface — see `sidecar/ide-server/index.ts`).
+fn probe_health(port: u16, token: &str) -> bool {
     use std::net::TcpStream;
     let addr = format!("127.0.0.1:{port}");
     let Ok(mut stream) = TcpStream::connect_timeout(
@@ -194,7 +225,9 @@ fn probe_health(port: u16) -> bool {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
-    let req = format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let req = format!(
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
@@ -251,7 +284,7 @@ fn spawn_health_monitor(app: AppHandle) {
         thread::sleep(HEALTH_POLL);
         let state = app.state::<IdeSidecar>();
 
-        let (port, exited) = {
+        let (port, token, exited) = {
             let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
             if inner.shutting_down || !inner.owned {
                 return;
@@ -261,10 +294,12 @@ fn spawn_health_monitor(app: AppHandle) {
                 None => true,
             };
             let port = inner.info.as_ref().map(|i| i.port);
-            (port, exited)
+            let token = inner.token.clone();
+            (port, token, exited)
         };
 
-        let unhealthy = exited || !port.map(probe_health).unwrap_or(false);
+        let unhealthy =
+            exited || !port.map(|p| probe_health(p, &token)).unwrap_or(false);
         if !unhealthy {
             continue;
         }
@@ -334,6 +369,9 @@ pub fn shutdown(state: &IdeSidecar) {
     if let Some(mut child) = inner.child.take() {
         let _ = child.kill();
         let _ = child.wait();
+    }
+    if let Some(app_data_dir) = &inner.app_data_dir {
+        let _ = std::fs::remove_file(rendezvous_path(app_data_dir));
     }
 }
 

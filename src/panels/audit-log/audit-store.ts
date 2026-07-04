@@ -68,6 +68,24 @@ export function createAuditStore() {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    /**
+     * Records a native (non-command) UI layout mutation — e.g. a dockview
+     * drag-move/close that bypasses `executeCommand` entirely. Always
+     * source:'ui' (native dockview gestures are UI-only) and always
+     * result:'ok' (dockview doesn't report a native-gesture failure through
+     * this path). Callers are responsible for de-duping/throttling before
+     * calling this (see `DockviewShell`'s panel-set-signature comparison) —
+     * this method unconditionally appends.
+     */
+    recordNativeLayoutChange(paramSummary: string): void {
+      push({
+        timestamp: Date.now(),
+        source: "ui",
+        command: "layout_changed_native",
+        paramSummary,
+        result: "ok",
+      });
+    },
     /** Test/dev-only teardown — mirrors registry's __reset convention. */
     __dispose(): void {
       unsubscribe();

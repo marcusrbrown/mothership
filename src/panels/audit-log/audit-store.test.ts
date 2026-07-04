@@ -64,6 +64,23 @@ describe("audit-store", () => {
     }
   });
 
+  test("recordNativeLayoutChange appends a source:'ui' entry outside the command flow", () => {
+    const store = createAuditStore();
+    try {
+      store.recordNativeLayoutChange("panels=3");
+      const entries = store.getEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        source: "ui",
+        command: "layout_changed_native",
+        paramSummary: "panels=3",
+        result: "ok",
+      });
+    } finally {
+      store.__dispose();
+    }
+  });
+
   test("notifies subscribers on push", () => {
     const store = createAuditStore();
     const adapter = makeAdapter();
