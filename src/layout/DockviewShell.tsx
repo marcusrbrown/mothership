@@ -47,7 +47,6 @@ interface LiveWorkspace {
   client: OpencodeClient;
   demux: Demux;
   store: SessionStore;
-  sse: SseClient;
 }
 
 /** Runs full-state reconciliation for every project in the roster —
@@ -77,9 +76,12 @@ async function reconcileAll(
   );
 }
 
-/** Constructs the one shared client/demux/store/SSE-connection set for the
- * workspace. Exported for tests; DockviewShell wires it via a ref so it
- * survives re-renders and is torn down on unmount. */
+/** Constructs the pure, connection-less client/demux/store set for the
+ * workspace: `createOpencodeClient` + `createDemux` + `createSessionStore`
+ * + the `demux.subscribeFirehose(store.applyEvent)` wiring. None of this
+ * opens a network connection, so it's safe to build synchronously (in a
+ * `useMemo`) — panels seed from it at `onReady` time, before any effect
+ * would have run. Exported for tests. */
 export function createLiveWorkspace(context: BusContext): LiveWorkspace {
   const client = createOpencodeClient({
     baseUrl: context.roster.server.baseUrl,
@@ -89,19 +91,30 @@ export function createLiveWorkspace(context: BusContext): LiveWorkspace {
 
   demux.subscribeFirehose((event) => store.applyEvent(event));
 
+  return { client, demux, store };
+}
+
+/** Opens the ONE workspace-wide `/event` SSE connection and wires it into
+ * an already-constructed `LiveWorkspace`. This is the side-effecting half
+ * of workspace setup — the caller (DockviewShell) owns it inside a
+ * `useEffect` so React.StrictMode's mount→cleanup→mount correctly closes
+ * AND reopens the connection (see the effect's comment for the full
+ * reasoning). Every (re)connect triggers `reconcileAll`. */
+export function connectWorkspaceSse(
+  live: LiveWorkspace,
+  context: BusContext,
+): SseClient {
   // One connection for the whole workspace: directory-scoped filtering
   // happens per-project during reconcile, not at the SSE connection level.
   const primaryDirectory = context.roster.projects[0]?.expandedPath ?? "";
-  const sse = connectSse({
+  return connectSse({
     baseUrl: context.roster.server.baseUrl,
     directory: primaryDirectory,
-    onEvent: (event) => demux.dispatch(event),
+    onEvent: (event) => live.demux.dispatch(event),
     onReconcile: () => {
-      void reconcileAll(client, store, context);
+      void reconcileAll(live.client, live.store, context);
     },
   });
-
-  return { client, demux, store, sse };
 }
 
 /** Seeds a placeholder tab (R5, placeholder-grade — the real Storybook
@@ -138,6 +151,8 @@ function seedDefaultLayout(
   context: BusContext | undefined,
   live: LiveWorkspace | undefined,
   manifest: WorkspaceManifest | undefined,
+  onSelectProject: (name: string) => void,
+  onSelectSession: (sessionId: string) => void,
 ): void {
   const firstProject = context?.roster.projects[0];
 
@@ -146,7 +161,7 @@ function seedDefaultLayout(
       type: "open_panel",
       panelId: "roster",
       panelType: "roster",
-      params: { context, store: live?.store, onSelectProject: undefined },
+      params: { context, store: live?.store, onSelectProject },
     },
     adapter,
   );
@@ -160,6 +175,7 @@ function seedDefaultLayout(
       params: {
         store: live?.store,
         directory: firstProject?.expandedPath,
+        onSelectSession,
       },
     },
     adapter,
@@ -224,21 +240,23 @@ export function DockviewShell({
   // panels ahead of their store/client/demux, seeding them with undefined
   // (the "No workspace context" bug). useMemo makes `live` available at
   // first render, keyed on workspacePath (not context identity) to keep
-  // the one-connection-per-workspace invariant. `prevLiveRef` guards
-  // against StrictMode's double-invoke opening two SSE connections by
-  // closing whatever connection preceded this one before replacing it; the
-  // effect below owns final teardown on unmount.
-  const prevLiveRef = useRef<LiveWorkspace | undefined>(undefined);
+  // the one-connection-per-workspace invariant.
+  //
+  // `live` here is the PURE half only (client/demux/store, no network
+  // connection) — see `createLiveWorkspace`. The SSE connection itself is
+  // opened/closed in the effect below, which is the fix for the bug where
+  // the connection was created here (useMemo, keyed on workspacePath) but
+  // torn down in a *separate* effect keyed on `[live]`: under
+  // React.StrictMode, effects run mount→cleanup→mount, so the old
+  // `useEffect(() => () => live?.sse.close(), [live])` closed the
+  // connection on the synthetic first cleanup, but nothing ever reopened
+  // it (useMemo doesn't re-run — `[workspacePath]` hadn't changed). The
+  // SSE connection was permanently dead after StrictMode's double-invoke,
+  // so `onReconcile` never fired again and the session store stayed empty.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on workspacePath (one connection per workspace), not context identity
   const live = useMemo<LiveWorkspace | undefined>(() => {
     if (!context) return undefined;
-    if (prevLiveRef.current) {
-      prevLiveRef.current.sse.close();
-      prevLiveRef.current = undefined;
-    }
-    const next = createLiveWorkspace(context);
-    prevLiveRef.current = next;
-    return next;
+    return createLiveWorkspace(context);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspacePath]);
 
@@ -268,14 +286,47 @@ export function DockviewShell({
     };
   }, []);
 
-  // Final teardown only — creation happens synchronously in the useMemo
-  // above so it's available at first render (before onReady/seeding).
+  // The SSE connection: creation AND teardown live in this ONE effect, so
+  // React.StrictMode's mount→cleanup→mount is symmetric and self-healing.
+  // Reasoning through the sequence: mount → connectWorkspaceSse opens
+  // connection A; StrictMode's synthetic cleanup runs → A.close(); the
+  // guaranteed StrictMode remount re-runs this effect body → opens
+  // connection B, which stays open (no third invocation follows). Every
+  // (re)open — A and B alike — fires `onReconcile` (see connectSse), so B
+  // fully reconciles the store even though A's reconcile was thrown away
+  // with A itself. Keyed on `[live, context]` — `live`'s identity already
+  // changes with `workspacePath` (see the useMemo above), so this effect
+  // reconnects whenever the workspace (or context) changes too.
   useEffect(() => {
+    if (!live || !context) return;
+    const sse = connectWorkspaceSse(live, context);
     return () => {
-      live?.sse.close();
-      if (prevLiveRef.current === live) prevLiveRef.current = undefined;
+      sse.close();
     };
-  }, [live]);
+  }, [live, context]);
+
+  // Bug 3 wiring: roster row click re-scopes the sessions panel to that
+  // project's directory via dockview-core's updateParameters — the same
+  // primitive handleDispatched already uses for the transcript panel.
+  // No-op if the project name isn't found in the roster (stale click).
+  const handleSelectProject = useCallback(
+    (name: string) => {
+      const project = context?.roster.projects.find((p) => p.name === name);
+      if (!project) return;
+      apiRef.current
+        ?.getPanel("sessions")
+        ?.api.updateParameters({ directory: project.expandedPath });
+    },
+    [context],
+  );
+
+  // Bug 3 wiring: sessions row click points the transcript panel at that
+  // session, mirroring handleDispatched's pattern exactly.
+  const handleSelectSession = useCallback((sessionId: string) => {
+    apiRef.current
+      ?.getPanel("transcript")
+      ?.api.updateParameters({ sessionID: sessionId });
+  }, []);
 
   const handleReady = useCallback(
     (event: DockviewReadyEvent) => {
@@ -286,7 +337,14 @@ export function DockviewShell({
       if (saved) {
         executeCommand({ type: "set_layout", layout: saved }, adapter);
       } else {
-        seedDefaultLayout(adapter, context, live, manifest);
+        seedDefaultLayout(
+          adapter,
+          context,
+          live,
+          manifest,
+          handleSelectProject,
+          handleSelectSession,
+        );
       }
 
       // Coarse panel-set signature (sorted ids), used to de-dupe/throttle
@@ -314,7 +372,14 @@ export function DockviewShell({
         auditStore.recordNativeLayoutChange(`panels=${panelIds.length}`);
       });
     },
-    [workspacePath, context, manifest, live],
+    [
+      workspacePath,
+      context,
+      manifest,
+      live,
+      handleSelectProject,
+      handleSelectSession,
+    ],
   );
 
   // U1.6: transcript auto-select on dispatch (the U1.5 deferred item).

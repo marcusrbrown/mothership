@@ -44,6 +44,31 @@ export interface PromptBarProps {
   onDispatched?: (sessionId: string) => void;
 }
 
+/** Finds the first mention node in the doc whose id/label matches a roster
+ * project name (bug-2 fix routing seam). Returns undefined if there's no
+ * mention or none of them name a real project — `dispatchPrompt` falls
+ * back to the default project in that case. */
+function firstMentionedProject(
+  doc: JSONDoc,
+  context: BusContext,
+): string | undefined {
+  const projectNames = new Set(context.roster.projects.map((p) => p.name));
+
+  function walk(nodes: JSONDoc["content"]): string | undefined {
+    for (const node of nodes ?? []) {
+      if (node.type === "mention") {
+        const candidate = node.attrs?.id ?? node.attrs?.label;
+        if (candidate && projectNames.has(candidate)) return candidate;
+      }
+      const found = walk(node.content);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  return walk(doc.content);
+}
+
 export function PromptBar({
   context,
   store,
@@ -103,7 +128,13 @@ export function PromptBar({
     const doc = editor.getJSON() as JSONDoc;
     const toSend = serializeDocToText(doc);
     if (!toSend.trim()) return;
-    const next = await submitPrompt(state, context, toSend);
+    // Bug 2 fix: route a new-session dispatch to the prompt's first
+    // @-project mention when present (and it names a real roster
+    // project — dispatchPrompt falls back to the default otherwise). The
+    // full prompt text (including the leading "@label") is still sent to
+    // the agent; the mention here is used ONLY for routing.
+    const project = firstMentionedProject(doc, context);
+    const next = await submitPrompt(state, context, toSend, {}, project);
     setState(next);
     if (!next.error) {
       editor.commands.clearContent();

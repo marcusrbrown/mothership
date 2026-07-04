@@ -13,6 +13,13 @@ const context: BusContext = {
         description: "",
         exists: true,
       },
+      {
+        name: "fro-bot/agent",
+        path: "~/src/fro-bot/agent",
+        expandedPath: "/Users/marcus/src/fro-bot/agent",
+        description: "",
+        exists: true,
+      },
     ],
   },
 } as unknown as BusContext;
@@ -83,6 +90,50 @@ describe("dispatchPrompt", () => {
     if (!result.ok) {
       expect(result.error).toBe("boom");
     }
+  });
+
+  test("first submit with an explicit project arg (bug-2 fix) routes to the mentioned project, not projects[0]", async () => {
+    let capturedArgs: unknown;
+    const dispatch = async (args: unknown) => {
+      capturedArgs = args;
+      return {
+        ok: true as const,
+        sessionId: "sess-2",
+        project: "fro-bot/agent",
+        mode: "new" as const,
+        directory: "/Users/marcus/src/fro-bot/agent",
+      };
+    };
+
+    const result = await dispatchPrompt(
+      { context, prompt: "@fro-bot/agent summarize", project: "fro-bot/agent" },
+      { dispatch },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(capturedArgs).toMatchObject({ project: "fro-bot/agent" });
+  });
+
+  test("first submit with a project arg that doesn't name a real roster project falls back to projects[0]", async () => {
+    let capturedArgs: unknown;
+    const dispatch = async (args: unknown) => {
+      capturedArgs = args;
+      return {
+        ok: true as const,
+        sessionId: "sess-3",
+        project: "fro-bot/dashboard",
+        mode: "new" as const,
+        directory: "/Users/marcus/src/fro-bot/dashboard",
+      };
+    };
+
+    const result = await dispatchPrompt(
+      { context, prompt: "@nonexistent summarize", project: "nonexistent" },
+      { dispatch },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(capturedArgs).toMatchObject({ project: "fro-bot/dashboard" });
   });
 
   test("no project in the workspace and no sessionId -> typed error, no dispatch call", async () => {
