@@ -8,6 +8,7 @@
 import type { IDockviewPanelProps } from "dockview-react";
 import { useCallback, useEffect, useState } from "react";
 import { snapshot } from "../../server/bus";
+import type { SessionStore } from "../../server/session-store";
 import type { BusContext } from "../../server/types";
 import {
   type RosterRowState,
@@ -18,12 +19,42 @@ import {
 export interface RosterPanelParams {
   /** BusContext to snapshot against. Absent → panel shows a config-missing error. */
   context?: BusContext;
+  /** Shared session store — drives the needs-attention badge (U1.3). Absent → badge never shown. */
+  store?: SessionStore;
   /** Fired when the operator selects a project row. No-op wiring point for later units. */
   onSelectProject?: (name: string) => void;
 }
 
+/** Maps pending-question sessionIDs to project names via the sessions'
+ * `directory` field. Directories are matched against the roster's project
+ * `path`/`expandedPath` in RosterPanel's render, so this just needs the
+ * directory string per pending session. */
+function projectsNeedingAttention(
+  store: SessionStore | undefined,
+  projects: { name: string; path: string }[],
+): ReadonlySet<string> {
+  if (!store) return new Set();
+  const pendingSessionIds = new Set(
+    store.getPendingQuestions().map((q) => q.sessionID),
+  );
+  if (pendingSessionIds.size === 0) return new Set();
+
+  const dirsWithPending = new Set(
+    store
+      .getSessions()
+      .filter((s) => pendingSessionIds.has(s.id) && s.directory)
+      .map((s) => s.directory as string),
+  );
+
+  const names = new Set<string>();
+  for (const p of projects) {
+    if (dirsWithPending.has(p.path)) names.add(p.name);
+  }
+  return names;
+}
+
 export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
-  const context = props.params.context;
+  const { context, store } = props.params;
   const [state, setState] = useState<RosterViewState>({ status: "loading" });
 
   const refresh = useCallback(async () => {
@@ -42,6 +73,9 @@ export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
           result.ok
             ? { ok: true, projects: result.projects }
             : { ok: false, error: result.error },
+          result.ok
+            ? projectsNeedingAttention(store, result.projects)
+            : undefined,
         ),
       );
     } catch (err) {
@@ -50,11 +84,13 @@ export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
         message: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [context]);
+  }, [context, store]);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    if (!store) return;
+    return store.subscribe(() => void refresh());
+  }, [refresh, store]);
 
   return (
     <div
@@ -117,12 +153,15 @@ function RosterRow({
   onSelect?: (name: string) => void;
 }) {
   const busy = row.kind === "ok" && row.busy;
+  const needsAttention = row.kind === "ok" && row.needsAttention;
   const borderColor =
     row.kind === "missing-path"
       ? "var(--color-highlight)"
       : row.kind === "status-error"
         ? "var(--color-error)"
-        : "var(--color-border)";
+        : needsAttention
+          ? "var(--color-cta)"
+          : "var(--color-border)";
 
   return (
     <li
@@ -177,6 +216,20 @@ function RosterRow({
           >
             MISSING PATH
           </span>
+        )}
+        {needsAttention && (
+          <span
+            aria-label="needs attention"
+            style={{
+              marginLeft: "auto",
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: "var(--color-cta)",
+              boxShadow: "0 0 6px var(--color-cta)",
+              flexShrink: 0,
+            }}
+          />
         )}
       </div>
       <span

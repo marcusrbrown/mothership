@@ -18,7 +18,14 @@ describe("toRosterRow", () => {
       kind: "ok",
       project: expect.objectContaining({ busyCount: 2 }),
       busy: true,
+      needsAttention: false,
     });
+  });
+
+  test("needsAttention true when project name is in the attention set", () => {
+    const row = toRosterRow(project({ name: "a" }), true);
+    expect(row.kind).toBe("ok");
+    if (row.kind === "ok") expect(row.needsAttention).toBe(true);
   });
 
   test("idle when busyCount is 0 or absent", () => {

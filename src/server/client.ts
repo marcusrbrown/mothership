@@ -40,9 +40,11 @@
 import {
   type MessageList,
   type QuestionList,
+  type SessionList,
   type SessionStatusMap,
   messageListSchema,
   pendingQuestionListSchema,
+  sessionListSchema,
   sessionStatusMapSchema,
 } from "./types";
 
@@ -80,6 +82,17 @@ export type OpencodeClient = {
     sessionID: string,
     params?: { limit?: number },
   ) => Promise<ClientResult<MessageList>>;
+  /**
+   * Re-added for U1.3: raw `GET /session?limit=` per-directory session
+   * listing. `/core`'s `roster()`/`snapshot()` only expose project-level
+   * aggregates (busyCount/sessionCount) plus pendingQuestions — no way to
+   * enumerate individual sessions for a project. session-store.ts uses this
+   * on every (re)connect as the authoritative session set for reconcile().
+   */
+  listSessions: (
+    directory: string,
+    params?: { limit?: number },
+  ) => Promise<ClientResult<SessionList>>;
 };
 
 function toBase64(s: string): string {
@@ -237,6 +250,12 @@ export function createOpencodeClient(
         `/session/${encodeURIComponent(sessionID)}/message${query}`,
       );
       return parseBoundary(messageListSchema, res);
+    },
+
+    async listSessions(directory, params) {
+      const query = params?.limit !== undefined ? `?limit=${params.limit}` : "";
+      const res = await rawRequest(config, directory, `/session${query}`);
+      return parseBoundary(sessionListSchema, res);
     },
   };
 }

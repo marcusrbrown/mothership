@@ -1,59 +1,51 @@
 /**
- * Registered `sessions` panel type: per-project session rows. See
- * `sessions-view.ts` for the GAP note — `src/server/bus` (space-bus /core)
- * exposes no session-listing call, so this renders the partial view
- * `snapshot()` can give today (sessions with a pending question). Selecting
- * a session is a no-op seam for U1.3's transcript wiring.
+ * Registered `sessions` panel type: full per-project session list, sourced
+ * from the shared `SessionStore` (see `src/server/session-store.ts`) rather
+ * than `snapshot()`'s partial pendingQuestions-only view. `refresh()` pulls
+ * a fresh snapshot from the store; `store.subscribe` keeps it live as
+ * events/reconciles land. Selecting a session drives U1.3's transcript
+ * panel via `onSelectSession`.
  */
 import type { IDockviewPanelProps } from "dockview-react";
 import { useCallback, useEffect, useState } from "react";
-import { snapshot } from "../../server/bus";
-import type { BusContext } from "../../server/types";
+import type { SessionStore } from "../../server/session-store";
 import { type SessionsViewState, toSessionsViewState } from "./sessions-view";
 
 export interface SessionsPanelParams {
-  /** BusContext to snapshot against. Absent → panel shows a config-missing error. */
-  context?: BusContext;
-  /** Name of the project whose sessions this panel lists. */
-  projectName?: string;
-  /** Fired when the operator selects a session row. No-op wiring point for U1.3. */
+  /** Shared session store for the workspace (one per BusContext). Absent → panel shows a config-missing error. */
+  store?: SessionStore;
+  /** Directory of the project whose sessions this panel lists. */
+  directory?: string;
+  /** Fired when the operator selects a session row. Drives the transcript panel. */
   onSelectSession?: (sessionId: string) => void;
 }
 
 export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
-  const { context, projectName, onSelectSession } = props.params;
+  const { store, directory, onSelectSession } = props.params;
   const [state, setState] = useState<SessionsViewState>({
     status: "loading",
   });
 
-  const refresh = useCallback(async () => {
-    if (!context || !projectName) {
+  const refresh = useCallback(() => {
+    if (!store || !directory) {
       setState({
         status: "error",
         message: "No workspace context or project selected.",
       });
       return;
     }
-    setState({ status: "loading" });
-    try {
-      const result = await snapshot({ context });
-      if (!result.ok) {
-        setState({ status: "error", message: result.error });
-        return;
-      }
-      const project = result.projects.find((p) => p.name === projectName);
-      setState(toSessionsViewState({ ok: true, project }));
-    } catch (err) {
-      setState({
-        status: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, [context, projectName]);
+    const sessions = store.getSessions(directory);
+    const pendingSessionIds = new Set(
+      store.getPendingQuestions().map((q) => q.sessionID),
+    );
+    setState(toSessionsViewState({ ok: true, sessions, pendingSessionIds }));
+  }, [store, directory]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    refresh();
+    if (!store) return;
+    return store.subscribe(refresh);
+  }, [refresh, store]);
 
   return (
     <div
@@ -111,7 +103,9 @@ function renderBody(
             padding: "var(--space-2)",
             marginBottom: "var(--space-1)",
             borderRadius: "var(--radius-sm)",
-            border: "1px solid var(--color-border)",
+            border: row.needsAttention
+              ? "1px solid var(--color-cta)"
+              : "1px solid var(--color-border)",
             background: "var(--color-surface-raised)",
             cursor: onSelectSession ? "pointer" : "default",
           }}
@@ -133,6 +127,19 @@ function renderBody(
           >
             {row.title || row.id}
           </span>
+          {row.needsAttention && (
+            <span
+              aria-label="needs attention"
+              style={{
+                marginLeft: "auto",
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: "var(--color-cta)",
+                boxShadow: "0 0 6px var(--color-cta)",
+              }}
+            />
+          )}
         </li>
       ))}
     </ul>

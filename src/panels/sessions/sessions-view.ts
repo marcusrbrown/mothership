@@ -1,24 +1,20 @@
 /**
  * DOM-free view logic for the sessions panel.
  *
- * GAP: `src/server/bus` (the space-bus /core facade) has no session-listing
- * call — `roster`/`snapshot` return only project-level aggregates
- * (`busyCount`/`sessionCount`), and `status(sessionId)` needs an id you
- * already have. The only session-shaped data snapshot() exposes is
- * `pendingQuestions: {sessionId, preview, options}[]` (sessions currently
- * blocked on a question). This module renders that partial view and is
- * built so a real per-project session list (once the facade gains one, or
- * once U1.3's SSE reconciliation accumulates session ids) drops in without
- * a panel rewrite — see `SessionRow`'s shape.
+ * U1.3 fix: previously this rendered only the partial view `snapshot()`
+ * exposes (pendingQuestions). Now it renders the full per-project session
+ * list from `session-store.ts`, which is reconciled from `listSessions()` +
+ * `getSessionStatus()` + `listQuestions()` on every SSE (re)connect and
+ * kept live via `applyEvent()`. `SessionRow.needsAttention` drives the
+ * magenta needs-attention marker (shared with the roster badge).
  */
-import type { SnapshotProject } from "../../server/bus";
+import type { StoredSession } from "../../server/session-store";
 
 export interface SessionRow {
   id: string;
   title: string;
-  /** True when the session is blocked on a pending question (the only
-   * per-session signal available from snapshot() today). */
   busy: boolean;
+  needsAttention: boolean;
 }
 
 export type SessionsViewState =
@@ -27,25 +23,31 @@ export type SessionsViewState =
   | { status: "error"; message: string }
   | { status: "ready"; rows: SessionRow[] };
 
-/** Derives the (partial) session list for a project from its snapshot entry. */
+/** Derives session rows for a project from the store's session list plus
+ * the set of sessionIDs with at least one pending question. */
 export function toSessionRows(
-  project: SnapshotProject | undefined,
+  sessions: StoredSession[],
+  pendingSessionIds: ReadonlySet<string>,
 ): SessionRow[] {
-  if (!project?.pendingQuestions) return [];
-  return project.pendingQuestions.map((q) => ({
-    id: q.sessionId,
-    title: q.preview,
-    busy: true,
+  return sessions.map((s) => ({
+    id: s.id,
+    title: s.title ?? s.id,
+    busy: s.status === "busy",
+    needsAttention: pendingSessionIds.has(s.id),
   }));
 }
 
 export function toSessionsViewState(
   result:
-    | { ok: true; project: SnapshotProject | undefined }
+    | {
+        ok: true;
+        sessions: StoredSession[];
+        pendingSessionIds: ReadonlySet<string>;
+      }
     | { ok: false; error: string },
 ): SessionsViewState {
   if (!result.ok) return { status: "error", message: result.error };
-  const rows = toSessionRows(result.project);
+  const rows = toSessionRows(result.sessions, result.pendingSessionIds);
   if (rows.length === 0) return { status: "empty" };
   return { status: "ready", rows };
 }

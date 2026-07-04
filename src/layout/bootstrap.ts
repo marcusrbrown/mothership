@@ -8,6 +8,7 @@ import { PlaceholderPanel } from "../panels/placeholder";
 import { RosterPanel } from "../panels/roster";
 import { SessionsPanel } from "../panels/sessions";
 import { TerminalPanel } from "../panels/terminal";
+import { TranscriptPanel } from "../panels/transcript";
 import { registerPanelType } from "./registry";
 
 registerPanelType("placeholder", {
@@ -28,4 +29,9 @@ registerPanelType("roster", {
 registerPanelType("sessions", {
   component: SessionsPanel,
   title: "Sessions",
+});
+
+registerPanelType("transcript", {
+  component: TranscriptPanel,
+  title: "Transcript",
 });
