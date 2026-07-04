@@ -151,27 +151,88 @@ fn write_rendezvous_file(app_data_dir: &std::path::Path, info: &IdeBridgeInfo) -
     }
 }
 
+/// Resolves the default sidecar dir to an ABSOLUTE path anchored on
+/// `CARGO_MANIFEST_DIR` (which is `<repo>/src-tauri` at build time), so the
+/// child process's CWD (which under `tauri dev` is `src-tauri/`) never
+/// matters. Canonicalizes to normalize the `..` component; if the path
+/// doesn't exist yet, falls back to the raw joined path so any resulting
+/// error message still names a concrete absolute path.
+///
+/// This anchor is correct for `bun run dev` (dev only).
+// TODO(packaging): a production-bundled app must ship the sidecar as a
+// Tauri resource and resolve it via `app.path().resource_dir()` instead of
+// this dev-only CARGO_MANIFEST_DIR anchor.
+fn default_sidecar_dir() -> String {
+    let joined = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../sidecar/ide-server"));
+    match std::fs::canonicalize(&joined) {
+        Ok(canon) => canon.to_string_lossy().into_owned(),
+        Err(_) => joined.to_string_lossy().into_owned(),
+    }
+}
+
+/// Truncates a byte buffer to at most `max` bytes (on a UTF-8 boundary) for
+/// safe inclusion in an error message.
+fn truncate_tail(bytes: &[u8], max: usize) -> String {
+    let start = bytes.len().saturating_sub(max);
+    let mut s = String::from_utf8_lossy(&bytes[start..]).into_owned();
+    if start > 0 {
+        s = format!("...{s}");
+    }
+    s
+}
+
 /// Spawns `bun run <sidecar_dir>/index.ts` with the token in env (never
 /// argv), reads the `IDE_PORT=<n>` line from its stdout, and returns the
 /// running child plus the parsed port. Blocks (with a bounded timeout) on
-/// the child's stdout only for that one line.
+/// the child's stdout only for that one line. Captures stderr so a spawn
+/// or port-timeout failure can surface a diagnosable tail instead of
+/// failing silently.
 fn spawn_and_await_port(
     sidecar_dir: &str,
     token: &str,
 ) -> std::io::Result<(Child, u16)> {
     let entry = format!("{sidecar_dir}/index.ts");
+    if !std::path::Path::new(&entry).exists() {
+        return Err(std::io::Error::other(format!(
+            "ide sidecar entry not found at {entry}"
+        )));
+    }
+
     let mut cmd = std::process::Command::new("bun");
     cmd.arg("run").arg(&entry);
     cmd.env("MOTHERSHIP_IDE_TOKEN", token);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::null());
+    cmd.stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| std::io::Error::other("sidecar stdout not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("sidecar stderr not piped"))?;
+
+    let stderr_buf = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+    {
+        let stderr_buf = stderr_buf.clone();
+        thread::spawn(move || {
+            use std::io::Read;
+            let mut reader = stderr;
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        let mut guard = stderr_buf.lock().unwrap_or_else(|p| p.into_inner());
+                        guard.extend_from_slice(&buf[..n]);
+                    }
+                }
+            }
+        });
+    }
 
     let (tx, rx) = std::sync::mpsc::channel::<Option<u16>>();
     thread::spawn(move || {
@@ -206,9 +267,13 @@ fn spawn_and_await_port(
         _ => {
             let _ = child.kill();
             let _ = child.wait();
-            Err(std::io::Error::other(
-                "ide sidecar did not report IDE_PORT within timeout",
-            ))
+            let tail = {
+                let guard = stderr_buf.lock().unwrap_or_else(|p| p.into_inner());
+                truncate_tail(&guard, 500)
+            };
+            Err(std::io::Error::other(format!(
+                "ide sidecar failed to start ({entry}): {tail}"
+            )))
         }
     }
 }
@@ -252,7 +317,10 @@ pub fn ide_bridge_info(
         }
     }
 
-    let dir = sidecar_dir.unwrap_or_else(|| "sidecar/ide-server".to_string());
+    let dir = match sidecar_dir {
+        Some(d) if !d.is_empty() => d,
+        _ => default_sidecar_dir(),
+    };
     let token = generate_token();
     let (child, port) = spawn_and_await_port(&dir, &token).map_err(|e| e.to_string())?;
     let info = IdeBridgeInfo { port, token: token.clone() };
