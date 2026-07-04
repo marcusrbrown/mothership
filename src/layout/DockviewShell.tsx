@@ -15,6 +15,7 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
  */
 import { useCallback, useEffect, useRef } from "react";
 import "./dockview-theme.css";
+import { PromptBar } from "../promptbar";
 import { type OpencodeClient, createOpencodeClient } from "../server/client";
 import { type Demux, createDemux } from "../server/demux";
 import { type SessionStore, createSessionStore } from "../server/session-store";
@@ -199,10 +200,17 @@ export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
   );
 
   return (
-    <DockviewReact
-      className="mothership-dockview"
-      components={panelComponents()}
-      onReady={handleReady}
-    />
+    <>
+      <DockviewReact
+        className="mothership-dockview"
+        components={panelComponents()}
+        onReady={handleReady}
+      />
+      {/* U1.5: floating prompt bar, not a dockview panel. Transcript
+       * auto-select on dispatch is deferred — see U1.5 report — since
+       * wiring it here would require plumbing panel ids through this
+       * component beyond the "couple lines" the unit's scope allows. */}
+      <PromptBar context={context} />
+    </>
   );
 }
