@@ -1,8 +1,27 @@
 /**
- * OpencodeClient: thin fetch wrapper for the opencode server API the tracer
- * consumes. Mirrors space-bus's `src/core.ts` request semantics (per-request
+ * Raw endpoints not covered by space-bus /core — audit on every space-bus
+ * upgrade.
+ *
+ * /core (roster, status, snapshot, dispatch, result — see `./bus.ts`)
+ * covers the aggregate reads and dispatch/steering the app needs for most
+ * flows. This module keeps only what /core does not expose:
+ *
+ * - `listMessages`: transcript backfill. /core's `result()` only returns
+ *   the final text of a session, not the full message/part history the
+ *   transcript panel needs to render.
+ * - `listQuestions` + `replyQuestion` + `rejectQuestion`: /core's
+ *   `dispatch()` steering replies to the *first* pending question for a
+ *   session (bus_task semantics); the transcript panel needs to reply to a
+ *   specific `requestID` directly, which dispatch()'s signature doesn't
+ *   support.
+ * - `getSessionStatus`: a single cheap per-directory status map for SSE
+ *   reconciliation, cheaper than a full `snapshot()` sweep across every
+ *   project when only one directory needs re-checking.
+ *
+ * Mirrors space-bus's `src/core.ts` request semantics (per-request
  * `x-opencode-directory`, 30s timeout, `redirect: 'error'`, single zod
- * boundary crossing per response) without importing the package.
+ * boundary crossing per response) without importing the package's
+ * internals.
  *
  * Auth: `OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME` env vars are
  * not reachable from the webview, so credentials are accepted directly as
@@ -11,25 +30,20 @@
  * see Key Technical Decisions in the tracer plan.
  *
  * GET/HEAD requests move `x-opencode-directory` into a `?directory=` query
- * param (matching the opencode server SDK's own rewrite for those methods);
- * all other methods send it as a header.
+ * param (matching the opencode server SDK's own rewrite for those
+ * methods); all other methods send it as a header.
  *
  * Every response crosses its zod boundary schema exactly once. No throws
  * across this module's public boundary — every method returns a
  * discriminated `{ok: true, value} | {ok: false, error: {status, message}}`.
  */
 import {
-  type MessageListItem,
-  type QuestionRequest,
-  type SessionInfo,
+  type MessageList,
+  type QuestionList,
   type SessionStatusMap,
-  type TodoList,
   messageListSchema,
-  questionListSchema,
-  sessionInfoSchema,
-  sessionListSchema,
+  pendingQuestionListSchema,
   sessionStatusMapSchema,
-  todoListSchema,
 } from "./types";
 
 export type ClientResult<T> =
@@ -51,9 +65,7 @@ export type OpencodeClient = {
   getSessionStatus: (
     directory: string,
   ) => Promise<ClientResult<SessionStatusMap>>;
-  listQuestions: (
-    directory: string,
-  ) => Promise<ClientResult<QuestionRequest[]>>;
+  listQuestions: (directory: string) => Promise<ClientResult<QuestionList>>;
   replyQuestion: (
     directory: string,
     requestID: string,
@@ -63,28 +75,11 @@ export type OpencodeClient = {
     directory: string,
     requestID: string,
   ) => Promise<ClientResult<void>>;
-  createSession: (
-    directory: string,
-    params: { title?: string },
-  ) => Promise<ClientResult<SessionInfo>>;
-  promptAsync: (
-    directory: string,
-    sessionID: string,
-    parts: unknown[],
-  ) => Promise<ClientResult<void>>;
   listMessages: (
     directory: string,
     sessionID: string,
     params?: { limit?: number },
-  ) => Promise<ClientResult<MessageListItem[]>>;
-  listSessions: (
-    directory: string,
-    params?: { limit?: number },
-  ) => Promise<ClientResult<SessionInfo[]>>;
-  getTodos: (
-    directory: string,
-    sessionID: string,
-  ) => Promise<ClientResult<TodoList>>;
+  ) => Promise<ClientResult<MessageList>>;
 };
 
 function toBase64(s: string): string {
@@ -188,7 +183,7 @@ export function createOpencodeClient(
 
     async listQuestions(directory) {
       const res = await rawRequest(config, directory, "/question");
-      return parseBoundary(questionListSchema, res);
+      return parseBoundary(pendingQuestionListSchema, res);
     },
 
     async replyQuestion(directory, requestID, answers) {
@@ -234,36 +229,6 @@ export function createOpencodeClient(
       return { ok: true, value: undefined };
     },
 
-    async createSession(directory, params) {
-      const res = await rawRequest(config, directory, "/session", {
-        method: "POST",
-        body: JSON.stringify(params),
-      });
-      return parseBoundary(sessionInfoSchema, res);
-    },
-
-    async promptAsync(directory, sessionID, parts) {
-      const res = await rawRequest(
-        config,
-        directory,
-        `/session/${encodeURIComponent(sessionID)}/prompt_async`,
-        {
-          method: "POST",
-          body: JSON.stringify({ parts }),
-        },
-      );
-      if (res.status !== 204) {
-        return {
-          ok: false,
-          error: {
-            status: res.status,
-            message: res.bodyText || `expected 204, got ${res.status}`,
-          },
-        };
-      }
-      return { ok: true, value: undefined };
-    },
-
     async listMessages(directory, sessionID, params) {
       const query = params?.limit !== undefined ? `?limit=${params.limit}` : "";
       const res = await rawRequest(
@@ -272,21 +237,6 @@ export function createOpencodeClient(
         `/session/${encodeURIComponent(sessionID)}/message${query}`,
       );
       return parseBoundary(messageListSchema, res);
-    },
-
-    async listSessions(directory, params) {
-      const query = params?.limit !== undefined ? `?limit=${params.limit}` : "";
-      const res = await rawRequest(config, directory, `/session${query}`);
-      return parseBoundary(sessionListSchema, res);
-    },
-
-    async getTodos(directory, sessionID) {
-      const res = await rawRequest(
-        config,
-        directory,
-        `/session/${encodeURIComponent(sessionID)}/todo`,
-      );
-      return parseBoundary(todoListSchema, res);
     },
   };
 }

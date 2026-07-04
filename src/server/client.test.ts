@@ -33,35 +33,15 @@ describe("createOpencodeClient", () => {
 
   test("POST requests inject x-opencode-directory header, not query param", async () => {
     const { fetchImpl, calls } = stubFetch(
-      () => new Response(JSON.stringify({ id: "ses_1" }), { status: 200 }),
+      () => new Response(null, { status: 200 }),
     );
     const client = createOpencodeClient({ baseUrl: BASE_URL, fetchImpl });
-    await client.createSession("/workspace/proj-a", { title: "test" });
+    await client.replyQuestion("/workspace/proj-a", "que_1", [["Yes"]]);
     const call = calls[0] as CapturedRequest;
     expect(call.url).not.toContain("directory=");
     const headers = call.init.headers as Record<string, string>;
     expect(headers["x-opencode-directory"]).toBe("/workspace/proj-a");
     expect(headers["content-type"]).toBe("application/json");
-  });
-
-  test("promptAsync: 204 -> ok", async () => {
-    const { fetchImpl } = stubFetch(() => new Response(null, { status: 204 }));
-    const client = createOpencodeClient({ baseUrl: BASE_URL, fetchImpl });
-    const result = await client.promptAsync("/dir", "ses_1", [
-      { type: "text", text: "hi" },
-    ]);
-    expect(result.ok).toBe(true);
-  });
-
-  test("promptAsync: non-204 -> typed error", async () => {
-    const { fetchImpl } = stubFetch(
-      () => new Response("boom", { status: 500 }),
-    );
-    const client = createOpencodeClient({ baseUrl: BASE_URL, fetchImpl });
-    const result = await client.promptAsync("/dir", "ses_1", []);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected error");
-    expect(result.error.status).toBe(500);
   });
 
   test("zod boundary rejects malformed status payload with typed error", async () => {
@@ -118,7 +98,7 @@ describe("createOpencodeClient", () => {
     );
   });
 
-  test("listQuestions parses question list shape", async () => {
+  test("listQuestions parses pending-question list shape", async () => {
     const payload = [
       {
         id: "que_1",
@@ -126,11 +106,9 @@ describe("createOpencodeClient", () => {
         questions: [
           {
             question: "Proceed?",
-            header: "H",
-            options: [{ label: "Yes", description: "d" }],
+            options: [{ label: "Yes" }],
           },
         ],
-        tool: { messageID: "msg_1" },
       },
     ];
     const { fetchImpl } = stubFetch(
@@ -211,7 +189,7 @@ describe("createOpencodeClient", () => {
   test("listMessages passes limit as query param and parses items", async () => {
     const payload = [
       {
-        info: { id: "msg_1", role: "assistant" },
+        info: { role: "assistant" },
         parts: [{ type: "text", text: "hi" }],
       },
     ];
@@ -222,31 +200,5 @@ describe("createOpencodeClient", () => {
     const result = await client.listMessages("/dir", "ses_1", { limit: 50 });
     expect((calls[0] as CapturedRequest).url).toContain("limit=50");
     expect(result.ok).toBe(true);
-  });
-
-  test("listSessions and getTodos round-trip through their schemas", async () => {
-    const sessions = [{ id: "ses_1", title: "t" }];
-    const { fetchImpl: fetchSessions } = stubFetch(
-      () => new Response(JSON.stringify(sessions), { status: 200 }),
-    );
-    const client = createOpencodeClient({
-      baseUrl: BASE_URL,
-      fetchImpl: fetchSessions,
-    });
-    const sessionResult = await client.listSessions("/dir", { limit: 10 });
-    expect(sessionResult.ok).toBe(true);
-
-    const todos = [
-      { content: "do thing", status: "pending", priority: "high" },
-    ];
-    const { fetchImpl: fetchTodos } = stubFetch(
-      () => new Response(JSON.stringify(todos), { status: 200 }),
-    );
-    const client2 = createOpencodeClient({
-      baseUrl: BASE_URL,
-      fetchImpl: fetchTodos,
-    });
-    const todoResult = await client2.getTodos("/dir", "ses_1");
-    expect(todoResult.ok).toBe(true);
   });
 });
