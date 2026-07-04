@@ -2,6 +2,7 @@
 mod pty;
 
 use pty::PtyState;
+use tauri::Manager;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -20,6 +21,14 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Reap every live PTY on app exit — closes the previously
+            // documented "no window-destroy/app-quit cleanup hook" gap.
+            if let tauri::RunEvent::Exit = event {
+                let state = app_handle.state::<PtyState>();
+                pty::kill_all(&state);
+            }
+        });
 }

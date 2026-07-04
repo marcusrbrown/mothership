@@ -5,9 +5,15 @@
  * in later units.
  */
 import { PlaceholderPanel } from "../panels/placeholder";
+import { TerminalPanel } from "../panels/terminal";
 import { registerPanelType } from "./registry";
 
 registerPanelType("placeholder", {
   component: PlaceholderPanel,
   title: "Placeholder",
+});
+
+registerPanelType("terminal", {
+  component: TerminalPanel,
+  title: "Terminal",
 });

@@ -55,10 +55,10 @@ function seedDefaultLayout(adapter: DockviewAdapter): void {
     {
       type: "split",
       panelId: "terminal",
-      panelType: "placeholder",
+      panelType: "terminal",
       referencePanelId: "sessions",
       direction: "down",
-      params: { panelType: "terminal" },
+      params: {},
     },
     adapter,
   );

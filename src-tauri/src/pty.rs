@@ -1,19 +1,23 @@
-//! Spike-grade PTY layer (U0.3) — portable-pty behind a small set of Tauri
-//! commands, streaming output over per-session event channels.
+//! Promotion-grade PTY layer (U1.4, promoted from the U0.3 spike) —
+//! portable-pty behind a small set of Tauri commands, streaming output over
+//! per-session event channels.
 //!
-//! Decision rationale lives in docs/solutions/2026-07-04-spike-0b-pty.md.
+//! Decision rationale lives in
+//! docs/solutions/best-practices/pty-portable-pty-xterm6-decision-2026-07-04.md.
 //!
-//! Known gaps (documented, not silently swept under the rug):
-//! - Reader threads are detached; they exit naturally when the child dies or
-//!   the pipe closes, but there's no join/handle tracked for shutdown.
-//! - Window-destroy cleanup is NOT wired up in this spike — only explicit
-//!   `pty_kill` and process exit reap children. See finding doc "Findings".
-//! - No output backpressure/coalescing beyond the OS pipe buffer; fine for a
-//!   throughput spike, not a production channel design.
+//! Promoted from spike-grade with two of the three documented gaps closed:
+//! - Reader `JoinHandle`s are now tracked per session so shutdown can join
+//!   them (best-effort — the loop exits on EOF/emit-failure regardless).
+//! - `kill_all` reaps every live session; wired into the app's exit/
+//!   window-destroy path in lib.rs so quitting the app never orphans a shell.
+//! - Output backpressure/coalescing beyond the OS pipe buffer is still out of
+//!   scope (fine for one-or-a-few concurrent terminals; revisit if
+//!   dogfooding shows a need).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -23,6 +27,7 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    reader_thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Default)]
@@ -80,24 +85,11 @@ pub fn pty_spawn(
 
     let pty_id = uuid::Uuid::new_v4().to_string();
 
-    let session = PtySession {
-        master: pair.master,
-        writer,
-        child,
-    };
-
-    {
-        let mut sessions = state
-            .0
-            .lock()
-            .map_err(|_| "pty state poisoned".to_string())?;
-        sessions.insert(pty_id.clone(), session);
-    }
-
     // Reader thread: streams raw bytes (utf8-lossy decoded) to the frontend
     // via a per-session event. Exits naturally on EOF (child exit or pipe
-    // close), which is when we also emit the exit event.
-    {
+    // close), which is when we also emit the exit event. Handle is tracked
+    // on the session so shutdown paths can join it.
+    let reader_thread = {
         let app = app.clone();
         let pty_id = pty_id.clone();
         std::thread::spawn(move || {
@@ -118,7 +110,22 @@ pub fn pty_spawn(
                 }
             }
             let _ = app.emit(&exit_event, PtyExitPayload { code: None });
-        });
+        })
+    };
+
+    let session = PtySession {
+        master: pair.master,
+        writer,
+        child,
+        reader_thread: Some(reader_thread),
+    };
+
+    {
+        let mut sessions = state
+            .0
+            .lock()
+            .map_err(|_| "pty state poisoned".to_string())?;
+        sessions.insert(pty_id.clone(), session);
     }
 
     Ok(pty_id)
@@ -166,20 +173,43 @@ pub fn pty_resize(
     Ok(())
 }
 
-/// Kills the child process and removes the session. This is the only
-/// cleanup path exercised by this spike — app-quit/window-destroy cleanup
-/// is not wired up (see module docs).
+/// Kills the child process and removes the session, joining its reader
+/// thread best-effort (bounded — the thread exits promptly once the child
+/// dies and the pipe closes).
 #[tauri::command]
 pub fn pty_kill(state: State<'_, PtyState>, pty_id: String) -> Result<(), String> {
     let mut sessions = state
         .0
         .lock()
         .map_err(|_| "pty state poisoned".to_string())?;
-    if let Some(mut session) = sessions.remove(&pty_id) {
-        let _ = session.child.kill();
-        let _ = session.child.wait();
+    if let Some(session) = sessions.remove(&pty_id) {
+        kill_session(session);
     }
     Ok(())
+}
+
+fn kill_session(mut session: PtySession) {
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    if let Some(handle) = session.reader_thread.take() {
+        let _ = handle.join();
+    }
+}
+
+/// Kills every live PTY session. Called from the app's exit/window-destroy
+/// path (lib.rs) so quitting never leaves orphaned shells behind — the
+/// previously documented gap (no window-destroy/app-quit cleanup hook).
+pub fn kill_all(state: &PtyState) {
+    let sessions = {
+        let mut guard = match state.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut *guard)
+    };
+    for (_, session) in sessions {
+        kill_session(session);
+    }
 }
 
 #[cfg(test)]
