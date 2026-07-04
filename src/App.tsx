@@ -1,4 +1,5 @@
 import "./layout/bootstrap";
+import { ErrorBoundary } from "./app/ErrorBoundary";
 import { StartupHandshake } from "./app/StartupHandshake";
 import { DockviewShell } from "./layout";
 
@@ -63,15 +64,17 @@ function App() {
         </header>
       )}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <StartupHandshake>
-          {(context, workspacePath, manifest) => (
-            <DockviewShell
-              workspacePath={workspacePath}
-              context={context}
-              manifest={manifest}
-            />
-          )}
-        </StartupHandshake>
+        <ErrorBoundary>
+          <StartupHandshake>
+            {(context, workspacePath, manifest) => (
+              <DockviewShell
+                workspacePath={workspacePath}
+                context={context}
+                manifest={manifest}
+              />
+            )}
+          </StartupHandshake>
+        </ErrorBoundary>
       </div>
     </div>
   );
