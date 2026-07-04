@@ -134,21 +134,37 @@ visual harness) but not yet exercised inside the real Tauri window.
 
 ## Findings (interactive run)
 
-PENDING — run this manually before flipping this section:
+Environment: macOS WKWebView, Tauri v2.x window (1440x900), opencode server
+v1.17.13+harness.ee55e157 on `127.0.0.1:4096`.
 
-1. `bun run dev`, then open `http://localhost:<vite-port>/?spike=0a` in the
-   Tauri window (or the plain browser dev server first, then confirm again
-   inside the actual Tauri/WKWebView shell — the risk is WKWebView-specific).
-2. Work through the instructions panel (panel 6) in order: drag each panel
-   to a new group, split, tab, close, popout, re-dock.
-3. Confirm the two `src=` iframes reload on reparent (dockview #162) and the
-   `srcdoc` iframe's canvas/counter does **not** reset or freeze.
-4. Run "Run auto-stress" and watch Activity Monitor (macOS) before, during,
-   and after the 20-iteration pass; also watch the stats bar's heap reading
-   if non-`n/a`.
-5. Try "Popout active group" — record whether `window.open()` succeeds under
-   Tauri/WKWebView, and whether the popped-out window's iframes/canvas keep
-   running.
-6. Record here: pass/fail per exit criterion above, the iframe-reload
-   characterization result, popout viability, and any crash/freeze
-   specifics (which panel, which operation, screenshot of the event log).
+- **Memory**: ~42MB WebContent baseline at launch, settling to ~420MB after
+  running through the stress scenarios (hover spikes 380–450MB peak). Caveat:
+  drag/dock was broken during this run (see below), so stress coverage was
+  partial — these numbers should be refreshed on the re-run after the
+  drag-drop fix.
+- **Drag/dock**: FAILED on first run — a dragged tab attached to the cursor
+  with a `+` indicator but never docked anywhere. Root cause, diagnosed after
+  the run: this is **not** a harness bug and **not** a WKWebView limitation.
+  Tauri v2's native drag-drop handler is enabled by default on the webview
+  and swallows the HTML5 `dragover`/`drop` events that dockview's DnD depends
+  on. Fix applied: `"dragDropEnabled": false` in `tauri.conf.json`'s window
+  config (native file-drop is unused in the tracer). Status: fix committed
+  (b94d238); drag re-verification is PENDING a second interactive window run.
+- **Popout**: all attempts failed — `window.open` is blocked under Tauri
+  WKWebView by default, and dockview's `addPopoutGroup` resolved `false`
+  every time. Decision per the plan's risk table: popout is **cut** from the
+  tracer — no acceptance example depends on it. Revisit only if a real need
+  appears later; it would require Tauri's native window-creation API instead
+  of `window.open`.
+- No crashes, no frozen frames observed at any point in this run.
+- `srcdoc`/`src=` iframe reload behavior on reparent: **not yet observed** —
+  drag was broken, so no reparent ever occurred. Pending re-run.
+- DX note: Cmd+R does not reload a Tauri window by default (no reload
+  accelerator wired up). Added dev-only Cmd+R / Cmd+Shift+H handlers to
+  `src/main.tsx` so spike-hopping doesn't require quitting/relaunching the
+  app.
+
+**Verdict**: STOP gate **NOT YET CLEARED** — pending drag re-verification
+after the `dragDropEnabled` fix. No evidence so far of the platform-level
+instability the gate guards against (no crashes, no frozen frames, no
+unbounded memory growth).

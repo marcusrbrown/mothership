@@ -194,7 +194,28 @@ the `id:` protocol-field absence noted above, this phase is now higher
 priority to re-run with a self-started, disposable server instance — the
 resume story may be weaker than the plan assumed.
 
-## PENDING: webview-origin verification
+## Webview-origin verification
+
+Environment: macOS WKWebView, Tauri v2.x window (1440x900), opencode server
+v1.17.13+harness.ee55e157 on `127.0.0.1:4096`, real `tauri://localhost` origin.
+
+- **Baseline `fetch` from the webview**: `OK — status 200,
+  Access-Control-Allow-Origin: (none)` — the request succeeded even though no
+  ACAO header was present in the response. Nuance worth flagging: either the
+  WKWebView custom-scheme page doesn't send/enforce `Origin` on this GET, or
+  Tauri's scheme handler bypasses CORS entirely for it — either way, direct
+  webview→server `fetch` works, which is the actual exit criterion. Do not
+  rely on ACAO-echo behavior as a signal; if a future opencode build starts
+  enforcing CORS strictly, the `--cors` flag remains the fallback.
+- **SSE reconnect**: works — a fresh `server.connected` followed by
+  `server.heartbeat` appeared in the event tail after every "Reconnect"
+  press.
+- **Question round-trip from the webview**: create session → question
+  prompt → list questions → reply "Yes" all succeeded at every step, matching
+  the sequence observed in the Bun probe.
+
+**Verdict**: gate **CLEARED** — live event tail and steering verified from
+the actual webview origin, not just from Bun's `fetch`.
 
 The Bun script above verifies the contract from Node/Bun's `fetch` +
 hand-rolled SSE parser. It does **not** exercise:
