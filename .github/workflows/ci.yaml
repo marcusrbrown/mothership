@@ -1,0 +1,65 @@
+# CI gates for mothership. The build session extends this with lint / typecheck /
+# test / tauri-build jobs as the app takes shape; design-check is a permanent gate.
+---
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  design-check:
+    name: Design Check
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 🎨 Detect UI anti-patterns
+        run: |
+          if [ ! -d src ]; then
+            echo "No src/ yet — design gate armed, nothing to scan."
+            exit 0
+          fi
+          findings=$(npx --yes impeccable detect --json src)
+          if [ "$findings" != "[]" ]; then
+            echo "$findings"
+            echo "Impeccable detected UI anti-patterns. Address them or, for an intentional brand choice, add a scoped ignore via 'impeccable ignores add-value' (committed in .impeccable/config.json)."
+            exit 1
+          fi
+          echo "No UI anti-patterns detected."
+
+  check-workflows:
+    name: Check Workflows
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 🛠 Lint Workflows
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0

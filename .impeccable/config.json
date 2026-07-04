@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "bounce-easing",
+        "value": "cubic-bezier(0.34, 1.56, 0.64, 1)",
+        "createdAt": "2026-07-03T00:00:00.000Z",
+        "note": "Brand --ease-spring token for playful micro-interactions, inherited from the Fro Bot styleguide. Bounce-easing detection stays active for any other value."
+      }
+    ]
+  }
+}
