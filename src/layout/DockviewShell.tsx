@@ -1,3 +1,4 @@
+import type { DockviewApi } from "dockview-core";
 import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
 /**
  * DockviewReact wrapper: components sourced from the panel registry,
@@ -170,6 +171,7 @@ export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
   const liveRef = useRef<LiveWorkspace | undefined>(undefined);
   const bridgeRef = useRef<LayoutBridge | undefined>(undefined);
+  const apiRef = useRef<DockviewApi | undefined>(undefined);
 
   // U1.7 (AE3): mount the ide_* MCP bridge once, torn down on unmount. Any
   // relayed request runs `executeCommand` against whatever adapter is
@@ -227,18 +229,40 @@ export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
     [workspacePath, context],
   );
 
+  // U1.6: transcript auto-select on dispatch (the U1.5 deferred item).
+  // Minimal wiring — no new panel-id plumbing beyond the well-known
+  // "transcript" panel id already seeded by seedDefaultLayout: push the
+  // dispatched sessionId into that panel's params via updateParameters, the
+  // same primitive dockview-core already exposes on IDockviewPanel.api.
+  const handleDispatched = useCallback((sessionId: string) => {
+    const panel = adapterRef.current?.panels.find((p) => p.id === "transcript");
+    if (!panel) return;
+    // adapterRef targets our narrow DockviewAdapter seam, which doesn't
+    // expose per-panel param updates (out of scope to add there for one
+    // caller) — reach the dockview-core panel directly via the event.api
+    // captured in handleReady instead.
+    apiRef.current
+      ?.getPanel("transcript")
+      ?.api.updateParameters({ sessionID: sessionId });
+  }, []);
+
   return (
     <>
       <DockviewReact
         className="mothership-dockview"
         components={panelComponents()}
-        onReady={handleReady}
+        onReady={(event) => {
+          apiRef.current = event.api;
+          handleReady(event);
+        }}
       />
-      {/* U1.5: floating prompt bar, not a dockview panel. Transcript
-       * auto-select on dispatch is deferred — see U1.5 report — since
-       * wiring it here would require plumbing panel ids through this
-       * component beyond the "couple lines" the unit's scope allows. */}
-      <PromptBar context={context} />
+      {/* U1.6: floating prompt bar, not a dockview panel. */}
+      <PromptBar
+        context={context}
+        store={liveRef.current?.store}
+        directory={context?.roster.projects[0]?.expandedPath}
+        onDispatched={handleDispatched}
+      />
     </>
   );
 }
