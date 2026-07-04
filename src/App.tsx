@@ -64,8 +64,12 @@ function App() {
       )}
       <div style={{ flex: 1, minHeight: 0 }}>
         <StartupHandshake>
-          {(context, workspacePath) => (
-            <DockviewShell workspacePath={workspacePath} context={context} />
+          {(context, workspacePath, manifest) => (
+            <DockviewShell
+              workspacePath={workspacePath}
+              context={context}
+              manifest={manifest}
+            />
           )}
         </StartupHandshake>
       </div>

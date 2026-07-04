@@ -20,6 +20,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { detectWorkspace } from "../detect/detectors";
+import type { WorkspaceManifest } from "../detect/manifest";
 import { roster } from "../server/bus";
 import type { BusContext } from "../server/types";
 import { loadWorkspace } from "../workspace/config";
@@ -40,16 +42,23 @@ export const WORKSPACE_DIR = "/Users/mrbrown/src/github.com/fro-bot/space-bus";
 
 export interface StartupHandshakeProps {
   workspaceDir?: string;
-  children: (context: BusContext, workspacePath: string) => React.ReactNode;
+  children: (
+    context: BusContext,
+    workspacePath: string,
+    manifest: WorkspaceManifest,
+  ) => React.ReactNode;
 }
 
 /** Existing workspace-load → bus-context → server-probe sequence, run once
  * `ensure_server` reports the server is running. Exported so tests can
  * drive it without mounting React. Unchanged in behavior from pre-U1.9. */
-export async function connectServer(
-  workspaceDir: string,
-): Promise<
-  | { status: "connected"; context: BusContext; workspacePath: string }
+export async function connectServer(workspaceDir: string): Promise<
+  | {
+      status: "connected";
+      context: BusContext;
+      workspacePath: string;
+      manifest: WorkspaceManifest;
+    }
   | { status: "failed"; message: string }
 > {
   try {
@@ -86,7 +95,21 @@ export async function connectServer(
       };
     }
 
-    return { status: "connected", context, workspacePath: workspaceDir };
+    // R4/R5/R6: mechanical detection (no LLM, no network — filesystem
+    // existence/read via the same injected seams as the workspace load
+    // above) runs once per successful connect, feeding the placeholder
+    // tabs DockviewShell seeds per detected interface.
+    const manifest = await detectWorkspace(context.roster.projects, {
+      pathExists,
+      readTextFile,
+    });
+
+    return {
+      status: "connected",
+      context,
+      workspacePath: workspaceDir,
+      manifest,
+    };
   } catch (err) {
     return {
       status: "failed",
@@ -195,7 +218,11 @@ export function StartupHandshake({
             opencode server: {CHIP_LABEL[liveStatus]}
           </div>
         )}
-        {children(state.context as BusContext, state.workspacePath)}
+        {children(
+          state.context as BusContext,
+          state.workspacePath,
+          (state.manifest as WorkspaceManifest | undefined) ?? { projects: [] },
+        )}
       </>
     );
   }

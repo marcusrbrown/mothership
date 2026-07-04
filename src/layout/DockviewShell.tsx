@@ -16,6 +16,7 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
  */
 import { useCallback, useEffect, useRef } from "react";
 import "./dockview-theme.css";
+import type { WorkspaceManifest } from "../detect/manifest";
 import { auditStore } from "../panels/audit-log";
 import { PromptBar } from "../promptbar";
 import { type OpencodeClient, createOpencodeClient } from "../server/client";
@@ -36,6 +37,10 @@ export interface DockviewShellProps {
   /** Live BusContext for the roster/sessions panels; absent → those panels
    * render their own config-missing error state (no crash). */
   context?: BusContext;
+  /** Per-project detected interfaces (R4/R5/R6) — drives the placeholder
+   * tabs seeded per project with a detected interface. Absent/empty →
+   * universal panels only (R6). */
+  manifest?: WorkspaceManifest;
 }
 
 interface LiveWorkspace {
@@ -99,10 +104,40 @@ export function createLiveWorkspace(context: BusContext): LiveWorkspace {
   return { client, demux, store, sse };
 }
 
+/** Seeds a placeholder tab (R5, placeholder-grade — the real Storybook
+ * panel lands in Phase 2/AE1) for every project with a detected `storybook`
+ * interface. Projects with no detected interfaces add nothing (R6). */
+function seedDetectedPanels(
+  adapter: DockviewAdapter,
+  manifest: WorkspaceManifest | undefined,
+): void {
+  if (!manifest) return;
+  for (const project of manifest.projects) {
+    const storybook = project.interfaces.find((i) => i.kind === "storybook");
+    if (!storybook) continue;
+    executeCommand(
+      {
+        type: "split",
+        panelId: `storybook-${project.projectName}`,
+        panelType: "placeholder",
+        referencePanelId: "transcript",
+        direction: "right",
+        title: `Storybook · ${project.projectName}`,
+        params: {
+          panelType: "storybook",
+          label: `Storybook · ${project.projectName}`,
+        },
+      },
+      adapter,
+    );
+  }
+}
+
 function seedDefaultLayout(
   adapter: DockviewAdapter,
   context: BusContext | undefined,
   live: LiveWorkspace | undefined,
+  manifest: WorkspaceManifest | undefined,
 ): void {
   const firstProject = context?.roster.projects[0];
 
@@ -166,9 +201,15 @@ function seedDefaultLayout(
     },
     adapter,
   );
+
+  seedDetectedPanels(adapter, manifest);
 }
 
-export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
+export function DockviewShell({
+  workspacePath,
+  context,
+  manifest,
+}: DockviewShellProps) {
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
   const liveRef = useRef<LiveWorkspace | undefined>(undefined);
   const bridgeRef = useRef<LayoutBridge | undefined>(undefined);
@@ -220,7 +261,7 @@ export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
       if (saved) {
         executeCommand({ type: "set_layout", layout: saved }, adapter);
       } else {
-        seedDefaultLayout(adapter, context, liveRef.current);
+        seedDefaultLayout(adapter, context, liveRef.current, manifest);
       }
 
       // Coarse panel-set signature (sorted ids), used to de-dupe/throttle
@@ -248,7 +289,7 @@ export function DockviewShell({ workspacePath, context }: DockviewShellProps) {
         auditStore.recordNativeLayoutChange(`panels=${panelIds.length}`);
       });
     },
-    [workspacePath, context],
+    [workspacePath, context, manifest],
   );
 
   // U1.6: transcript auto-select on dispatch (the U1.5 deferred item).

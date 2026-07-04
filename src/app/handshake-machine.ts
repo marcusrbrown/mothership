@@ -18,7 +18,12 @@ export interface ServerStateWire {
 export type HandshakeState =
   | { status: "starting" }
   | { status: "connecting" }
-  | { status: "connected"; context: unknown; workspacePath: string }
+  | {
+      status: "connected";
+      context: unknown;
+      workspacePath: string;
+      manifest?: unknown;
+    }
   | { status: "failed"; message: string };
 
 export interface HandshakeDeps {
@@ -26,10 +31,13 @@ export interface HandshakeDeps {
   ensureServer: (dir?: string) => Promise<ServerStateWire>;
   /** Runs the existing workspace→bus-context→roster probe once the server
    * is confirmed running. Returns a connected/failed handshake outcome. */
-  connectServer: (
-    workspaceDir: string,
-  ) => Promise<
-    | { status: "connected"; context: unknown; workspacePath: string }
+  connectServer: (workspaceDir: string) => Promise<
+    | {
+        status: "connected";
+        context: unknown;
+        workspacePath: string;
+        manifest?: unknown;
+      }
     | { status: "failed"; message: string }
   >;
 }
