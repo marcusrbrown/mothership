@@ -21,9 +21,14 @@
  * any delta accumulated before the reconnect. This is the safety net, not
  * an optimization.
  */
+import { authHeader } from "./base64";
 import { type SseEvent, sseEventSchema } from "./types";
 
-export type SseConnectionState = "connecting" | "open" | "reconnecting";
+export type SseConnectionState =
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  | "closed";
 
 export interface SseCredentials {
   username?: string;
@@ -54,23 +59,6 @@ export interface SseClientOptions {
 export interface SseClient {
   readonly state: SseConnectionState;
   close(): void;
-}
-
-function toBase64(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin);
-}
-
-function authHeader(
-  credentials: SseCredentials | undefined,
-): Record<string, string> {
-  if (!credentials?.password) return {};
-  const username = credentials.username ?? "opencode";
-  return {
-    Authorization: `Basic ${toBase64(`${username}:${credentials.password}`)}`,
-  };
 }
 
 /**
@@ -225,7 +213,7 @@ export function connectSse(options: SseClientOptions): SseClient {
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       abortController?.abort();
-      setState("reconnecting");
+      setState("closed");
     },
   };
 }

@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::supervisor_common::{should_restart, window_expired};
+
 const SERVER_HOST: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 4096;
 const PROBE_PATH: &str = "/doc";
@@ -87,19 +89,6 @@ impl Default for Inner {
 
 #[derive(Default)]
 pub struct ServerSupervisor(Mutex<Inner>);
-
-/// Pure restart-cap decision, extracted so it's unit-testable without
-/// spawning a real process. `count` is restarts already used within the
-/// current window; returns whether one more restart is allowed.
-pub fn should_restart(count: u32, max: u32) -> bool {
-    count < max
-}
-
-/// Pure window-reset decision: has enough time passed since `window_start`
-/// that the restart counter should reset to zero?
-pub fn window_expired(window_start: Instant, now: Instant, window: Duration) -> bool {
-    now.duration_since(window_start) >= window
-}
 
 fn probe_once(timeout: Duration) -> bool {
     let addr = format!("{SERVER_HOST}:{SERVER_PORT}");
@@ -386,26 +375,5 @@ pub fn shutdown(state: &ServerSupervisor) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_restart_allows_up_to_cap() {
-        assert!(should_restart(0, MAX_RESTARTS));
-        assert!(should_restart(1, MAX_RESTARTS));
-        assert!(should_restart(2, MAX_RESTARTS));
-        assert!(!should_restart(3, MAX_RESTARTS));
-        assert!(!should_restart(4, MAX_RESTARTS));
-    }
-
-    #[test]
-    fn window_expired_is_pure_and_monotonic() {
-        let start = Instant::now();
-        assert!(!window_expired(start, start, RESTART_WINDOW));
-        let mid = start + Duration::from_secs(30);
-        assert!(!window_expired(start, mid, RESTART_WINDOW));
-        let after = start + Duration::from_secs(61);
-        assert!(window_expired(start, after, RESTART_WINDOW));
-    }
-}
+// Restart-cap policy unit tests (`should_restart`/`window_expired`) live in
+// `supervisor_common.rs`, the module these fns are imported from.

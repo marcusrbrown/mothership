@@ -39,20 +39,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
+use crate::supervisor_common::{should_restart, window_expired};
+
 const SPAWN_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_POLL: Duration = Duration::from_millis(500);
 const MAX_RESTARTS: u32 = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const RENDEZVOUS_FILE: &str = "ide-bridge.json";
-
-/// Pure restart-cap decision — same policy shape as `server_supervisor`.
-fn should_restart(count: u32, max: u32) -> bool {
-    count < max
-}
-
-fn window_expired(window_start: Instant, now: Instant, window: Duration) -> bool {
-    now.duration_since(window_start) >= window
-}
 
 fn generate_token() -> String {
     // 32 random bytes, hex-encoded — no external RNG crate needed beyond
@@ -447,23 +440,8 @@ pub fn shutdown(state: &IdeSidecar) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn should_restart_allows_up_to_cap() {
-        assert!(should_restart(0, MAX_RESTARTS));
-        assert!(should_restart(2, MAX_RESTARTS));
-        assert!(!should_restart(3, MAX_RESTARTS));
-    }
-
-    #[test]
-    fn window_expired_is_monotonic() {
-        let start = Instant::now();
-        assert!(!window_expired(start, start, RESTART_WINDOW));
-        assert!(window_expired(
-            start,
-            start + Duration::from_secs(61),
-            RESTART_WINDOW
-        ));
-    }
+    // Restart-cap policy unit tests (`should_restart`/`window_expired`) live
+    // in `supervisor_common.rs`, the module these fns are imported from.
 
     #[test]
     fn generate_token_is_64_hex_chars_and_varies() {

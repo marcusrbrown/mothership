@@ -146,4 +146,43 @@ describe("startReconcilePoller", () => {
     // and even if the callback did fire, `stopped` guards the tick body.
     expect(calls).toEqual(["/repo/a"]);
   });
+
+  test("stop() during an in-flight tick prevents any further reconciles", async () => {
+    const calls: string[] = [];
+    const releases: (() => void)[] = [];
+    const scheduler = fakeScheduler();
+
+    const poller = startReconcilePoller({
+      projects: [{ expandedPath: "/repo/a" }, { expandedPath: "/repo/b" }],
+      reconcileProject: (dir) => {
+        calls.push(dir);
+        return new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+      },
+      setTimeoutImpl: scheduler.setTimeoutImpl,
+      clearTimeoutImpl: scheduler.clearTimeoutImpl,
+    });
+
+    await Promise.resolve();
+    // Only "a" has started (in-flight); "b" has not been called yet.
+    expect(calls).toEqual(["/repo/a"]);
+
+    // stop() fires while project "a"'s reconcile is still in-flight.
+    poller.stop();
+
+    // Now let "a" resolve — the tick loop must NOT proceed to "b".
+    releases[0]?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls).toEqual(["/repo/a"]);
+
+    // And no next tick is scheduled/fires either.
+    scheduler.fire();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(["/repo/a"]);
+  });
 });

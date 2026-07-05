@@ -150,7 +150,7 @@ export function createWsBridge(
       if (!authedSocket) {
         return Promise.resolve({
           kind: "response",
-          seq: -1,
+          seq: 0,
           ok: false,
           error: {
             code: "unavailable",

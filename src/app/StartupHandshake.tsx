@@ -274,14 +274,16 @@ export function StartupHandshake({
   // workspace. Failures here surface as a chip, not a re-render of the
   // full failed screen — the mounted shell keeps whatever it already has.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void listen<ServerStateWire>("server://state", (event) => {
-      if (!connectedRef.current) return;
-      setLiveStatus((prev) => reduceLiveStatus(prev, event.payload));
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+    const unlistenPromise = listen<ServerStateWire>(
+      "server://state",
+      (event) => {
+        if (!connectedRef.current) return;
+        setLiveStatus((prev) => reduceLiveStatus(prev, event.payload));
+      },
+    );
+    return () => {
+      void unlistenPromise.then((fn) => fn());
+    };
   }, []);
 
   if (state.status === "connected") {

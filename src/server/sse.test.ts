@@ -174,6 +174,7 @@ describe("connectSse", () => {
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     expect(fetchCalls).toBe(1);
+    expect(client.state).toBe("closed");
   });
 
   test("Authorization header present when credentials given, absent when not", async () => {

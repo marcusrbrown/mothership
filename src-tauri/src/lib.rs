@@ -2,17 +2,13 @@
 mod ide_sidecar;
 mod pty;
 mod server_supervisor;
+mod supervisor_common;
 mod workspace_fs;
 
 use ide_sidecar::IdeSidecar;
 use pty::PtyState;
 use server_supervisor::ServerSupervisor;
 use tauri::Manager;
-
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,7 +18,6 @@ pub fn run() {
         .manage(ServerSupervisor::default())
         .manage(IdeSidecar::default())
         .invoke_handler(tauri::generate_handler![
-            greet,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

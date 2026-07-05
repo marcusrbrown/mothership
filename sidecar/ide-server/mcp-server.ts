@@ -29,13 +29,15 @@ function toolTextResult(payload: unknown, isError = false) {
 }
 
 /** Relays a mutation command and shapes the MCP tool result: success →
- * `{layout}`; failure (including `unavailable`/`disconnected`/`timeout`
- * bridge errors and typed executor errors) → an `isError` result carrying
- * the typed error code/message, never a bare success. */
+ * `{layout}` with the layout passed through `layoutStructureView` (the same
+ * allowlist gate the read path uses — params, including any `context`
+ * credentials, are dropped); failure (including `unavailable`/`disconnected`/
+ * `timeout` bridge errors and typed executor errors) → an `isError` result
+ * carrying the typed error code/message, never a bare success. */
 async function relayMutation(bridge: WsBridge, tool: string, params: unknown) {
   const res = await bridge.dispatch(tool, params);
   if (res.ok) {
-    return toolTextResult({ layout: res.layout });
+    return toolTextResult({ layout: layoutStructureView(res.layout) });
   }
   return toolTextResult({ error: res.error }, true);
 }
