@@ -1,0 +1,46 @@
+/**
+ * Themes dockview EXCLUSIVELY from src/styles/tokens.css via --dv-* vars —
+ * no ad-hoc hex, no inline color literals (AGENTS.md tokens-only invariant).
+ * Class applied to the DockviewReact `className` prop.
+ */
+@import "dockview-react/dist/styles/dockview.css";
+
+.mothership-dockview {
+  /* DockviewReact renders a div with this className but sets no intrinsic
+   * size — without an explicit height/width it collapses to content size
+   * inside its flex parent, which is how the shell ended up boxed in the
+   * top-left. Fill the parent (the flex:1/minHeight:0 wrapper in App.tsx). */
+  position: relative;
+  height: 100%;
+  width: 100%;
+  --dv-background-color: var(--color-bg);
+  --dv-group-view-background-color: var(--color-surface);
+  --dv-tabs-and-actions-container-font-size: var(--text-sm);
+  --dv-tabs-and-actions-container-height: 32px;
+  --dv-tabs-container-scrollbar-color: var(--color-border);
+  --dv-tabs-and-actions-container-background-color: var(--color-surface-raised);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--color-surface);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--color-surface-raised);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--color-surface);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(
+    --color-surface-raised
+  );
+  --dv-tab-close-icon: var(--color-text-muted);
+  --dv-drag-over-background-color: color-mix(
+    in srgb,
+    var(--color-accent) 20%,
+    transparent
+  );
+  --dv-drag-over-border-color: var(--color-accent);
+  --dv-tabs-and-actions-container-font-family: system-ui, sans-serif;
+  --dv-activegroup-visiblepanel-tab-color: var(--color-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--color-text-muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--color-text-muted);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--color-text-dim);
+  --dv-separator-border: var(--color-border);
+  --dv-paneview-header-border-color: var(--color-border);
+  --dv-icon-hover-background-color: var(--color-element);
+  --dv-active-sash-color: var(--color-border-active);
+  --dv-group-border-color: var(--color-border);
+  --dv-floating-box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}

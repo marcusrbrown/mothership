@@ -11,7 +11,7 @@ Multimodal agentic IDE: Tauri v2 desktop app rendering a workspace of OpenCode a
 - **Localhost only:** all server/bus traffic to `127.0.0.1`/`::1`; credentials from env only; no telemetry, no off-machine calls at runtime.
 - **Skill panels are sandboxed:** MCP Apps content renders only in sandboxed iframes over postMessage JSON-RPC; no skill-provided code in the main webview context.
 - **Design for deletion:** panels are self-contained; a panel type should be removable in one commit.
-- **Tokens-only styling:** components style exclusively from `src/styles/tokens.css` (seeded from `design/tokens.css`) — no ad-hoc hex, no inline color literals. `PRODUCT.md` and `DESIGN.md` are the design context; the Impeccable skill (`.agents/skills/impeccable/`, `/impeccable <command>`) enforces it and CI's design-check gate (`npx impeccable detect src`) must stay green. Intentional brand exceptions get scoped entries in `.impeccable/config.json`, never rule-wide disables.
+- **Tokens-only styling:** components style exclusively from `src/styles/tokens.css` (seeded from `design/tokens.css`) — no ad-hoc hex, no inline color literals. `PRODUCT.md` and `DESIGN.md` are the design context; the Impeccable skill (`.agents/skills/impeccable/`, `/impeccable <command>`) enforces it and CI's design-check gate (`npx impeccable@3.2.0 detect src`) must stay green. Intentional brand exceptions get scoped entries in `.impeccable/config.json`, never rule-wide disables.
 
 ## Layout (target)
 
@@ -26,4 +26,4 @@ Multimodal agentic IDE: Tauri v2 desktop app rendering a workspace of OpenCode a
 
 ## Verification
 
-`bun run typecheck`, `bun run test`, `bun run lint` must pass; `npx impeccable detect --json src` must return `[]` (CI design-check gate); UI changes need a screenshot or a short doc note; Phase gates in `HANDOFF.md` define done. The standing dogfood check: an agent can rearrange the layout via `ide_*` tools while a delegated task runs.
+`bun run typecheck`, `bun run test`, `bun run lint` must pass; `npx impeccable@3.2.0 detect --json src` must return `[]` (CI design-check gate; pin the version — a floating `npx impeccable` can resolve to an older major in CI that predates `.impeccable/config.json`'s `ignoreValues` schema and false-positives documented brand exceptions); UI changes need a screenshot or a short doc note; Phase gates in `HANDOFF.md` define done. The standing dogfood check: an agent can rearrange the layout via `ide_*` tools while a delegated task runs.

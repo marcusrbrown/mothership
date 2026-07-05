@@ -1,0 +1,29 @@
+/**
+ * Global reset (imported after tokens.css in main.tsx). The Vite scaffold
+ * shipped no reset — default body margin (8px) plus no full-height chain
+ * left #root boxed in the top-left with a visible page scrollbar. This
+ * establishes the height:100% chain from html down to #root so App/
+ * StartupHandshake/DockviewShell (each already height:100%/100vh) actually
+ * fill the viewport, and hides the outer scrollbar (the dockview panels own
+ * their own internal scrolling).
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+}

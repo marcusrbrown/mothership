@@ -1,0 +1,17 @@
+/* Spike 0a: minimal dockview theme mapped onto tokens.css.
+ * This is a spike, not product UI — only background/surface/text vars are
+ * remapped so the harness doesn't look like a raw dockview demo. */
+.dockview-theme-mothership-spike {
+  --dv-group-view-background-color: var(--color-bg-mid);
+  --dv-tabs-and-actions-container-background-color: var(--color-surface);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--color-bg-mid);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--color-surface);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--color-bg-mid);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--color-surface);
+  --dv-tab-divider-color: var(--color-border);
+  --dv-activegroup-visiblepanel-tab-color: var(--color-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--color-text-muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--color-text-muted);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--color-text-dim);
+  --dv-separator-border: var(--color-border);
+}
