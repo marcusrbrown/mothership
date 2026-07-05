@@ -15,7 +15,7 @@
     "fix": "biome check --write ."
   },
   "dependencies": {
-    "@fro.bot/space-bus": "file:../../fro-bot/space-bus",
+    "@fro.bot/space-bus": "0.7.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
