@@ -2,7 +2,8 @@
  * In-memory ring buffer feeding the audit-log panel. Subscribes to the
  * executor's `onCommandExecuted` hook (already source-tagged 'ui'|'mcp_tool')
  * so UI-initiated and tool-initiated mutations interleave in one visible feed
- * (plan U1.7 integration test). No durable storage — tokens-only, R15.
+ * No durable storage — state lives only in memory, per the localhost-only,
+ * no-persistence invariant.
  */
 import type { CommandExecutedEvent } from "../../layout/executor";
 import { onCommandExecuted } from "../../layout/executor";

@@ -4,7 +4,7 @@
 
 Mothership is a multimodal agentic IDE — mission control for a workspace of AI coding agents. It is a **renderer for the bus**: `opencode serve` owns all agent state, [space-bus](https://github.com/fro-bot/space-bus) is the control plane, and Mothership is a thin multiplexing client that turns a workspace into an adaptive panel layout.
 
-**Status:** Phase 1 tracer. The shell runs: it opens a `spacebus.json` workspace, streams live session state, dispatches prompts to a control agent, and exposes its own layout as `ide_*` MCP tools so any agent can rearrange the UI. Read-only/diff-centric code view, Storybook panels, and MCP Apps skill panels are Phase 2.
+**Status:** early tracer. The shell runs: it opens a `spacebus.json` workspace, streams live session state, dispatches prompts to a control agent, and exposes its own layout as `ide_*` MCP tools so any agent can rearrange the UI. Read-only/diff-centric code view, Storybook panels, and MCP Apps skill panels are planned but not yet built.
 
 ## Shape
 
@@ -49,7 +49,7 @@ bun run build        # bun --bun run tauri build
 bun run ui:dev       # vite dev server only (no Tauri shell)
 ```
 
-Dev-only: the window has no address bar, so `Cmd+R` reloads and `Cmd+Shift+H` returns to the launcher; a `?spike=<id>` launcher exposes the Phase 0 spike harnesses.
+Dev-only: the window has no address bar, so `Cmd+R` reloads and `Cmd+Shift+H` returns to the launcher; a `?spike=<id>` launcher exposes the spike harnesses.
 
 ## Letting an agent drive the layout
 

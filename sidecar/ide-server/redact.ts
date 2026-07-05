@@ -1,5 +1,5 @@
 /**
- * Disclosure-boundary enforcement for `ide_*` read tools (U1.7). Panel
+ * Disclosure-boundary enforcement for `ide_*` read tools. Panel
  * `params` can carry arbitrary webview state — including credentials,
  * tokens, and absolute filesystem paths (project directories, workspace
  * paths) — because `params` is opaque to this layer (`SerializedLayout =

@@ -1,5 +1,5 @@
 /**
- * Webview WS client for the `ide_*` MCP bridge (U1.7 / AE3). Connects to the
+ * Webview WS client for the `ide_*` MCP bridge. Connects to the
  * Bun sidecar's `/ws` endpoint using {port, token} delivered over Tauri IPC
  * (`invoke("ide_bridge_info")`); the token is read once into a closure here
  * and never assigned to `window`/globals. Sends the auth first-frame

@@ -3,7 +3,7 @@
  * from the shared `SessionStore` (see `src/server/session-store.ts`) rather
  * than `snapshot()`'s partial pendingQuestions-only view. `refresh()` pulls
  * a fresh snapshot from the store; `store.subscribe` keeps it live as
- * events/reconciles land. Selecting a session drives U1.3's transcript
+ * events/reconciles land. Selecting a session drives the transcript
  * panel via `onSelectSession`.
  */
 import type { IDockviewPanelProps } from "dockview-react";
@@ -18,7 +18,7 @@ export interface SessionsPanelParams {
   directory?: string;
   /** Fired when the operator selects a session row. Drives the transcript panel. */
   onSelectSession?: (sessionId: string) => void;
-  /** Bug 5: the sessionID currently driving the transcript panel — kept in
+  /** The sessionID currently driving the transcript panel — kept in
    * sync by DockviewShell from BOTH onSelectSession and handleDispatched,
    * so it reflects the active session regardless of how it was selected.
    * Renders that row with a selected (cyan) treatment, distinct from the

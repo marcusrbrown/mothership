@@ -1,5 +1,5 @@
 /**
- * DOM-free tests for the U1.9 supervision-aware handshake machine. Stubs
+ * DOM-free tests for the supervision-aware handshake machine. Stubs
  * `ensureServer`/`connectServer` directly (the injected HandshakeDeps),
  * matching this module's own DOM-free design rather than mocking Tauri's
  * `invoke`/`listen` (that boundary is covered by StartupHandshake.test.ts).

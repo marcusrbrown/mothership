@@ -1,14 +1,14 @@
 /**
- * Pure dispatch logic for the prompt bar (U1.5, F2 dispatch side): wraps
+ * Pure dispatch logic for the prompt bar (dispatch side): wraps
  * `@fro.bot/space-bus/core`'s `dispatch()` (re-exported from `../server/bus`)
  * to shape the discriminated `DispatchArgs` union correctly for the two
  * cases the prompt bar cares about:
  *
  * - First submit (no `sessionId`): dispatches a NEW session against the
- *   project resolved by (in order) an explicit `project` arg (bug-2 fix —
- *   the PromptBar's first @-mention, when it names a real roster project),
+ *   project resolved by (in order) an explicit `project` arg (the
+ *   PromptBar's first @-mention, when it names a real roster project),
  *   then the workspace's first roster project as the fallback
- *   "control-agent session" per the plan. `DispatchArgs`' first-submit
+ *   control-agent session. `DispatchArgs`' first-submit
  *   variant requires `project` and forbids `sessionId`.
  * - Follow-up submit (`sessionId` present): dispatches into the existing
  *   session (space-bus's follow-up/steering semantics) — `project` is not

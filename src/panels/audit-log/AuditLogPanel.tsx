@@ -1,7 +1,6 @@
 /**
- * Real audit-log surface replacing the U1.7-placeholder seeded by
- * DockviewShell. Renders the shared `auditStore` ring buffer live; tokens-only
- * styling per repo convention.
+ * Audit-log surface. Renders the shared `auditStore` ring buffer live;
+ * tokens-only styling per repo convention.
  */
 import type { IDockviewPanelProps } from "dockview-react";
 import { useEffect, useState } from "react";

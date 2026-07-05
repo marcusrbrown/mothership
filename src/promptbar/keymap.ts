@@ -1,10 +1,9 @@
 /**
- * Pure Enter-vs-Shift+Enter decision (U1.6), extracted from the Tiptap
+ * Pure Enter-vs-Shift+Enter decision, extracted from the Tiptap
  * keymap so the submit-vs-newline contract can be unit-tested without
- * mounting an editor. Mirrors the plain bar's `onKeyDown` semantics
- * (U1.5): Enter alone submits, Shift+Enter inserts a newline. Any other
- * modifier combination (Cmd/Ctrl/Alt+Enter) also newlines — only a bare
- * Enter submits, matching the plain bar exactly.
+ * mounting an editor: Enter alone submits, Shift+Enter inserts a newline.
+ * Any other modifier combination (Cmd/Ctrl/Alt+Enter) also newlines — only
+ * a bare Enter submits.
  */
 export interface KeyChord {
   key: string;

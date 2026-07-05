@@ -2,7 +2,7 @@
  * The one typed command layer both the UI and the `ide_*` MCP tools call.
  * Discriminated union of layout mutations, plus the typed result envelope
  * every command returns. Zod schemas here become the `ide_*` tool schemas
- * in U1.7 — this module is the parity choke point for R10.
+ * — this module is the single parity choke point shared by UI and MCP callers.
  */
 import { z } from "zod";
 

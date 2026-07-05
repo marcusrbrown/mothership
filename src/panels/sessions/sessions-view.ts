@@ -1,9 +1,9 @@
 /**
  * DOM-free view logic for the sessions panel.
  *
- * U1.3 fix: previously this rendered only the partial view `snapshot()`
- * exposes (pendingQuestions). Now it renders the full per-project session
- * list from `session-store.ts`, which is reconciled from `listSessions()` +
+ * Renders the full per-project session list from `session-store.ts`,
+ * not just the partial view `snapshot()` exposes (pendingQuestions).
+ * The list is reconciled from `listSessions()` +
  * `getSessionStatus()` + `listQuestions()` on every SSE (re)connect and
  * kept live via `applyEvent()`. `SessionRow.needsAttention` drives the
  * magenta needs-attention marker (shared with the roster badge).

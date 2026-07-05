@@ -1,4 +1,4 @@
-//! Promotion-grade PTY layer (U1.4, promoted from the U0.3 spike) —
+//! PTY layer —
 //! portable-pty behind a small set of Tauri commands, streaming output over
 //! per-session event channels.
 //!

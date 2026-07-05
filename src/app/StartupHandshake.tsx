@@ -1,7 +1,6 @@
 /**
- * Startup handshake screen (Flow Analysis item 5 / U1.2's handshake
- * requirement, extended by U1.9 for server supervision): ensures
- * `opencode serve` is running (adopted or spawned via the Rust
+ * Startup handshake screen: ensures a server is reachable before mounting
+ * the shell. Ensures `opencode serve` is running (adopted or spawned via the Rust
  * server_supervisor), loads the workspace, builds a BusContext, and probes
  * the server with a cheap `roster()` call before mounting the real shell.
  * States: starting (spawning opencode serve…) → connecting (cyan pulse,
@@ -14,7 +13,7 @@
  * at runtime via the Rust `resolve_workspace_dir` command — the
  * `MOTHERSHIP_WORKSPACE` env var if set, else the app process's current
  * working directory (so the workspace + terminal follow wherever the app
- * was launched from, not a baked-in fixture). TODO(U1.9-followup): replace
+ * was launched from, not a baked-in fixture). TODO: replace
  * with real workspace selection (open-directory dialog / last-used
  * workspace).
  */
@@ -54,12 +53,12 @@ export interface StartupHandshakeProps {
 
 /** Existing workspace-load → bus-context → server-probe sequence, run once
  * `ensure_server` reports the server is running. Exported so tests can
- * drive it without mounting React. Unchanged in behavior from pre-U1.9. */
+ * drive it without mounting React. */
 /** Resolves the concrete server target (baseUrl + optional credentials) for
  * a loaded workspace: `managed` rosters attach via space-bus discovery
  * (never spawning anything themselves), `baseUrl` rosters use the
  * externally-managed URL directly, and `virtual` workspaces (no
- * spacebus.json) fall back to the U1.9 default loopback port. */
+ * spacebus.json) fall back to the default loopback port. */
 async function resolveServerTarget(
   workspace: Extract<
     Awaited<ReturnType<typeof loadWorkspace>>,
@@ -93,7 +92,7 @@ async function resolveServerTarget(
 }
 
 /** Returns true when the workspace's spacebus.json declares a `managed`
- * server — used to skip U1.9's `ensure_server` spawn/adopt entirely for
+ * server — used to skip `ensure_server`'s spawn/adopt entirely for
  * managed rosters, since space-bus (not mothership) owns that daemon's
  * lifecycle. Any load failure (including "no spacebus.json") is treated as
  * not-managed, deferring to the existing external/virtual flow. */
@@ -165,7 +164,7 @@ export async function connectServer(workspaceDir: string): Promise<
       };
     }
 
-    // R4/R5/R6: mechanical detection (no LLM, no network — filesystem
+    // Mechanical detection (no LLM, no network — filesystem
     // existence/read via the same injected seams as the workspace load
     // above) runs once per successful connect, feeding the placeholder
     // tabs DockviewShell seeds per detected interface.

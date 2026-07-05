@@ -1,8 +1,8 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 /**
- * Bun sidecar entry (U1.7 / AE3). Hosts BOTH the MCP streamable-HTTP server
+ * Bun sidecar entry. Hosts BOTH the MCP streamable-HTTP server
  * (`/mcp`) and the WS bridge (`/ws`) on one `Bun.serve` instance bound to
- * 127.0.0.1:0 (OS-assigned port — localhost-only per R15). Reads the bearer
+ * 127.0.0.1:0 (OS-assigned port — localhost-only). Reads the bearer
  * token from `MOTHERSHIP_IDE_TOKEN` (NEVER argv, so it never shows up in
  * `ps`), prints `IDE_PORT=<n>` as the first stdout line (the Rust
  * supervisor's rendezvous handshake), then keeps running until SIGTERM,

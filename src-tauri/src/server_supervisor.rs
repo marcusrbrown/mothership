@@ -1,4 +1,4 @@
-//! Minimal `opencode serve` supervision (U1.9) — the app owns the server
+//! Minimal `opencode serve` supervision — the app owns the server
 //! lifecycle instead of deferring it. Adopt-don't-spawn: if a server already
 //! answers on `127.0.0.1:4096`, we never spawn a second one and never kill
 //! it on quit. Otherwise we spawn `opencode serve` as a supervised child,

@@ -7,7 +7,7 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
  * first-open layout (roster left / sessions+transcript tabbed center /
  * terminal bottom / audit-log drawer) with placeholders — saved layout wins.
  *
- * U1.3: constructs the ONE workspace-wide `/event` SSE connection here (via
+ * Constructs the ONE workspace-wide `/event` SSE connection here (via
  * BusContext) and fans it out through a shared demux + session-store,
  * passed down to roster/sessions/transcript panels via command params.
  * Every (re)connect reconciles per-project state (`listSessions` +
@@ -38,9 +38,9 @@ export interface DockviewShellProps {
   /** Live BusContext for the roster/sessions panels; absent → those panels
    * render their own config-missing error state (no crash). */
   context?: BusContext;
-  /** Per-project detected interfaces (R4/R5/R6) — drives the placeholder
+  /** Per-project detected interfaces — drives the placeholder
    * tabs seeded per project with a detected interface. Absent/empty →
-   * universal panels only (R6). */
+   * universal panels only. */
   manifest?: WorkspaceManifest;
 }
 
@@ -160,9 +160,9 @@ export function connectActiveDirectorySse(
   };
 }
 
-/** Seeds a placeholder tab (R5, placeholder-grade — the real Storybook
- * panel lands in Phase 2/AE1) for every project with a detected `storybook`
- * interface. Projects with no detected interfaces add nothing (R6). */
+/** Seeds a placeholder tab (placeholder-grade — the real Storybook
+ * panel is a follow-up) for every project with a detected `storybook`
+ * interface. Projects with no detected interfaces add nothing. */
 function seedDetectedPanels(
   adapter: DockviewAdapter,
   manifest: WorkspaceManifest | undefined,
@@ -380,7 +380,7 @@ export function DockviewShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspacePath]);
 
-  // U1.7 (AE3): mount the ide_* MCP bridge once, torn down on unmount. Any
+  // Mount the ide_* MCP bridge once, torn down on unmount. Any
   // relayed request runs `executeCommand` against whatever adapter is
   // current at call time (adapterRef survives across onReady re-invocation).
   useEffect(() => {
@@ -437,7 +437,7 @@ export function DockviewShell({
     };
   }, [live, context]);
 
-  // Bug 3 wiring: roster row click re-scopes the sessions panel to that
+  // Roster row click re-scopes the sessions panel to that
   // project's directory via dockview-core's updateParameters — the same
   // primitive handleDispatched already uses for the transcript panel.
   // No-op if the project name isn't found in the roster (stale click).
@@ -455,9 +455,9 @@ export function DockviewShell({
     [context],
   );
 
-  // Bug 3 wiring: sessions row click points the transcript panel at that
+  // Sessions row click points the transcript panel at that
   // session, mirroring handleDispatched's pattern exactly.
-  // Bug 5 wiring: mark the selected session active on the sessions panel
+  // Also mark the selected session active on the sessions panel
   // (drives the selected-row highlight) alongside pointing the transcript
   // panel at it — one place updates both so they can never drift.
   //
@@ -529,7 +529,7 @@ export function DockviewShell({
         // Command-origin mutations (UI or mcp_tool) already emit an
         // executor audit entry — don't double-count the layout-change
         // event dockview-core fires synchronously as a side effect of
-        // that same command (U1.7 audit-completeness fix).
+        // that same command.
         if (isCommandExecuting()) return;
 
         const panelIds = [...event.api.panels].map((p) => p.id).sort();
@@ -550,25 +550,24 @@ export function DockviewShell({
     ],
   );
 
-  // U1.6: transcript auto-select on dispatch (the U1.5 deferred item).
-  // Minimal wiring — no new panel-id plumbing beyond the well-known
-  // "transcript" panel id already seeded by seedDefaultLayout: push the
-  // dispatched sessionId into that panel's params via updateParameters, the
-  // same primitive dockview-core already exposes on IDockviewPanel.api.
-  // Bug 4 fix: dispatchPrompt resolves the target PROJECT (the @-mention or
-  // the default), and PromptBar's onDispatched now threads that project's
-  // DIRECTORY through here alongside the sessionId. Updating ONLY
-  // sessionID (the pre-fix behavior) left the transcript panel's
-  // `directory` param pointed at whatever project was previously selected
-  // (or the workspace default), so `listMessages(directory, sessionID)`
-  // backfilled against the WRONG directory whenever the dispatch target
-  // differed — the transcript silently failed to switch until the operator
-  // clicked the target project in the roster (which updates `directory`
-  // via handleSelectProject). Updating both params together closes that
-  // gap. Also re-scopes the sessions panel to the same directory (matches
-  // handleSelectProject) so the new session is visible in that list too,
-  // and marks it as the active session (bug 5) for the selected-row
-  // highlight.
+  // Transcript auto-select on dispatch. Minimal wiring — no new panel-id
+  // plumbing beyond the well-known "transcript" panel id already seeded by
+  // seedDefaultLayout: push the dispatched sessionId into that panel's
+  // params via updateParameters, the same primitive dockview-core already
+  // exposes on IDockviewPanel.api. dispatchPrompt resolves the target
+  // PROJECT (the @-mention or the default), and PromptBar's onDispatched
+  // threads that project's DIRECTORY through here alongside the sessionId.
+  // Updating ONLY sessionID would leave the transcript panel's `directory`
+  // param pointed at whatever project was previously selected (or the
+  // workspace default), so `listMessages(directory, sessionID)` would
+  // backfill against the WRONG directory whenever the dispatch target
+  // differed — the transcript would silently fail to switch until the
+  // operator clicked the target project in the roster (which updates
+  // `directory` via handleSelectProject). Updating both params together
+  // closes that gap. Also re-scopes the sessions panel to the same
+  // directory (matches handleSelectProject) so the new session is visible
+  // in that list too, and marks it as the active session for the
+  // selected-row highlight.
   const handleDispatched = useCallback(
     (sessionId: string, directory: string) => {
       apiRef.current
@@ -596,7 +595,7 @@ export function DockviewShell({
           handleReady(event);
         }}
       />
-      {/* U1.6: floating prompt bar, not a dockview panel. */}
+      {/* Floating prompt bar, not a dockview panel. */}
       <PromptBar
         context={context}
         store={live?.store}

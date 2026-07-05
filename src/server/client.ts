@@ -83,7 +83,7 @@ export type OpencodeClient = {
     params?: { limit?: number },
   ) => Promise<ClientResult<MessageList>>;
   /**
-   * Re-added for U1.3: raw `GET /session?limit=` per-directory session
+   * Raw `GET /session?limit=` per-directory session
    * listing. `/core`'s `roster()`/`snapshot()` only expose project-level
    * aggregates (busyCount/sessionCount) plus pendingQuestions — no way to
    * enumerate individual sessions for a project. session-store.ts uses this

@@ -8,7 +8,7 @@
  * this project; @tauri-apps/plugin-fs is intentionally not installed).
  *
  * The default reader throws 'not wired' — the Tauri-backed implementation
- * is injected by the orchestrator/U1.2b wiring layer, not this module.
+ * is injected by the app's wiring layer, not this module.
  * Tests stub `readTextFile` directly.
  */
 import { z } from "zod";

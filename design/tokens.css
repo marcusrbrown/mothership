@@ -1,7 +1,7 @@
 /**
  * Mothership design tokens — derived from design/systematic.theme.json (Systematic / Fro Bot).
  * Single source of truth for all component styling: no ad-hoc hex anywhere else.
- * Imported as src/styles/tokens.css in Phase 1. Dark is the default; light overrides below.
+ * Imported as src/styles/tokens.css. Dark is the default; light overrides below.
  */
 
 :root,

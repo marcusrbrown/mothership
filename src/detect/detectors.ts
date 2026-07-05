@@ -1,7 +1,7 @@
 /**
- * Mechanical detectors (R4): filesystem existence/read only via injected
+ * Mechanical detectors: filesystem existence/read only via injected
  * seams — no LLM, no network calls (AGENTS.md invariant). Detectors are a
- * pluggable registry (`defaultDetectors`) so Phase 2 can add more kinds
+ * pluggable registry (`defaultDetectors`) so more kinds can be added
  * without touching this module's callers.
  */
 import type { Project } from "../workspace/config";
@@ -83,8 +83,8 @@ export const storybookDetector: Detector = async (project, fs) => {
   return null;
 };
 
-/** Registry of mechanical detectors run per project (R4 pluggable
- * detection). Phase 2 appends more kinds here. */
+/** Registry of mechanical detectors run per project (pluggable
+ * detection); more kinds get appended here. */
 export const defaultDetectors: Detector[] = [
   opencodeDetector,
   storybookDetector,
@@ -92,7 +92,7 @@ export const defaultDetectors: Detector[] = [
 
 /** Runs every detector against a project, collecting non-null matches. A
  * project with zero matches still yields a `ProjectManifest` with
- * `interfaces: []` — the R6 universal-panels baseline. */
+ * `interfaces: []` — the universal-panels baseline. */
 export async function detectProject(
   project: Project,
   fs: DetectorFs = defaultDetectorFs,

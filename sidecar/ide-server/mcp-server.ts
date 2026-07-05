@@ -1,9 +1,10 @@
 /**
  * McpServer (SDK v1.29) exposing the eight `ide_*` tools over the WS bridge.
- * Tool input schemas mirror `layoutCommandSchema`'s members 1:1 (parity
- * choke point, R10) — each mutation tool relays a `LayoutCommand`-shaped
- * payload through `WsBridge.dispatch` and returns the resulting serialized
- * layout in the tool result (never bare success, per the plan). Reads
+ * Tool input schemas mirror `layoutCommandSchema`'s members 1:1 (the single
+ * parity choke point shared by UI and MCP callers) — each mutation tool
+ * relays a `LayoutCommand`-shaped payload through `WsBridge.dispatch` and
+ * returns the resulting serialized layout in the tool result (never bare
+ * success). Reads
  * (`ide_list_panels`, `ide_get_layout`) relay a synthetic read request and
  * redact the reply via `redactForRead` before returning it.
  */
@@ -40,7 +41,7 @@ async function relayMutation(bridge: WsBridge, tool: string, params: unknown) {
 }
 
 /** Relays `ide_list_panels`: returns ONLY [{id, panelType, title}] — no
- * params, no paths, no layout geometry (disclosure boundary, U1.7). */
+ * params, no paths, no layout geometry (disclosure boundary). */
 async function relayListPanels(bridge: WsBridge, tool: string) {
   const res = await bridge.dispatch(tool, {});
   if (!res.ok) {

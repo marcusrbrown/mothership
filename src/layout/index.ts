@@ -1,5 +1,5 @@
 /**
- * Stable module API — U1.7's MCP bridge and U1.2's panels import from here
+ * Stable module API — the MCP bridge and panels import from here
  * only. Do not deep-import from adapter.ts / registry.ts / executor.ts
  * outside this package.
  */

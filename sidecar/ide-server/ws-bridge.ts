@@ -1,8 +1,7 @@
 /**
- * WS server-side half of the `ide_*` bridge (U1.7 / AE3). Single-webview-
- * client model: the tracer has one operator, one webview, one token — the
- * trust model documented in the plan ("all bearer-holders are equally
- * privileged in the tracer"). A connecting socket's FIRST frame must be a
+ * WS server-side half of the `ide_*` bridge. Single-webview-
+ * client model: one operator, one webview, one token — all bearer-holders
+ * are equally privileged. A connecting socket's FIRST frame must be a
  * valid `BridgeAuthFrame` carrying the correct token within
  * `AUTH_TIMEOUT_MS`, or the socket is closed before any command flows
  * (browser WebSocket can't set headers, so this is the only auth surface).

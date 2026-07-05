@@ -23,8 +23,8 @@ export type RosterViewState =
 
 /** Derives per-project row state from a snapshot's projects. Isolates a
  * single project's `error` field to a `status-error` row without failing
- * the rest of the roster (per-project error isolation, U1.2b requirement).
- * `needsAttention` (U1.3): true when the session-store reports at least one
+ * the rest of the roster (per-project error isolation).
+ * `needsAttention` is true when the session-store reports at least one
  * pending question for this project — drives the magenta emphasis badge. */
 export function toRosterRow(
   project: SnapshotProject,
@@ -43,7 +43,7 @@ export function toRosterRow(
 }
 
 /** Builds the full view state from a snapshot result (or a fetch-level error).
- * `projectsNeedingAttention` (U1.3): names of projects with at least one
+ * `projectsNeedingAttention` lists projects with at least one
  * pending question in the session store — optional so this stays callable
  * without a session store wired up. */
 export function toRosterViewState(

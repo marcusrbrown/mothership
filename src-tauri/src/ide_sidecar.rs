@@ -1,4 +1,4 @@
-//! `ide_*` MCP sidecar supervision (U1.7 / AE3). Mirrors
+//! `ide_*` MCP sidecar supervision. Mirrors
 //! `server_supervisor.rs`'s spawn/monitor/restart pattern for a second
 //! supervised child: the Bun `sidecar/ide-server` process that hosts both
 //! the MCP streamable-HTTP server and the WS bridge the webview dials.

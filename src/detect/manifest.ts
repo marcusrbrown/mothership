@@ -1,8 +1,8 @@
 /**
- * Typed interface manifest for mechanical project detection (R4).
+ * Typed interface manifest for mechanical project detection.
  *
- * `DetectedInterface` is a discriminated union by `kind` — extensible for
- * Phase 2 (more kinds land without touching existing callers). Parse, don't
+ * `DetectedInterface` is a discriminated union by `kind` — extensible so
+ * more kinds can land without touching existing callers. Parse, don't
  * validate: detectors return these shapes directly, no separate validation
  * pass needed downstream.
  */

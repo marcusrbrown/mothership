@@ -1,8 +1,8 @@
 import { EditorContent, useEditor } from "@tiptap/react";
 /**
- * U1.6 prompt bar: Tiptap editor (starter-kit + mention) replacing U1.5's
- * plain textarea, behind the SAME `submitPrompt`/`dispatchPrompt` seam —
- * this component's job is still "produce a string, surface the result."
+ * Prompt bar: Tiptap editor (starter-kit + mention) over the
+ * `submitPrompt`/`dispatchPrompt` seam — this component's job is still
+ * "produce a string, surface the result."
  * Floats over the dockview shell (mounted by DockviewShell, bottom-center,
  * `position: fixed`).
  *
@@ -12,7 +12,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
  * plain text via `serializeDocToText` (mention nodes → `@label`); on
  * success the editor clears and the returned sessionId is retained for
  * follow-ups. On failure the doc is preserved for retry and a token-styled
- * error is shown, matching U1.5 exactly.
+ * error is shown.
  *
  * @-mentions source from the workspace roster (`context.roster.projects`)
  * always, and from the live session store when `store`/`directory` are
@@ -91,7 +91,7 @@ export function PromptBar({
   // CURRENT submit closure (current `editor`/`context`/`state`).
   const submitRef = useRef<() => void>(() => {});
 
-  // Bug 3 fix: while the @mention suggestion popup is open, Enter must
+  // While the @mention suggestion popup is open, Enter must
   // pick the highlighted item, not submit the prompt. `handleKeyDown`
   // below is a single ProseMirror-level interceptor that runs for every
   // keystroke, so it needs to know "is the popup currently open" to defer
@@ -119,7 +119,7 @@ export function PromptBar({
     extensions: [StarterKit, mentionExtension],
     editorProps: {
       handleKeyDown: (_view, event) => {
-        // Bug 3 fix: the mention suggestion plugin needs first crack at
+        // The mention suggestion plugin needs first crack at
         // Enter/Arrows/Escape while its popup is open — returning `false`
         // here lets ProseMirror fall through to the suggestion plugin's own
         // keydown handler (mention-extension.ts's onKeyDown) instead of
@@ -151,7 +151,7 @@ export function PromptBar({
     const doc = editor.getJSON() as JSONDoc;
     const toSend = serializeDocToText(doc);
     if (!toSend.trim()) return;
-    // Bug 2 fix: route a new-session dispatch to the prompt's first
+    // Route a new-session dispatch to the prompt's first
     // @-project mention when present (and it names a real roster
     // project — dispatchPrompt falls back to the default otherwise). The
     // full prompt text (including the leading "@label") is still sent to
@@ -163,7 +163,7 @@ export function PromptBar({
       editor.commands.clearContent();
       editor.commands.focus();
       if (next.sessionId) {
-        // Bug 4 fix: resolve the DIRECTORY of the project this actually
+        // Resolve the DIRECTORY of the project this actually
         // dispatched to (the @-mentioned project when present and valid,
         // else the workspace's default first project — mirrors
         // dispatchPrompt's own fallback in dispatch.ts) so the mount site
@@ -189,7 +189,7 @@ export function PromptBar({
     };
   });
 
-  // Bug 2 fix: Tiptap editor content changes do NOT trigger React
+  // Tiptap editor content changes do NOT trigger React
   // re-renders on their own — `editor?.isEmpty` read during render stays
   // stuck at whatever it was on first mount (true), so the Send button
   // never enabled after typing. Subscribing to the editor's `update` event

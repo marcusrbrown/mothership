@@ -1,8 +1,8 @@
 /**
  * DOM-free prompt-bar state machine: owns the "current control session id"
  * seam so `dispatch.ts` can stay pure (sessionId in, result out). Mirrors
- * the sending-lock / error-preservation semantics U1.3's answer box already
- * establishes (see `panels/transcript/transcript-view.ts`).
+ * the sending-lock / error-preservation semantics the transcript panel's
+ * answer box already establishes (see `panels/transcript/transcript-view.ts`).
  */
 import { type DispatchPromptArgs, dispatchPrompt } from "./dispatch";
 

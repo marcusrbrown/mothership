@@ -1,7 +1,7 @@
 /**
  * The sole owner of dockview's imperative API (via the DockviewAdapter seam).
  * Every UI handler and every `ide_*` MCP tool calls `executeCommand` — this is
- * the parity choke point for R10. Command semantics are pure logic, testable
+ * the single parity choke point shared by UI and MCP callers. Command semantics are pure logic, testable
  * against a stubbed adapter with no DOM.
  */
 import type { DockviewAdapter } from "./adapter";
@@ -24,7 +24,7 @@ type Listener = (event: CommandExecutedEvent) => void;
 
 const listeners = new Set<Listener>();
 
-/** Subscribe to every executed command (source-tagged). Feeds U1.7's audit log. */
+/** Subscribe to every executed command (source-tagged). Feeds the audit log. */
 export function onCommandExecuted(listener: Listener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -39,7 +39,7 @@ let commandDepth = 0;
  * "this layout change came from a command we already audited" from "this
  * layout change came from a native dockview gesture (drag/close) that
  * bypassed the command layer" — avoiding double-counting the same mutation
- * as both a command entry and a native entry (U1.7 audit-completeness fix).
+ * as both a command entry and a native entry.
  */
 export function isCommandExecuting(): boolean {
   return commandDepth > 0;
@@ -217,7 +217,7 @@ export function executeCommand(
   // An adapter call throwing (e.g. a dockview-core internal error) must
   // still leave an audit trail rather than vanishing — wrap runCommand so
   // a throw becomes a typed error result before the listener emit, not an
-  // uncaught exception that skips it (U1.7 audit-completeness fix).
+  // uncaught exception that skips it.
   let result: CommandResult;
   if (!parsed.success) {
     result = err(

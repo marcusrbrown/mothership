@@ -1,5 +1,5 @@
 /**
- * Pure @-mention suggestion sourcing + filtering (U1.6). Kept DOM-free so it
+ * Pure @-mention suggestion sourcing + filtering. Kept DOM-free so it
  * can be unit-tested directly — the Tiptap `suggestion` plugin's `items()`
  * callback is a thin wrapper around `filterMentionItems`.
  *

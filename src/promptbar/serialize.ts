@@ -1,5 +1,5 @@
 /**
- * Pure doc → plain-text serialization for the Tiptap editor (U1.6). Operates
+ * Pure doc → plain-text serialization for the Tiptap editor. Operates
  * on Tiptap's plain-JSON `JSONContent` shape (from `editor.getJSON()`) so it
  * needs no DOM and is directly unit-testable.
  *

@@ -3,7 +3,7 @@
  * call, one row per project. Per-project errors (missing path,
  * `statusError`) isolate to that row — never fail the whole panel. No
  * polling: one snapshot on mount, plus a `refresh()` seam the SSE layer
- * (U1.3) will call to re-fetch after reconnect/status events.
+ * calls to re-fetch after reconnect/status events.
  */
 import type { IDockviewPanelProps } from "dockview-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -19,7 +19,7 @@ import {
 export interface RosterPanelParams {
   /** BusContext to snapshot against. Absent → panel shows a config-missing error. */
   context?: BusContext;
-  /** Shared session store — drives the needs-attention badge (U1.3). Absent → badge never shown. */
+  /** Shared session store — drives the needs-attention badge. Absent → badge never shown. */
   store?: SessionStore;
   /** Fired when the operator selects a project row. No-op wiring point for later units. */
   onSelectProject?: (name: string) => void;
@@ -61,7 +61,7 @@ function projectsNeedingAttention(
 export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
   const { context, store } = props.params;
   const [state, setState] = useState<RosterViewState>({ status: "loading" });
-  // Bug 1 fix: `store.subscribe` fires on every SSE event on a busy
+  // `store.subscribe` fires on every SSE event on a busy
   // workspace, so `refresh` runs far more often than "the operator did
   // something roster-relevant". Resetting to `{status: "loading"}` at the
   // start of every one of those refreshes flickered the whole panel back

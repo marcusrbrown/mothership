@@ -1,7 +1,7 @@
 /**
  * Universal fallback panel — renders when a real panel type isn't registered
- * yet (Phase 1 default layout) or when a persisted layout references a type
- * that no longer exists. Styled exclusively from tokens.
+ * yet or when a persisted layout references a type that no longer exists.
+ * Styled exclusively from tokens.
  */
 import type { IDockviewPanelProps } from "dockview-react";
 
@@ -38,7 +38,7 @@ export function PlaceholderPanel(
         {panelType}
       </strong>
       <span style={{ fontSize: "var(--text-sm)" }}>
-        detected interface, real panel in Phase 2
+        detected interface (placeholder; the real panel is a follow-up)
       </span>
     </div>
   );

@@ -5,7 +5,7 @@ import "./styles/tokens.css";
 import "./styles/global.css";
 
 // Spike harness: `bun run dev` + ?spike=<id> mounts spikes/<id>-*/index.tsx
-// in the real shell (HANDOFF Phase 0). No spike code ships in the app path.
+// in the real shell. No spike code ships in the app path.
 const spikeId = new URLSearchParams(window.location.search).get("spike");
 
 // Tauri ships no reload accelerator; dev-only Cmd+R so spike hopping

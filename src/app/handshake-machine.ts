@@ -1,5 +1,5 @@
 /**
- * DOM-free supervision-aware handshake state machine (U1.9). Wraps the
+ * DOM-free supervision-aware handshake state machine. Wraps the
  * `ensure_server`/`server_state` Tauri commands and the `server://state`
  * event, then gates the existing workspace/bus-context/roster probe
  * (`connectServer`, injected — see StartupHandshake.tsx) behind a running
@@ -41,7 +41,7 @@ export interface HandshakeDeps {
     | { status: "failed"; message: string }
   >;
   /** Reports whether `workspaceDir`'s spacebus.json declares a `managed`
-   * server. When true, `ensureServer` (U1.9 spawn/adopt) is skipped
+   * server. When true, `ensureServer`'s spawn/adopt is skipped
    * entirely — space-bus, not mothership, owns that daemon's lifecycle;
    * mothership only attaches via discovery inside `connectServer`.
    * Optional so existing callers/tests that never see managed rosters are

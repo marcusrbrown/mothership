@@ -8,8 +8,7 @@
  * `BridgeAuthFrame`, carrying the bearer token issued by the Rust
  * supervisor (browser WebSocket can't set headers, so this is the only
  * auth surface). Anything else as the first frame, or a wrong token,
- * closes the socket before any command flows (see plan U1.7 boot-ordering
- * requirement).
+ * closes the socket before any command flows.
  */
 import { z } from "zod";
 import { layoutCommandSchema } from "./commands";
@@ -68,5 +67,6 @@ export const READ_TOOL_NAMES = ["ide_list_panels", "ide_get_layout"] as const;
 export type ReadToolName = (typeof READ_TOOL_NAMES)[number];
 
 /** Re-exported so the sidecar can validate relayed request params against
- * the exact same schema the executor uses (parity choke point, R10). */
+ * the exact same schema the executor uses (the single parity choke point
+ * shared by UI and MCP callers). */
 export { layoutCommandSchema };
