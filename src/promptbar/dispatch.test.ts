@@ -270,6 +270,58 @@ describe("resolveDispatchTarget", () => {
     expect(result).toEqual({ kind: "create", project: targetProject.name });
   });
 
+  test("bug A: active session belonging to the target project but ABSENT from the store (deleted server-side) is not dispatched into -> falls through to most-recent/create", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: targetProject.expandedPath,
+      sessions: [
+        {
+          id: "sess-alive",
+          directory: targetProject.expandedPath,
+          title: "control",
+        },
+      ],
+    });
+
+    const result = resolveDispatchTarget({
+      activeSession: {
+        sessionId: "sess-deleted",
+        directory: targetProject.expandedPath,
+      },
+      targetProject,
+      store,
+    });
+    // sess-deleted is not in the store for this directory -> falls through
+    // to the most-recent session that IS present, never dispatches into
+    // the stale/deleted id.
+    expect(result).toEqual({ kind: "follow-up", sessionId: "sess-alive" });
+  });
+
+  test("bug A: active session belonging to the target project, absent from the store, AND the store has zero sessions -> create (never the stale id)", () => {
+    const store = createSessionStore();
+
+    const result = resolveDispatchTarget({
+      activeSession: {
+        sessionId: "sess-deleted",
+        directory: targetProject.expandedPath,
+      },
+      targetProject,
+      store,
+    });
+    expect(result).toEqual({ kind: "create", project: targetProject.name });
+  });
+
+  test("active session belonging to the target project WITH NO store passed still follows-up (degrades safely, preserves prior behavior)", () => {
+    const result = resolveDispatchTarget({
+      activeSession: {
+        sessionId: "sess-active",
+        directory: targetProject.expandedPath,
+      },
+      targetProject,
+    });
+    expect(result).toEqual({ kind: "follow-up", sessionId: "sess-active" });
+  });
+
   test("@mention overrides an active session from a different project (via targetProject already resolved to the mention)", () => {
     const store = createSessionStore();
     store.reconcile({

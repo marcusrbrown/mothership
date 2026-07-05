@@ -71,9 +71,25 @@ export type ResolveDispatchTargetResult =
  * one. Priority:
  *
  * 1. The currently-ACTIVE session, if it belongs to the target project's
- *    directory -> follow-up into it.
+ *    directory AND still exists in the store for that directory -> follow-up
+ *    into it. (Bug A: a session deleted server-side but still referenced by
+ *    stale `activeSession` state must NOT be dispatched into — that's the
+ *    "no manifest project has a session with id …" dispatch failure. When a
+ *    `store` is provided, existence is checked against
+ *    `store.getSessions(directory)`; absent -> falls through to rule 2. No
+ *    store at all (e.g. some unit tests) skips the check, preserving prior
+ *    behavior.)
  * 2. Else the MOST-RECENT session in the target project's directory (ANY
- *    title, not filtered to "control") -> follow-up into it.
+ *    title, not filtered to "control") -> follow-up into it. This
+ *    inherently excludes deleted sessions too, PROVIDED the store's
+ *    directory-scoped session list has already been reconciled since the
+ *    deletion — `session-store.ts`'s `reconcile()` REMOVES any session
+ *    previously attributed to the reconciled directory that's absent from
+ *    the incoming authoritative list (see its `sessionDirectory` bookkeeping
+ *    + removal loop), and `applyEvent()` also removes on a live
+ *    `session.deleted` SSE event. So the prune semantics ARE correct
+ *    upstream; rule 1's extra existence check exists only to cover the
+ *    window between the deletion and the next reconcile/event delivery.
  * 3. Else (zero sessions for the target project) -> create a new session.
  *
  * Pure and store-shape-only (no network) so it's unit-testable without the
@@ -85,7 +101,15 @@ export function resolveDispatchTarget(
   const { activeSession, targetProject, store } = args;
 
   if (activeSession && activeSession.directory === targetProject.expandedPath) {
-    return { kind: "follow-up", sessionId: activeSession.sessionId };
+    const stillExists =
+      !store ||
+      store
+        .getSessions(activeSession.directory)
+        .some((s) => s.id === activeSession.sessionId);
+    if (stillExists) {
+      return { kind: "follow-up", sessionId: activeSession.sessionId };
+    }
+    // Falls through to rule 2/3 below — the active session was deleted.
   }
 
   const sessions = store?.getSessions(targetProject.expandedPath) ?? [];

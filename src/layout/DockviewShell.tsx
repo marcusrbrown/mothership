@@ -478,6 +478,38 @@ export function DockviewShell({
     };
   }, [live, context]);
 
+  // Bug A layer 2: drop a stale `activeSession` (belt-and-braces alongside
+  // resolveDispatchTarget's own existence check) so the NEXT dispatch
+  // resolves fresh instead of reusing a session id that's been deleted
+  // server-side. Fires on every store change (session-store notifies on
+  // both `applyEvent`'s `session.deleted` and `reconcile()`'s prune loop —
+  // see session-store.ts). Only clears when the store's session list for
+  // that directory is NON-EMPTY and excludes the id — an empty/unloaded
+  // directory (no reconcile has completed for it yet) must NOT be treated
+  // as "deleted", or a fresh session dispatched into a not-yet-reconciled
+  // directory would get its `activeSession` wiped out from under it before
+  // the store even has a chance to catch up. `getSessions` returning `[]`
+  // for a directory that legitimately has zero sessions (empty project) is
+  // indistinguishable from "not yet loaded" with this store's API — an
+  // accepted (documented) tradeoff: worst case, a genuinely-empty
+  // directory's active session survives one extra dispatch attempt if it's
+  // deleted mid-session, which resolveDispatchTarget's own existence check
+  // (layer 1) already independently guards against.
+  useEffect(() => {
+    if (!live) return;
+    return live.store.subscribe(() => {
+      setActiveSession((current) => {
+        if (!current) return current;
+        const sessionsInDirectory = live.store.getSessions(current.directory);
+        if (sessionsInDirectory.length === 0) return current;
+        const stillExists = sessionsInDirectory.some(
+          (s) => s.id === current.sessionId,
+        );
+        return stillExists ? current : undefined;
+      });
+    });
+  }, [live]);
+
   // Roster row click re-scopes the sessions panel to that
   // project's directory via dockview-core's updateParameters — the same
   // primitive handleDispatched already uses for the transcript panel.

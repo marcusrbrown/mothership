@@ -103,6 +103,41 @@ describe("submitPrompt controller", () => {
     expect(state).toBe(initial);
   });
 
+  test("bug A layer 3: a session-not-found dispatch error clears the remembered sessionId so the next submit re-resolves fresh", async () => {
+    const dispatch = async () => ({
+      ok: false as const,
+      error:
+        "space-bus: no manifest project has a session with id ses_0ccf76c09ffe3k9GXL96trIzYR",
+    });
+
+    const stateWithStaleSession = { sending: false, sessionId: "sess-stale" };
+    const state = await submitPrompt(
+      stateWithStaleSession,
+      context,
+      "keep going",
+      { dispatch },
+    );
+
+    expect(state.error).toContain("no manifest project has a session");
+    expect(state.sessionId).toBeUndefined();
+    expect(state.sending).toBe(false);
+  });
+
+  test("a non-session-not-found dispatch error preserves the remembered sessionId (still a follow-up target)", async () => {
+    const dispatch = async () => ({
+      ok: false as const,
+      error: "server unreachable",
+    });
+
+    const stateWithSession = { sending: false, sessionId: "sess-1" };
+    const state = await submitPrompt(stateWithSession, context, "retry", {
+      dispatch,
+    });
+
+    expect(state.error).toBe("server unreachable");
+    expect(state.sessionId).toBe("sess-1");
+  });
+
   test("in-flight sending lock: submit while already sending is a no-op", async () => {
     let calls = 0;
     const dispatch = async () => {

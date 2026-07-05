@@ -58,10 +58,29 @@ export function createMentionExtension(
     render: () => {
       let component: ReactRenderer<MentionListHandle> | undefined;
       let unmount: (() => void) | undefined;
+      // Bug B: the suggestion plugin's own "active" state (tracked
+      // internally by @tiptap/suggestion) is NOT the same thing as "the
+      // popup is visible to the user". The plugin considers itself active
+      // as long as the caret sits inside an unbroken `@word` match — but
+      // when that match's filtered item list is empty, MentionList renders
+      // "No matches" (or, in principle, nothing) and there is no
+      // highlighted row for Enter to pick. The prior gate
+      // (`mentionActiveRef` mirroring only onStart/onExit) stayed stuck
+      // `true` across that whole span, permanently swallowing Enter until
+      // the user deleted back past the "@" and onExit finally fired. Track
+      // visibility explicitly instead — true only while the popup has at
+      // least one selectable item — and update it on EVERY lifecycle hook
+      // that can change it (onStart, onUpdate, onKeyDown's Escape, onExit),
+      // not just start/exit.
+      let visible = false;
+      function setVisible(next: boolean) {
+        if (visible === next) return;
+        visible = next;
+        setMentionActive?.(next);
+      }
 
       return {
         onStart: (props) => {
-          setMentionActive?.(true);
           component = new ReactRenderer(MentionList, {
             props: { items: props.items, command: props.command },
             editor: props.editor,
@@ -74,6 +93,7 @@ export function createMentionExtension(
           unmount = () => {
             component?.element.remove();
           };
+          setVisible(props.items.length > 0);
         },
         onUpdate: (props) => {
           component?.updateProps({
@@ -82,17 +102,22 @@ export function createMentionExtension(
           });
           if (component)
             positionAboveCaret(component.element, props.clientRect);
+          // Zero matches -> nothing for Enter to select -> the gate must
+          // release Enter back to submit even though the suggestion
+          // plugin's internal `active` state (and onExit) won't flip until
+          // the "@" match itself breaks (e.g. the user backspaces past it).
+          setVisible(props.items.length > 0);
         },
         onKeyDown: (props: SuggestionKeyDownProps) => {
           if (props.event.key === "Escape") {
             unmount?.();
-            setMentionActive?.(false);
+            setVisible(false);
             return true;
           }
           return component?.ref?.onKeyDown({ event: props.event }) ?? false;
         },
         onExit: () => {
-          setMentionActive?.(false);
+          setVisible(false);
           unmount?.();
           component?.destroy();
         },

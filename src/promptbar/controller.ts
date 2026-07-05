@@ -28,6 +28,15 @@ export type SubmitPromptDeps = Parameters<typeof dispatchPrompt>[1];
  * caller (PromptBar) resolves it from the prompt doc's first @-project
  * mention. Ignored once `state.sessionId` is set (follow-up path).
  */
+/** Matches the space-bus error surfaced when a dispatch targets a session
+ * id that no longer exists server-side (bug A, belt-and-braces layer 3):
+ * "no manifest project has a session with id <id>" — deleted mid-session,
+ * after the resolution-layer/DockviewShell checks already missed the
+ * window. Case-insensitive, tolerant of minor wording drift around
+ * "session"/"session id"/"session-not-found". */
+const SESSION_NOT_FOUND_ERROR =
+  /no manifest project has a session with id|session.*not.*found/i;
+
 export async function submitPrompt(
   state: PromptBarState,
   context: DispatchPromptArgs["context"],
@@ -46,7 +55,16 @@ export async function submitPrompt(
   );
 
   if (!result.ok) {
-    return { ...sending, sending: false, error: result.error };
+    // Clear the remembered sessionId so the NEXT submit re-resolves fresh
+    // (via resolveDispatchTarget) instead of retrying the same dead id
+    // forever. The error banner still surfaces today's message unchanged.
+    const clearSessionId = SESSION_NOT_FOUND_ERROR.test(result.error);
+    return {
+      ...sending,
+      sending: false,
+      error: result.error,
+      sessionId: clearSessionId ? undefined : state.sessionId,
+    };
   }
 
   return {

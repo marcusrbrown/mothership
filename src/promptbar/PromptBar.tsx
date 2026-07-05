@@ -30,6 +30,7 @@ import { type ActiveSessionRef, resolveDispatchTarget } from "./dispatch";
 import { decideEnterAction } from "./keymap";
 import { createMentionExtension } from "./mention-extension";
 import { buildMentionItems } from "./mention-items";
+import { resolveMentionedProject } from "./mention-route";
 import type { JSONDoc } from "./serialize";
 import { serializeDocToText } from "./serialize";
 
@@ -55,31 +56,6 @@ export interface PromptBarProps {
    * `resolveDispatchTarget`'s remaining priority (most-recent, else
    * create). */
   activeSession?: ActiveSessionRef;
-}
-
-/** Finds the first mention node in the doc whose id/label matches a roster
- * project name (bug-2 fix routing seam). Returns undefined if there's no
- * mention or none of them name a real project — `dispatchPrompt` falls
- * back to the default project in that case. */
-function firstMentionedProject(
-  doc: JSONDoc,
-  context: BusContext,
-): string | undefined {
-  const projectNames = new Set(context.roster.projects.map((p) => p.name));
-
-  function walk(nodes: JSONDoc["content"]): string | undefined {
-    for (const node of nodes ?? []) {
-      if (node.type === "mention") {
-        const candidate = node.attrs?.id ?? node.attrs?.label;
-        if (candidate && projectNames.has(candidate)) return candidate;
-      }
-      const found = walk(node.content);
-      if (found) return found;
-    }
-    return undefined;
-  }
-
-  return walk(doc.content);
 }
 
 export function PromptBar({
@@ -111,15 +87,42 @@ export function PromptBar({
   // how `getItems` is already threaded through the factory.
   const mentionActiveRef = useRef(false);
 
+  // Bug C: the editor must be created ONCE and never recreated by a
+  // re-render — `useEditor`'s options object is compared/replaced on every
+  // render regardless (see @tiptap/react's `EditorInstanceManager`), and
+  // while a bare-render `setOptions` call doesn't itself wipe the
+  // document, RECREATING the `extensions` array on every render (as the
+  // prior code did via `useMemo(..., [context, store, directory])`) is the
+  // documented anti-pattern Tiptap warns against: any value an extension's
+  // config closes over that changes across renders must be read through a
+  // REF inside the callback, not captured as a dependency that recreates
+  // the extension/editor. `context`/`store`/`directory` all change
+  // identity across the app's lifetime (context on reconnect, directory on
+  // project switch) — closing over them directly in the `useMemo` deps
+  // meant every one of those changes produced a brand-new
+  // `mentionExtension` object, which is exactly the kind of drift that got
+  // blamed for the window-blur content loss once `activeSession` (itself
+  // per-render-fresh from DockviewShell) started flowing in as a sibling
+  // prop and increasing DockviewShell's re-render cadence. Fixed by
+  // creating the extension exactly once (empty dep array) and reading the
+  // CURRENT context/store/directory through a ref inside `getItems` — the
+  // mention suggestion list is still always current (the ref is updated on
+  // every render), but the extension/editor identity itself never changes.
+  const mentionSourcesRef = useRef({ context, store, directory });
+  mentionSourcesRef.current = { context, store, directory };
+
   const mentionExtension = useMemo(
     () =>
       createMentionExtension(
-        () => buildMentionItems(context, store, directory),
+        () => {
+          const { context, store, directory } = mentionSourcesRef.current;
+          return buildMentionItems(context, store, directory);
+        },
         (active) => {
           mentionActiveRef.current = active;
         },
       ),
-    [context, store, directory],
+    [],
   );
 
   const editor = useEditor({
@@ -165,8 +168,11 @@ export function PromptBar({
     // @-project mention when present (and it names a real roster
     // project — dispatchPrompt falls back to the default otherwise). The
     // full prompt text (including the leading "@label") is still sent to
-    // the agent; the mention here is used ONLY for routing.
-    const mentionedProject = firstMentionedProject(doc, context);
+    // the agent; the mention here is used ONLY for routing. Bug A′: when
+    // the user typed through the mention suggestion without selecting it
+    // (no mention NODE in the doc), a leading plain-text "@word" still
+    // routes — see mention-route.ts.
+    const mentionedProject = resolveMentionedProject(doc, toSend, context);
     const targetProjectName =
       mentionedProject ?? context.roster.projects[0]?.name;
     const targetProject = context.roster.projects.find(
