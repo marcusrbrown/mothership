@@ -41,7 +41,7 @@ jobs:
             echo "No src/ yet — design gate armed, nothing to scan."
             exit 0
           fi
-          findings=$(npx --yes impeccable detect --json src)
+          findings=$(npx --yes impeccable@3.2.0 detect --json src)
           if [ "$findings" != "[]" ]; then
             echo "$findings"
             echo "Impeccable detected UI anti-patterns. Address them or, for an intentional brand choice, add a scoped ignore via 'impeccable ignores add-value' (committed in .impeccable/config.json)."
