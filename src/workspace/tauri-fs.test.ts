@@ -14,9 +14,20 @@ mock.module("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+const resolveManagedServerLibMock = mock(
+  (_workspaceDir: string, _seams: unknown): Promise<unknown> => {
+    throw new Error("resolveManagedServerLibMock not configured");
+  },
+);
+
+mock.module("@fro.bot/space-bus/attach", () => ({
+  resolveManagedServer: resolveManagedServerLibMock,
+}));
+
 describe("tauri-fs", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    resolveManagedServerLibMock.mockReset();
   });
 
   test("readTextFile invokes read_text_file with the path", async () => {
@@ -52,6 +63,38 @@ describe("tauri-fs", () => {
     expect(await tauriFs.homeDir()).toBe("/Users/marcus");
     expect(await tauriFs.homeDir()).toBe("/Users/marcus");
     expect(calls).toBe(1);
+  });
+
+  test("resolveManagedServer adapts an ok result to the ManagedServer shape", async () => {
+    resolveManagedServerLibMock.mockImplementation(
+      async (workspaceDir: string) => {
+        expect(workspaceDir).toBe("/workspace");
+        return {
+          ok: true,
+          baseUrl: "http://127.0.0.1:62910",
+          credentials: { username: "opencode", password: "secret" },
+          alive: true,
+        };
+      },
+    );
+    const { resolveManagedServer } = await import("./tauri-fs");
+    const result = await resolveManagedServer("/workspace");
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:62910",
+      username: "opencode",
+      password: "secret",
+    });
+  });
+
+  test("resolveManagedServer throws with the library's actionable message on ok:false", async () => {
+    resolveManagedServerLibMock.mockImplementation(async () => ({
+      ok: false,
+      error: "managed daemon not answering — restart opencode in the workspace",
+    }));
+    const { resolveManagedServer } = await import("./tauri-fs");
+    await expect(resolveManagedServer("/workspace")).rejects.toThrow(
+      "managed daemon not answering",
+    );
   });
 });
 

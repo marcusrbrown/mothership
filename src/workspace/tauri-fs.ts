@@ -1,3 +1,7 @@
+import {
+  type AttachSeams,
+  resolveManagedServer as resolveManagedServerLib,
+} from "@fro.bot/space-bus/attach";
 /**
  * Real Tauri-backed implementations of the injected filesystem seams used by
  * `workspace/config.ts` (`readTextFile`) and `workspace/context.ts`
@@ -46,14 +50,46 @@ export type ManagedServer = {
   password: string;
 };
 
+/** `AttachSeams` implementation backed by the generic Rust `realpath` /
+ * `read_text_file` / `env_var` / `home_dir` commands — the entire
+ * filesystem surface `@fro.bot/space-bus/attach`'s `resolveManagedServer`
+ * needs to locate and validate a managed daemon's discovery file. No
+ * discovery-scheme knowledge (hashing, roster paths, loopback checks) lives
+ * in mothership anymore; that all moved into the space-bus library. */
+const seams: AttachSeams = {
+  realpath: (path) => invoke<string | null>("realpath", { path }),
+  readTextFile: async (path) => {
+    try {
+      return await invoke<string>("read_text_file", { path });
+    } catch {
+      // `read_text_file` rejects on missing/unreadable files; the seam
+      // contract wants `null` instead.
+      return null;
+    }
+  },
+  env: (name) => invoke<string | null>("env_var", { name }),
+  homeDir: () => homeDir(),
+};
+
 /** Resolves a space-bus v0.6.0 MANAGED server's discovery info (baseUrl +
- * credentials) for the roster at `<rosterDir>/spacebus.json`, via the Rust
- * `resolve_managed_server` command. Mothership never spawns the managed
- * daemon itself — it only attaches to the already-running server this
- * discovers. Throws (rejects) with the Rust command's actionable error
- * message when the daemon isn't running or the roster is missing. */
+ * credentials) for the workspace at `workspaceDir`, via
+ * `@fro.bot/space-bus/attach#resolveManagedServer` — the browser-safe
+ * library that owns roster-path resolution, the discovery-dir hash,
+ * discovery.json validation, the loopback guard, and daemon liveness.
+ * Mothership never spawns the managed daemon itself — it only attaches to
+ * the already-running server this discovers. Throws (rejects) with the
+ * library's actionable error message when the daemon isn't running or the
+ * roster is missing. */
 export async function resolveManagedServer(
-  rosterDir: string,
+  workspaceDir: string,
 ): Promise<ManagedServer> {
-  return invoke<ManagedServer>("resolve_managed_server", { rosterDir });
+  const result = await resolveManagedServerLib(workspaceDir, seams);
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  return {
+    baseUrl: result.baseUrl,
+    username: result.credentials.username,
+    password: result.credentials.password,
+  };
 }

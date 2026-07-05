@@ -44,3 +44,20 @@ pub fn resolve_workspace_dir() -> String {
                 .unwrap_or_default()
         })
 }
+
+/// Canonicalizes `path` (realpath); `None` if it doesn't exist. Backs the
+/// `@fro.bot/space-bus/attach` `AttachSeams.realpath` seam consumed by
+/// `workspace/tauri-fs.ts#resolveManagedServer`.
+#[tauri::command]
+pub fn realpath(path: String) -> Option<String> {
+    std::fs::canonicalize(&path)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Reads an environment variable; `None` if unset OR empty, matching the
+/// `AttachSeams.env` contract (`@fro.bot/space-bus/attach`).
+#[tauri::command]
+pub fn env_var(name: String) -> Option<String> {
+    std::env::var(&name).ok().filter(|v| !v.is_empty())
+}
