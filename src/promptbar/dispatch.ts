@@ -24,6 +24,7 @@ import {
   type Result,
   dispatch as busDispatch,
 } from "../server/bus";
+import type { SessionStore } from "../server/session-store";
 import type { BusContext } from "../server/types";
 
 const CONTROL_SESSION_TITLE = "control";
@@ -41,6 +42,72 @@ export interface DispatchPromptArgs {
    * of a project that's since disappeared from the roster degrades to the
    * default rather than erroring. */
   project?: string;
+}
+
+export interface ActiveSessionRef {
+  sessionId: string;
+  directory: string;
+}
+
+export interface ResolveDispatchTargetArgs {
+  /** The session currently shown in the transcript (last selected or
+   * dispatched), if any — the single source of truth DockviewShell keeps. */
+  activeSession?: ActiveSessionRef;
+  /** The resolved target project (first @-mention naming a real roster
+   * project, else the workspace default). */
+  targetProject: { name: string; expandedPath: string };
+  /** Source of "most-recent session in a directory" (bug 210). */
+  store?: SessionStore;
+}
+
+export type ResolveDispatchTargetResult =
+  | { kind: "follow-up"; sessionId: string }
+  | { kind: "create"; project: string };
+
+/**
+ * Resolves which session a dispatch should target (bug 210): eliminates
+ * the pile-up of new "control" sessions by continuing the target
+ * project's most-recent conversation instead of always creating a new
+ * one. Priority:
+ *
+ * 1. The currently-ACTIVE session, if it belongs to the target project's
+ *    directory -> follow-up into it.
+ * 2. Else the MOST-RECENT session in the target project's directory (ANY
+ *    title, not filtered to "control") -> follow-up into it.
+ * 3. Else (zero sessions for the target project) -> create a new session.
+ *
+ * Pure and store-shape-only (no network) so it's unit-testable without the
+ * editor.
+ */
+export function resolveDispatchTarget(
+  args: ResolveDispatchTargetArgs,
+): ResolveDispatchTargetResult {
+  const { activeSession, targetProject, store } = args;
+
+  if (activeSession && activeSession.directory === targetProject.expandedPath) {
+    return { kind: "follow-up", sessionId: activeSession.sessionId };
+  }
+
+  const sessions = store?.getSessions(targetProject.expandedPath) ?? [];
+  if (sessions.length > 0) {
+    // Most-recent = MAX real server timestamp (StoredSession.updatedAt,
+    // sourced from the SDK's `time.updated`/`time.created`), not array
+    // position. Falls back to the last-in-array (insertion-order) pick
+    // when no session in this directory carries a timestamp, so behavior
+    // stays defined for older servers / not-yet-reconciled state.
+    const timestamped = sessions.filter((s) => s.updatedAt !== undefined);
+    const mostRecent =
+      timestamped.length > 0
+        ? timestamped.reduce((max, s) =>
+            (s.updatedAt ?? 0) > (max.updatedAt ?? 0) ? s : max,
+          )
+        : sessions[sessions.length - 1];
+    if (mostRecent) {
+      return { kind: "follow-up", sessionId: mostRecent.id };
+    }
+  }
+
+  return { kind: "create", project: targetProject.name };
 }
 
 export interface DispatchPromptDeps {

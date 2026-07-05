@@ -14,7 +14,7 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
  * `getSessionStatus` + `listQuestions`) — deltas are never trusted across a
  * gap (see docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md).
  */
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./dockview-theme.css";
 import type { WorkspaceManifest } from "../detect/manifest";
 import { auditStore } from "../panels/audit-log";
@@ -127,7 +127,16 @@ export function connectActiveDirectorySse(
   live: LiveWorkspace,
   context: BusContext,
   initialDirectory: string | undefined,
-  deps: { connect?: typeof connectSse } = {},
+  deps: {
+    connect?: typeof connectSse;
+    /** Fired on every (re)connect, alongside the existing `onReconcile` ->
+     * `reconcileProject` wiring — the reconnect safety net for the
+     * transcript panel's message list (bug 209): the caller bumps a
+     * monotonic nonce and pushes it into the transcript panel's params so
+     * its backfill effect re-runs, recovering any deltas missed during a
+     * stream switch. */
+    onConnect?: (directory: string) => void;
+  } = {},
 ): ActiveDirectorySseHandle {
   const connect = deps.connect ?? connectSse;
   let current: ReturnType<typeof connectSse> | undefined;
@@ -141,6 +150,7 @@ export function connectActiveDirectorySse(
       onEvent: (event) => live.demux.dispatch(event),
       onReconcile: () => {
         void reconcileProject(live.client, live.store, directory);
+        deps.onConnect?.(directory);
       },
     });
     currentDirectory = directory;
@@ -196,6 +206,10 @@ interface LiveParamContext {
   context?: BusContext;
   live?: LiveWorkspace;
   directory?: string;
+  /** Bumped on every active-directory SSE (re)connect (bug 209) — pushed
+   * onto the transcript panel only (its directory is the active directory
+   * by construction) so its backfill effect re-runs on reconnect. */
+  reconnectNonce?: number;
   callbacks: {
     onSelectProject: (name: string) => void;
     onSelectSession: (sessionId: string) => void;
@@ -231,6 +245,7 @@ function liveParamsForPanel(
         client: ctx.live?.client,
         demux: ctx.live?.demux,
         directory: ctx.directory,
+        reconnectNonce: ctx.reconnectNonce,
       };
     case "terminal":
       // cwd is plain data — already persisted, may be empty here.
@@ -354,6 +369,16 @@ export function DockviewShell({
   // live stream to whichever directory the operator is now looking at.
   const activeSseRef = useRef<ActiveDirectorySseHandle | undefined>(undefined);
 
+  // Single source of truth for "the session currently shown in the
+  // transcript" (bug 210b/d): updated by handleSelectSession AND
+  // handleDispatched, read by PromptBar (dispatch continues it as a
+  // follow-up when it belongs to the resolved target project) and passed
+  // to both the transcript and sessions panels so their sessionID/
+  // activeSessionId params can never drift apart.
+  const [activeSession, setActiveSession] = useState<
+    { sessionId: string; directory: string } | undefined
+  >(undefined);
+
   // Synchronous (not effect-populated) live workspace: seedDefaultLayout
   // runs inside onReady, which can fire before a `useEffect` creating this
   // would have run — that raced the roster/sessions/transcript/promptbar
@@ -423,7 +448,23 @@ export function DockviewShell({
   useEffect(() => {
     if (!live || !context) return;
     const initialDirectory = context.roster.projects[0]?.expandedPath;
-    const sse = connectActiveDirectorySse(live, context, initialDirectory);
+    // Local monotonic counter (not React state) — read/incremented
+    // synchronously inside onConnect so every (re)connect gets a distinct
+    // value even if several fire in quick succession before a re-render.
+    let nonce = 0;
+    const sse = connectActiveDirectorySse(live, context, initialDirectory, {
+      onConnect: () => {
+        // Bug 209 reconnect safety net: bump the nonce and push it onto
+        // the transcript panel (only — its directory is the active
+        // directory by construction) so its backfill effect re-runs,
+        // recovering any message-part deltas missed during this
+        // teardown/reopen.
+        nonce += 1;
+        apiRef.current
+          ?.getPanel("transcript")
+          ?.api.updateParameters({ reconnectNonce: nonce });
+      },
+    });
     activeSseRef.current = sse;
     const poller = startReconcilePoller({
       projects: context.roster.projects,
@@ -480,6 +521,11 @@ export function DockviewShell({
     )?.directory;
     if (sessionsDirectory) {
       activeSseRef.current?.setActiveDirectory(sessionsDirectory);
+      // Bug 210b/d: lift the selection into the single active-session
+      // source so the NEXT dispatch continues it (PromptBar) and the
+      // sessions/transcript highlight can never diverge from what the
+      // transcript is showing.
+      setActiveSession({ sessionId, directory: sessionsDirectory });
     }
   }, []);
 
@@ -581,6 +627,7 @@ export function DockviewShell({
       // for the next poll tick — switch the one active SSE stream to the
       // dispatched-to directory.
       activeSseRef.current?.setActiveDirectory(directory);
+      setActiveSession({ sessionId, directory });
     },
     [],
   );
@@ -601,6 +648,7 @@ export function DockviewShell({
         store={live?.store}
         directory={context?.roster.projects[0]?.expandedPath}
         onDispatched={handleDispatched}
+        activeSession={activeSession}
       />
     </>
   );

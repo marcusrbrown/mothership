@@ -100,6 +100,44 @@ describe("createSessionStore applyEvent", () => {
   });
 });
 
+describe("createSessionStore — real timestamp capture (updatedAt)", () => {
+  test("session.created event with a time payload populates updatedAt", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", {
+        id: "ses_1",
+        time: { created: 1000, updated: 1000 },
+      }),
+    );
+    expect(store.getSession("ses_1")?.updatedAt).toBe(1000);
+  });
+
+  test("session.updated event with a fresher time payload bumps updatedAt", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", {
+        id: "ses_1",
+        time: { created: 1000, updated: 1000 },
+      }),
+    );
+    store.applyEvent(
+      evt("session.updated", {
+        id: "ses_1",
+        time: { created: 1000, updated: 2000 },
+      }),
+    );
+    expect(store.getSession("ses_1")?.updatedAt).toBe(2000);
+  });
+
+  test("missing time field -> updatedAt undefined, no crash", () => {
+    const store = createSessionStore();
+    expect(() =>
+      store.applyEvent(evt("session.created", { id: "ses_1" })),
+    ).not.toThrow();
+    expect(store.getSession("ses_1")?.updatedAt).toBeUndefined();
+  });
+});
+
 describe("createSessionStore reconcile", () => {
   test("reconcile replaces the authoritative set — a session present before but absent is removed", () => {
     const store = createSessionStore();
@@ -128,6 +166,24 @@ describe("createSessionStore reconcile", () => {
 
     expect(store.getSession("ses_a")).toBeUndefined();
     expect(store.getSession("ses_b")).toBeDefined();
+  });
+
+  test("reconcile with sessions carrying time.updated populates updatedAt", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: "/proj",
+      sessions: [{ id: "ses_1", time: { created: 500, updated: 1500 } }],
+    });
+    expect(store.getSession("ses_1")?.updatedAt).toBe(1500);
+  });
+
+  test("reconcile session missing time -> updatedAt stays undefined", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: "/proj",
+      sessions: [{ id: "ses_1" }],
+    });
+    expect(store.getSession("ses_1")?.updatedAt).toBeUndefined();
   });
 
   test("reconcile applies statuses to matching sessions", () => {

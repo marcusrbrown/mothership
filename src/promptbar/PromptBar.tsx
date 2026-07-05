@@ -26,6 +26,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { SessionStore } from "../server/session-store";
 import type { BusContext } from "../server/types";
 import { initialPromptBarState, submitPrompt } from "./controller";
+import { type ActiveSessionRef, resolveDispatchTarget } from "./dispatch";
 import { decideEnterAction } from "./keymap";
 import { createMentionExtension } from "./mention-extension";
 import { buildMentionItems } from "./mention-items";
@@ -46,6 +47,14 @@ export interface PromptBarProps {
    * directory the transcript panel already had, which may not be the
    * dispatched project's). */
   onDispatched?: (sessionId: string, directory: string) => void;
+  /** The session currently shown in the transcript (bug 210) — the single
+   * source of truth DockviewShell keeps, updated by both row-selection and
+   * dispatch. When it belongs to the resolved target project, a dispatch
+   * continues it as a follow-up instead of creating (or picking) a
+   * different session. Absent → dispatch always resolves via
+   * `resolveDispatchTarget`'s remaining priority (most-recent, else
+   * create). */
+  activeSession?: ActiveSessionRef;
 }
 
 /** Finds the first mention node in the doc whose id/label matches a roster
@@ -78,6 +87,7 @@ export function PromptBar({
   store,
   directory,
   onDispatched,
+  activeSession,
 }: PromptBarProps) {
   const [state, setState] = useState(initialPromptBarState());
 
@@ -156,26 +166,48 @@ export function PromptBar({
     // project — dispatchPrompt falls back to the default otherwise). The
     // full prompt text (including the leading "@label") is still sent to
     // the agent; the mention here is used ONLY for routing.
-    const project = firstMentionedProject(doc, context);
-    const next = await submitPrompt(state, context, toSend, {}, project);
+    const mentionedProject = firstMentionedProject(doc, context);
+    const targetProjectName =
+      mentionedProject ?? context.roster.projects[0]?.name;
+    const targetProject = context.roster.projects.find(
+      (p) => p.name === targetProjectName,
+    );
+
+    // Bug 210: resolve which session this dispatch continues, so a fresh
+    // prompt never piles up a new "control" session when the target
+    // project already has one to continue. Priority handled by
+    // resolveDispatchTarget: active session (if it belongs to the target
+    // project) -> most-recent session in the target project -> create.
+    const resolved = targetProject
+      ? resolveDispatchTarget({ activeSession, targetProject, store })
+      : undefined;
+
+    // Feed the resolved session into the controller's state so
+    // `submitPrompt`/`dispatchPrompt` dispatch a follow-up into it instead
+    // of always using whatever `state.sessionId` happens to hold (which
+    // could be a stale session from a prior, different-project dispatch).
+    const stateForSubmit =
+      resolved?.kind === "follow-up"
+        ? { ...state, sessionId: resolved.sessionId }
+        : { ...state, sessionId: undefined };
+
+    const next = await submitPrompt(
+      stateForSubmit,
+      context,
+      toSend,
+      {},
+      resolved?.kind === "create" ? resolved.project : mentionedProject,
+    );
     setState(next);
     if (!next.error) {
       editor.commands.clearContent();
       editor.commands.focus();
-      if (next.sessionId) {
-        // Resolve the DIRECTORY of the project this actually
-        // dispatched to (the @-mentioned project when present and valid,
-        // else the workspace's default first project — mirrors
-        // dispatchPrompt's own fallback in dispatch.ts) so the mount site
-        // can point the transcript panel at both the right session AND the
-        // right directory, not just the session id.
-        const targetProjectName = project ?? context.roster.projects[0]?.name;
-        const targetDirectory = context.roster.projects.find(
-          (p) => p.name === targetProjectName,
-        )?.expandedPath;
-        if (targetDirectory) {
-          onDispatched?.(next.sessionId, targetDirectory);
-        }
+      if (next.sessionId && targetProject) {
+        // targetProject was already resolved above (mirrors dispatchPrompt's
+        // own fallback in dispatch.ts) so the mount site can point the
+        // transcript panel at both the right session AND the right
+        // directory, not just the session id.
+        onDispatched?.(next.sessionId, targetProject.expandedPath);
       }
     }
   };

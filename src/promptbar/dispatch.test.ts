@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { createSessionStore } from "../server/session-store";
 import type { BusContext } from "../server/types";
-import { dispatchPrompt } from "./dispatch";
+import { dispatchPrompt, resolveDispatchTarget } from "./dispatch";
 
 const context: BusContext = {
   roster: {
@@ -160,5 +161,139 @@ describe("dispatchPrompt", () => {
 
     expect(result.ok).toBe(false);
     expect(called).toBe(false);
+  });
+});
+
+describe("resolveDispatchTarget", () => {
+  const targetProject = {
+    name: "fro-bot/dashboard",
+    expandedPath: "/Users/marcus/src/fro-bot/dashboard",
+  };
+  const otherProject = {
+    name: "fro-bot/agent",
+    expandedPath: "/Users/marcus/src/fro-bot/agent",
+  };
+
+  test("active session belonging to the target project -> follow-up into it", () => {
+    const result = resolveDispatchTarget({
+      activeSession: {
+        sessionId: "sess-active",
+        directory: targetProject.expandedPath,
+      },
+      targetProject,
+    });
+    expect(result).toEqual({ kind: "follow-up", sessionId: "sess-active" });
+  });
+
+  test("active session belonging to a DIFFERENT project is ignored -> falls through to most-recent/create", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: targetProject.expandedPath,
+      sessions: [
+        {
+          id: "sess-old",
+          directory: targetProject.expandedPath,
+          title: "control",
+        },
+      ],
+    });
+
+    const result = resolveDispatchTarget({
+      activeSession: {
+        sessionId: "sess-active",
+        directory: otherProject.expandedPath,
+      },
+      targetProject,
+      store,
+    });
+    expect(result).toEqual({ kind: "follow-up", sessionId: "sess-old" });
+  });
+
+  test("no active session, target project has sessions (any title) -> most-recent follow-up, by array order when untimestamped", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: targetProject.expandedPath,
+      sessions: [
+        {
+          id: "sess-1",
+          directory: targetProject.expandedPath,
+          title: "control",
+        },
+        {
+          id: "sess-2",
+          directory: targetProject.expandedPath,
+          title: "refactor auth",
+        },
+      ],
+    });
+
+    const result = resolveDispatchTarget({ targetProject, store });
+    // Neither session carries a server timestamp here -> falls back to
+    // last-in-array (insertion order), regardless of title.
+    expect(result).toEqual({ kind: "follow-up", sessionId: "sess-2" });
+  });
+
+  test("most-recent pick uses MAX updatedAt, not array position", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: targetProject.expandedPath,
+      // Inserted oldest-last: sess-2 is last in the array but has the
+      // OLDER timestamp. The newer-by-time session (sess-1) must win.
+      sessions: [
+        {
+          id: "sess-1",
+          directory: targetProject.expandedPath,
+          title: "control",
+          time: { created: 100, updated: 500 },
+        },
+        {
+          id: "sess-2",
+          directory: targetProject.expandedPath,
+          title: "refactor auth",
+          time: { created: 100, updated: 200 },
+        },
+      ],
+    });
+
+    const result = resolveDispatchTarget({ targetProject, store });
+    expect(result).toEqual({ kind: "follow-up", sessionId: "sess-1" });
+  });
+
+  test("target project has zero sessions -> create", () => {
+    const store = createSessionStore();
+    const result = resolveDispatchTarget({ targetProject, store });
+    expect(result).toEqual({ kind: "create", project: targetProject.name });
+  });
+
+  test("no store at all -> create (degrades safely)", () => {
+    const result = resolveDispatchTarget({ targetProject });
+    expect(result).toEqual({ kind: "create", project: targetProject.name });
+  });
+
+  test("@mention overrides an active session from a different project (via targetProject already resolved to the mention)", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: otherProject.expandedPath,
+      sessions: [
+        {
+          id: "sess-agent-1",
+          directory: otherProject.expandedPath,
+          title: "control",
+        },
+      ],
+    });
+
+    // Caller resolves targetProject to the @-mentioned project (otherProject)
+    // even though activeSession belongs to targetProject (dashboard) from a
+    // prior dispatch/select.
+    const result = resolveDispatchTarget({
+      activeSession: {
+        sessionId: "sess-dashboard-1",
+        directory: targetProject.expandedPath,
+      },
+      targetProject: otherProject,
+      store,
+    });
+    expect(result).toEqual({ kind: "follow-up", sessionId: "sess-agent-1" });
   });
 });

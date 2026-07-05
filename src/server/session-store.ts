@@ -31,6 +31,16 @@ export interface StoredSession {
   directory?: string;
   title?: string;
   status: SessionBusyState;
+  /** Real server-side recency timestamp (epoch ms), read from the
+   * loosely-typed `time.updated`/`time.created` fields that space-bus's
+   * `$loose` session schema passes through at runtime but doesn't type
+   * statically. Undefined when the source payload lacked a `time` field
+   * (e.g. an older server). Basis for "most recent session" — NOT store
+   * insertion order. */
+  updatedAt?: number;
+  /** Real server-side creation timestamp (epoch ms), same caveats as
+   * `updatedAt`. Currently unused by consumers; captured opportunistically. */
+  createdAt?: number;
 }
 
 export interface StoredQuestion {
@@ -84,6 +94,23 @@ function str(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function num(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
+/** Narrow, `any`-free accessor for the `time.updated`/`time.created` fields
+ * that space-bus's `$loose` session schema passes through at runtime (they
+ * carry the SDK `Session.time` shape) but that aren't present in the
+ * static session/event types. Reads defensively: any unexpected shape
+ * yields `undefined` rather than throwing. */
+function timeFieldsOf(raw: unknown): { updated?: number; created?: number } {
+  if (raw === null || typeof raw !== "object") return {};
+  const time = (raw as { time?: unknown }).time;
+  if (time === null || typeof time !== "object") return {};
+  const t = time as { updated?: unknown; created?: unknown };
+  return { updated: num(t.updated), created: num(t.created) };
+}
+
 export function createSessionStore(): SessionStore {
   const sessions = new Map<string, StoredSession>();
   // sessionID -> directory, tracked separately so reconcile() can scope
@@ -109,6 +136,8 @@ export function createSessionStore(): SessionStore {
     directory?: string;
     title?: string;
     status?: SessionBusyState;
+    updatedAt?: number;
+    createdAt?: number;
   }): void {
     const existing = sessions.get(partial.id);
     const merged: StoredSession = {
@@ -116,6 +145,8 @@ export function createSessionStore(): SessionStore {
       directory: partial.directory ?? existing?.directory,
       title: partial.title ?? existing?.title,
       status: partial.status ?? existing?.status ?? "unknown",
+      updatedAt: partial.updatedAt ?? existing?.updatedAt,
+      createdAt: partial.createdAt ?? existing?.createdAt,
     };
     sessions.set(partial.id, merged);
     if (merged.directory) sessionDirectory.set(partial.id, merged.directory);
@@ -159,10 +190,13 @@ export function createSessionStore(): SessionStore {
         case "session.updated": {
           const id = str(props.id) ?? str(props.sessionID);
           if (!id) return;
+          const time = timeFieldsOf(props);
           upsertSession({
             id,
             directory: str(props.directory),
             title: str(props.title),
+            updatedAt: time.updated ?? time.created,
+            createdAt: time.created,
           });
           notify();
           return;
@@ -179,9 +213,11 @@ export function createSessionStore(): SessionStore {
         case "session.status": {
           const sessionID = str(props.sessionID) ?? str(props.id);
           if (!sessionID) return;
+          const time = timeFieldsOf(props);
           upsertSession({
             id: sessionID,
             status: statusTypeToBusyState(str(props.type)),
+            updatedAt: time.updated,
           });
           notify();
           return;
@@ -190,7 +226,12 @@ export function createSessionStore(): SessionStore {
         case "session.idle": {
           const sessionID = str(props.sessionID) ?? str(props.id);
           if (!sessionID) return;
-          upsertSession({ id: sessionID, status: "idle" });
+          const time = timeFieldsOf(props);
+          upsertSession({
+            id: sessionID,
+            status: "idle",
+            updatedAt: time.updated,
+          });
           notify();
           return;
         }
@@ -239,6 +280,7 @@ export function createSessionStore(): SessionStore {
 
       for (const s of incoming) {
         const statusEntry = statuses?.[s.id];
+        const time = timeFieldsOf(s);
         upsertSession({
           id: s.id,
           directory: s.directory ?? directory,
@@ -246,6 +288,8 @@ export function createSessionStore(): SessionStore {
           status: statusEntry
             ? statusTypeToBusyState(statusEntry.type)
             : undefined,
+          updatedAt: time.updated ?? time.created,
+          createdAt: time.created,
         });
       }
 

@@ -31,6 +31,12 @@ export interface TranscriptPanelParams {
   demux?: Demux;
   directory?: string;
   sessionID?: string;
+  /** Bumped by DockviewShell on every active-directory SSE (re)connect
+   * (bug 209's reconnect safety net) — added to the backfill effect's deps
+   * so a reconnect re-runs `listMessages`, recovering any message-part
+   * deltas missed during the stream teardown/reopen gap. The value itself
+   * carries no meaning beyond "changed". */
+  reconnectNonce?: number;
 }
 
 function str(value: unknown): string | undefined {
@@ -40,7 +46,7 @@ function str(value: unknown): string | undefined {
 export function TranscriptPanel(
   props: IDockviewPanelProps<TranscriptPanelParams>,
 ) {
-  const { client, demux, directory, sessionID } = props.params;
+  const { client, demux, directory, sessionID, reconnectNonce } = props.params;
   const [state, setState] = useState<TranscriptState>(initialTranscriptState());
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -59,9 +65,15 @@ export function TranscriptPanel(
     setState(fromBackfill(result.value));
   }, [client, directory, sessionID]);
 
+  // reconnectNonce is intentionally in this effect's deps (not backfill's)
+  // — bug 209's reconnect safety net: every active-directory SSE
+  // (re)connect bumps it, re-running the listMessages backfill to recover
+  // any message-part deltas missed during the stream teardown/reopen gap,
+  // without needing a manual re-click.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reconnectNonce drives a deliberate re-run, not read in the body
   useEffect(() => {
     void backfill();
-  }, [backfill]);
+  }, [backfill, reconnectNonce]);
 
   useEffect(() => {
     // `typeof demux.subscribe !== "function"` (not just `!demux`) is
