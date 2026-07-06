@@ -3,6 +3,7 @@
   "bundle": {
     "externalBin": ["binaries/ide-server"],
     "targets": ["dmg", "app"],
+    "createUpdaterArtifacts": true,
     "macOS": {
       "entitlements": "Entitlements.plist",
       "hardenedRuntime": true,

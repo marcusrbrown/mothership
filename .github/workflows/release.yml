@@ -167,14 +167,19 @@ jobs:
         run: bun run version:check
 
       - name: 🧱 Build sidecar + unsigned app bundle (${{ matrix.target }})
-        # No updater artifacts are emitted in this job: signing the updater
-        # bundle requires TAURI_SIGNING_PRIVATE_KEY, which only exists in
-        # the secrets-bearing sign-and-notarize job below (see Unit 7,
-        # which wires createUpdaterArtifacts + updater signing).
+        # This job has no updater signing key, so createUpdaterArtifacts is
+        # forced off here even though src-tauri/tauri.release.conf.json
+        # declares it true: Tauri's bundler fails closed ("a public key has
+        # been found, but no private key") if it tries to build updater
+        # artifacts without TAURI_SIGNING_PRIVATE_KEY in scope. The
+        # sign-and-notarize job builds the updater archive+signature
+        # itself, from the final signed/notarized/stapled .app, after the
+        # protected "release" environment gate (see Unit 7).
         run: |
           bun run sidecar:build
           bun --bun run tauri build \
             --config src-tauri/tauri.release.conf.json \
+            --config '{"bundle":{"createUpdaterArtifacts":false}}' \
             --target ${{ matrix.target }}
 
       - name: ⬆️ Upload unsigned build artifact
@@ -281,6 +286,34 @@ jobs:
           hdiutil create -volname "Mothership" -srcfolder "$bundle" \
             -ov -format UDZO "$out/mothership-${{ matrix.target }}.dmg"
 
+      - name: 📦 Create updater archive (${{ matrix.target }})
+        # Built from the final signed, notarized, stapled .app — never
+        # from the unsigned build job's bundle — so the updater archive
+        # and its signature describe exactly what users install.
+        run: |
+          bundle="unsigned/${{ matrix.target }}/macos/mothership.app"
+          out="signed/${{ matrix.target }}"
+          archive="$out/mothership-${{ matrix.target }}.app.tar.gz"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "$archive.tmp.zip"
+          # Updater artifacts are .tar.gz per Tauri v2 macOS updater format,
+          # not the notarization-submission zip above; repack accordingly.
+          rm -f "$archive.tmp.zip"
+          tar -czf "$archive" -C "unsigned/${{ matrix.target }}/macos" mothership.app
+
+      - name: ✍️ Sign updater archive (${{ matrix.target }})
+        # Only the updater private key touches this step. It never enters
+        # the unsigned build job (see Unit 6/7 boundary notes above) and
+        # is scoped to this environment-gated job like the Apple secrets.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          archive="signed/${{ matrix.target }}/mothership-${{ matrix.target }}.app.tar.gz"
+          bun --bun run tauri signer sign "$archive" \
+            -k "$TAURI_SIGNING_PRIVATE_KEY" \
+            -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          test -f "$archive.sig"
+
       - name: 🧹 Clean up ephemeral keychain
         if: always()
         run: |
@@ -321,7 +354,10 @@ jobs:
       - name: 📜 Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: signed/${{ matrix.target }}/*.dmg
+          subject-path: |
+            signed/${{ matrix.target }}/*.dmg
+            signed/${{ matrix.target }}/*.app.tar.gz
+            signed/${{ matrix.target }}/*.app.tar.gz.sig
 
   # ---------------------------------------------------------------------
   # Publish: release-write permissions only. Creates a draft GitHub
@@ -338,6 +374,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: 📦 Install dependencies
+        run: bun install --frozen-lockfile
+
       - name: ⬇️ Download all signed artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -346,13 +393,78 @@ jobs:
           merge-multiple: false
 
       - name: 🧾 Generate checksums
+        # Bound to provenance: SHA256SUMS is generated only from the
+        # already-attested signed artifacts (dmg/updater archive/sig), and
+        # its own digest is recorded below for the promotion step to
+        # re-verify immediately before publish.
         run: |
           cd signed
           find . -type f \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' \) \
             -exec shasum -a 256 {} \; > SHA256SUMS
           cat SHA256SUMS
+          shasum -a 256 SHA256SUMS > SHA256SUMS.digest
+          cat SHA256SUMS.digest
+
+      - name: 📄 Generate candidate updater manifest
+        # Named latest.json.candidate (not latest.json) so it never enters
+        # GitHub's /releases/latest/download/ feed while this release
+        # stays a draft. The runbook's manual draft→publish promotion
+        # (Unit 8) is the only atomic step that can make this the stable
+        # feed manifest.
+        run: |
+          arm64_archive=$(basename signed/aarch64-apple-darwin/*.app.tar.gz)
+          x64_archive=$(basename signed/x86_64-apple-darwin/*.app.tar.gz)
+          arm64_sig=$(cat signed/aarch64-apple-darwin/*.app.tar.gz.sig)
+          x64_sig=$(cat signed/x86_64-apple-darwin/*.app.tar.gz.sig)
+          version="${{ needs.policy-guard.outputs.version }}"
+          repo="${{ github.repository }}"
+          tag="${{ github.ref_name }}"
+          cat > signed/latest.json.candidate <<JSON
+          {
+            "version": "${version}",
+            "notes": "See the GitHub release notes.",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${arm64_sig}",
+                "url": "https://github.com/${repo}/releases/download/${tag}/${arm64_archive}"
+              },
+              "darwin-x86_64": {
+                "signature": "${x64_sig}",
+                "url": "https://github.com/${repo}/releases/download/${tag}/${x64_archive}"
+              }
+            }
+          }
+          JSON
+          cat signed/latest.json.candidate
+
+      - name: 🔎 Look up previously published version
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=$(gh release list --repo "${{ github.repository }}" \
+            --exclude-drafts --exclude-pre-releases --limit 1 \
+            --json tagName --jq '.[0].tagName // empty' | sed 's/^v//')
+          echo "version=${previous}" >> "$GITHUB_OUTPUT"
+
+      - name: ✅ Validate candidate updater manifest
+        # Fails closed on macOS-only shape, missing signature/URL,
+        # checksum mismatch against SHA256SUMS, or a downgrade relative to
+        # the last published (non-draft, non-prerelease) release.
+        run: |
+          args=(--manifest signed/latest.json.candidate --checksums signed/SHA256SUMS)
+          if [ -n "${{ steps.previous.outputs.version }}" ]; then
+            args+=(--previous-version "${{ steps.previous.outputs.version }}")
+          fi
+          bun scripts/validate-updater-manifest.ts "${args[@]}"
 
       - name: 🚀 Create draft GitHub Release
+        # latest.json is intentionally NOT among the uploaded files: only
+        # the candidate manifest, checksums, and their digest are
+        # attached. The stable latest.json feed asset is added by the
+        # separate promote-updater-manifest job below, gated on this
+        # job's validation having already passed.
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: true
@@ -360,5 +472,102 @@ jobs:
           name: "Mothership v${{ needs.policy-guard.outputs.version }}"
           files: |
             signed/**/*.dmg
+            signed/**/*.app.tar.gz
+            signed/**/*.app.tar.gz.sig
             signed/SHA256SUMS
+            signed/SHA256SUMS.digest
+            signed/latest.json.candidate
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------
+  # Promote updater manifest: separate job, same protected environment,
+  # so a reviewer approval is required specifically for making latest.json
+  # part of the release assets. Still attached to a draft release, so it
+  # does not enter GitHub's /releases/latest feed until a maintainer
+  # manually publishes the draft per the release runbook (Unit 8).
+  # ---------------------------------------------------------------------
+  promote-updater-manifest:
+    name: Promote Updater Manifest
+    needs: [policy-guard, publish-draft]
+    environment: release
+    permissions:
+      contents: write
+      attestations: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: 📦 Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: ⬇️ Download candidate manifest, checksums, and signed artifacts from the draft
+        # The dmg/app.tar.gz/sig files are downloaded here (not just the
+        # manifest and checksums) so their GitHub artifact attestations
+        # (generated by the attest job) can be re-verified immediately
+        # before promotion, guarding against tampering between
+        # publish-draft and this approval-gated job.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p signed
+          gh release download "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'SHA256SUMS' --pattern 'SHA256SUMS.digest' \
+            --pattern 'latest.json.candidate' \
+            --pattern '*.dmg' --pattern '*.app.tar.gz' --pattern '*.app.tar.gz.sig' \
+            --dir signed
+
+      - name: ✅ Re-verify checksums digest before promotion
+        # Guards against the draft's SHA256SUMS having been tampered with
+        # or replaced between publish-draft and this approval-gated job.
+        run: |
+          cd signed
+          recorded=$(cut -d' ' -f1 SHA256SUMS.digest)
+          actual=$(shasum -a 256 SHA256SUMS | cut -d' ' -f1)
+          if [ "$recorded" != "$actual" ]; then
+            echo "❌ SHA256SUMS digest mismatch: recorded=$recorded actual=$actual"
+            exit 1
+          fi
+          echo "✅ SHA256SUMS digest verified: $actual"
+
+      - name: ✅ Verify GitHub artifact attestations before promotion
+        # Fails closed if any signed artifact lacks a valid build
+        # provenance attestation (generated by the attest job) tied to
+        # this repo, blocking latest.json promotion on tampered or
+        # unattested artifacts.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd signed
+          shopt -s nullglob
+          artifacts=(*.dmg *.app.tar.gz)
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo "❌ No signed artifacts found to verify attestations for"
+            exit 1
+          fi
+          for artifact in "${artifacts[@]}"; do
+            echo "🔎 Verifying attestation for ${artifact}"
+            gh attestation verify "${artifact}" --repo "${{ github.repository }}"
+          done
+
+      - name: ✅ Re-validate candidate manifest before promotion
+        run: |
+          cp signed/latest.json.candidate signed/latest.json
+          bun scripts/validate-updater-manifest.ts \
+            --manifest signed/latest.json \
+            --checksums signed/SHA256SUMS
+
+      - name: 🚀 Attach promoted latest.json to the draft release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: true
+          tag_name: ${{ github.ref_name }}
+          files: signed/latest.json
           fail_on_unmatched_files: true
