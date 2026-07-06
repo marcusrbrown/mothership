@@ -198,11 +198,8 @@ fn truncate_tail(bytes: &[u8], max: usize) -> String {
 /// parsed port. Captures stderr so a spawn/timeout failure has a
 /// diagnosable tail.
 fn spawn_and_await_port(sidecar_dir: &str, token: &str) -> std::io::Result<(Child, u16)> {
-    let command = resolve_sidecar_command(
-        cfg!(debug_assertions),
-        bundled_sidecar_path(),
-        sidecar_dir,
-    );
+    let command =
+        resolve_sidecar_command(cfg!(debug_assertions), bundled_sidecar_path(), sidecar_dir);
 
     let (mut cmd, label) = match &command {
         SidecarCommand::DevSource { entry } => {
@@ -229,10 +226,7 @@ fn spawn_and_await_port(sidecar_dir: &str, token: &str) -> std::io::Result<(Chil
     let entry = label;
 
     cmd.env("MOTHERSHIP_IDE_TOKEN", token);
-    cmd.env(
-        "MOTHERSHIP_IDE_PARENT_PID",
-        std::process::id().to_string(),
-    );
+    cmd.env("MOTHERSHIP_IDE_PARENT_PID", std::process::id().to_string());
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -574,7 +568,9 @@ mod tests {
     fn release_build_resolves_bundled_sidecar_path() {
         let command = resolve_sidecar_command(
             false,
-            Some(std::path::PathBuf::from("/App.app/Contents/MacOS/ide-server")),
+            Some(std::path::PathBuf::from(
+                "/App.app/Contents/MacOS/ide-server",
+            )),
             "/repo/sidecar/ide-server",
         );
         assert_eq!(
