@@ -4,7 +4,9 @@ import viteConfig from "./vite.config";
 describe("vite.config.ts env exposure", () => {
   test("envPrefix is restricted to VITE_ and never widened to expose TAURI_*", async () => {
     const resolved =
-      typeof viteConfig === "function" ? await viteConfig({} as never) : viteConfig;
+      typeof viteConfig === "function"
+        ? await viteConfig({} as never)
+        : viteConfig;
     const config = "then" in resolved ? await resolved : resolved;
     expect(config.envPrefix).toBe("VITE_");
   });

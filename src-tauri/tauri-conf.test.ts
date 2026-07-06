@@ -40,7 +40,9 @@ describe("production tauri.conf.json CSP", () => {
   });
 
   test("directive floor is present with exact required values", () => {
-    for (const [directive, value] of Object.entries(REQUIRED_FLOOR_DIRECTIVES)) {
+    for (const [directive, value] of Object.entries(
+      REQUIRED_FLOOR_DIRECTIVES,
+    )) {
       expect(csp?.[directive]).toBe(value);
     }
   });
@@ -58,7 +60,11 @@ describe("production tauri.conf.json CSP", () => {
       // allowed; wildcard *hosts* (schemes/domains) are not.
       const hostWildcards = value
         .split(/\s+/)
-        .filter((tok) => tok.includes("*") && !/^(https?|wss?):\/\/(127\.0\.0\.1|\[::1\]):\*$/.test(tok));
+        .filter(
+          (tok) =>
+            tok.includes("*") &&
+            !/^(https?|wss?):\/\/(127\.0\.0\.1|\[::1\]):\*$/.test(tok),
+        );
       expect(hostWildcards).toEqual([]);
     }
   });
@@ -87,7 +93,9 @@ describe("dev tauri.dev.conf.json CSP", () => {
 
   test("dev csp is not null and carries the same directive floor", () => {
     expect(csp).not.toBeNull();
-    for (const [directive, value] of Object.entries(REQUIRED_FLOOR_DIRECTIVES)) {
+    for (const [directive, value] of Object.entries(
+      REQUIRED_FLOOR_DIRECTIVES,
+    )) {
       expect(csp?.[directive]).toBe(value);
     }
   });
