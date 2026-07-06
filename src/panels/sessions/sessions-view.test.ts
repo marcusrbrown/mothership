@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { StoredSession } from "../../server/session-store";
-import { toSessionRows, toSessionsViewState } from "./sessions-view";
+import {
+  isSubagentSession,
+  toSessionRows,
+  toSessionsViewState,
+} from "./sessions-view";
 
 function session(overrides: Partial<StoredSession> = {}): StoredSession {
   return { id: "s1", status: "idle", ...overrides };
@@ -61,6 +65,62 @@ describe("toSessionRows", () => {
 
   test("no sessions -> empty rows", () => {
     expect(toSessionRows([], new Set())).toEqual([]);
+  });
+});
+
+describe("isSubagentSession", () => {
+  test("suffix match -> true", () => {
+    expect(isSubagentSession("Fix the tests (@fixer subagent)")).toBe(true);
+  });
+
+  test("email-like text -> false", () => {
+    expect(isSubagentSession("email@example.com session")).toBe(false);
+  });
+
+  test("mentions 'subagents' mid-string -> false", () => {
+    expect(isSubagentSession("discussing subagents")).toBe(false);
+  });
+
+  test("pattern present but not at suffix -> false", () => {
+    expect(isSubagentSession("(@a subagent) extra")).toBe(false);
+  });
+
+  test("undefined title -> false", () => {
+    expect(isSubagentSession(undefined)).toBe(false);
+  });
+});
+
+describe("toSessionRows includeSubagents", () => {
+  test("default (false) filters out subagent sessions, preserving order", () => {
+    const rows = toSessionRows(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "Fix (@fixer subagent)" }),
+        session({ id: "s3", title: "Another top level" }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1", "s3"]);
+  });
+
+  test("includeSubagents: true keeps all sessions", () => {
+    const rows = toSessionRows(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "Fix (@fixer subagent)" }),
+      ],
+      new Set(),
+      { includeSubagents: true },
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1", "s2"]);
+  });
+
+  test("needsAttention on a hidden subagent session does not leak once filtered", () => {
+    const rows = toSessionRows(
+      [session({ id: "s2", title: "Fix (@fixer subagent)" })],
+      new Set(["s2"]),
+    );
+    expect(rows).toEqual([]);
   });
 });
 
