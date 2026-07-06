@@ -6,6 +6,7 @@ import {
   fromBackfill,
   initialTranscriptState,
   removePendingQuestion,
+  resolveBackfill,
   setAnswerError,
   setAnswerSending,
   toReadOnly,
@@ -140,6 +141,79 @@ describe("pending questions", () => {
       message: "network down",
       answer: "Yes",
     });
+  });
+});
+
+describe("resolveBackfill", () => {
+  test("happy path: single in-flight backfill resolves to ready state", async () => {
+    const messages: MessageList = [
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "hi" }] },
+    ];
+    const state = await resolveBackfill(
+      async () => ({ ok: true, value: messages }),
+      1,
+      () => true,
+    );
+    expect(state?.status).toBe("ready");
+    expect(state?.parts).toEqual([
+      { id: "0:0", role: "assistant", type: "text", text: "hi" },
+    ]);
+  });
+
+  test("race: A's backfill resolving after B's is discarded, B's result wins", async () => {
+    // A starts first (generation 1) but resolves after B (generation 2).
+    let currentGeneration = 1;
+    let resolveA!: (v: {
+      ok: true;
+      value: MessageList;
+    }) => void;
+    const aPromise = new Promise<{ ok: true; value: MessageList }>(
+      (resolve) => {
+        resolveA = resolve;
+      },
+    );
+
+    const aResultPromise = resolveBackfill(
+      () => aPromise,
+      1,
+      (gen) => gen === currentGeneration,
+    );
+
+    // B starts second and bumps the generation immediately (sync fetch).
+    currentGeneration = 2;
+    const bMessages: MessageList = [
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "B" }] },
+    ];
+    const bResultPromise = resolveBackfill(
+      async () => ({ ok: true, value: bMessages }),
+      2,
+      (gen) => gen === currentGeneration,
+    );
+
+    const bResult = await bResultPromise;
+    // Now let A resolve, after B already won.
+    resolveA({
+      ok: true,
+      value: [
+        { info: { role: "assistant" }, parts: [{ type: "text", text: "A" }] },
+      ],
+    });
+    const aResult = await aResultPromise;
+
+    expect(aResult).toBeUndefined();
+    expect(bResult?.parts).toEqual([
+      { id: "0:0", role: "assistant", type: "text", text: "B" },
+    ]);
+  });
+
+  test("error result is only applied when generation is current", async () => {
+    const state = await resolveBackfill(
+      async () => ({ ok: false, error: { message: "boom" } }),
+      1,
+      () => true,
+    );
+    expect(state?.status).toBe("error");
+    expect(state?.message).toBe("boom");
   });
 });
 

@@ -17,9 +17,9 @@ import {
   type TranscriptState,
   addPendingQuestion,
   applyPartUpdate,
-  fromBackfill,
   initialTranscriptState,
   removePendingQuestion,
+  resolveBackfill,
   setAnswerError,
   setAnswerSending,
   toErrorState,
@@ -51,18 +51,29 @@ export function TranscriptPanel(
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  // Generation guard (R4): incremented at the start of every backfill.
+  // `resolveBackfill` re-checks this after the `listMessages` await and
+  // discards (no setState) a result whose generation has since been
+  // superseded — e.g. a fast A->B session switch where A's fetch resolves
+  // after B's. A ref (not state) survives StrictMode's
+  // mount->cleanup->mount without losing the count, so the *current*
+  // generation's result is never discarded across that cycle — only a
+  // truly superseded one is.
+  const generationRef = useRef(0);
+
   const backfill = useCallback(async () => {
     if (!client || !directory || !sessionID) {
       setState(toErrorState("No session selected."));
       return;
     }
+    const generation = ++generationRef.current;
     setState(initialTranscriptState());
-    const result = await client.listMessages(directory, sessionID);
-    if (!result.ok) {
-      setState(toErrorState(result.error.message));
-      return;
-    }
-    setState(fromBackfill(result.value));
+    const nextState = await resolveBackfill(
+      () => client.listMessages(directory, sessionID),
+      generation,
+      (gen) => gen === generationRef.current,
+    );
+    if (nextState !== undefined) setState(nextState);
   }, [client, directory, sessionID]);
 
   // reconnectNonce is intentionally in this effect's deps (not backfill's)
@@ -149,7 +160,21 @@ export function TranscriptPanel(
           return;
       }
     });
-    return unsubscribe;
+
+    // Subscribe-before-unsubscribe (R1/R4): the new session's listener is
+    // already registered on the line above — the demux's per-session Map
+    // (`src/server/demux.ts`) allows two sessions' subscriptions to be
+    // live at once, so there's no exclusivity to violate. Deferring the
+    // actual unsubscribe to a microtask (instead of calling it
+    // synchronously in this cleanup) means that when sessionID changes,
+    // React invokes this cleanup and then synchronously runs the next
+    // effect's body — subscribing the new session — before the
+    // microtask queue drains and the old subscription is removed. That
+    // closes the missed-event window: there is no tick where switching
+    // from session A to session B leaves neither listener registered.
+    return () => {
+      queueMicrotask(unsubscribe);
+    };
   }, [demux, sessionID]);
 
   const submitAnswer = useCallback(

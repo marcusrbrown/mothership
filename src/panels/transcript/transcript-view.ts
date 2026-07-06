@@ -73,6 +73,35 @@ export function toErrorState(message: string): TranscriptState {
   return { status: "error", message, parts: [], pendingQuestions: [] };
 }
 
+export type BackfillResult =
+  | { ok: true; value: MessageList }
+  | { ok: false; error: { message: string } };
+
+export type BackfillFetcher = () => Promise<BackfillResult>;
+
+/**
+ * Runs one backfill attempt against `fetchMessages`, but only returns a
+ * state update if `generation` is still current by the time the fetch
+ * resolves (checked via `isCurrent`). Returns `undefined` when stale —
+ * callers must NOT call `setState` in that case.
+ *
+ * This is the ordering guard for R4: `TranscriptPanel` increments a
+ * ref-counted generation before calling this, and passes a closure that
+ * always reads the latest ref value. A fast A->B session switch bumps the
+ * generation past A's in-flight call; if A's `listMessages` resolves after
+ * B's, its result is discarded here instead of overwriting B's transcript.
+ */
+export async function resolveBackfill(
+  fetchMessages: BackfillFetcher,
+  generation: number,
+  isCurrent: (generation: number) => boolean,
+): Promise<TranscriptState | undefined> {
+  const result = await fetchMessages();
+  if (!isCurrent(generation)) return undefined;
+  if (!result.ok) return toErrorState(result.error.message);
+  return fromBackfill(result.value);
+}
+
 /**
  * Applies a `message.part.updated` event's payload. `delta` present ->
  * append to the existing part's text (or create it if new); `delta` absent
