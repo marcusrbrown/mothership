@@ -20,15 +20,25 @@ export interface SessionRow {
 /** Suffix pattern OpenCode uses for subagent session titles, e.g.
  * "Fix the tests (@fixer subagent)". Suffix-anchored so titles that merely
  * contain "@" or "subagent" mid-string (an email address, a sentence
- * discussing subagents) are NOT treated as subagent sessions. */
+ * discussing subagents) are NOT treated as subagent sessions. Used only as
+ * a FALLBACK when `parentID` is absent (older server/fixture payloads) —
+ * see `isSubagentSession`. */
 const SUBAGENT_SUFFIX = /\(@[^()]+ subagent\)$/;
 
-/** True when `title` ends with the `(@<name> subagent)` marker OpenCode
- * appends to subagent session titles. Used to hide subagent noise from the
- * sessions panel by default (R8). */
-export function isSubagentSession(title: string | undefined): boolean {
-  if (!title) return false;
-  return SUBAGENT_SUFFIX.test(title);
+/** True when `session` is a subagent/child session. PRIMARY signal is
+ * `parentID`: OpenCode stamps subagent sessions with the parent session's
+ * id, which is a reliable structural marker (unlike title text, which is
+ * free-form and can be edited/renamed). Falls back to the `(@<name>
+ * subagent)` title-suffix marker when `parentID` is absent, so this still
+ * works against older payloads/fixtures that predate the field. Used to
+ * hide subagent noise from the sessions panel by default (R8). */
+export function isSubagentSession(session: {
+  parentID?: string;
+  title?: string;
+}): boolean {
+  if (session.parentID != null) return true;
+  if (!session.title) return false;
+  return SUBAGENT_SUFFIX.test(session.title);
 }
 
 export interface ToSessionRowsOptions {
@@ -63,7 +73,7 @@ export function toSessionRows(
 ): SessionRow[] {
   const { includeSubagents = false } = options;
   return sessions
-    .filter((s) => includeSubagents || !isSubagentSession(s.title))
+    .filter((s) => includeSubagents || !isSubagentSession(s))
     .map((s, index) => ({ s, index }))
     .sort((a, b) => {
       const at = a.s.updatedAt;

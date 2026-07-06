@@ -69,24 +69,38 @@ describe("toSessionRows", () => {
 });
 
 describe("isSubagentSession", () => {
-  test("suffix match -> true", () => {
-    expect(isSubagentSession("Fix the tests (@fixer subagent)")).toBe(true);
+  test("parentID present -> true regardless of title", () => {
+    expect(
+      isSubagentSession({ parentID: "parent-1", title: "Top level" }),
+    ).toBe(true);
   });
 
-  test("email-like text -> false", () => {
-    expect(isSubagentSession("email@example.com session")).toBe(false);
+  test("parentID present and no title -> true", () => {
+    expect(isSubagentSession({ parentID: "parent-1" })).toBe(true);
   });
 
-  test("mentions 'subagents' mid-string -> false", () => {
-    expect(isSubagentSession("discussing subagents")).toBe(false);
+  test("no parentID, suffix match -> true (fallback)", () => {
+    expect(
+      isSubagentSession({ title: "Fix the tests (@fixer subagent)" }),
+    ).toBe(true);
   });
 
-  test("pattern present but not at suffix -> false", () => {
-    expect(isSubagentSession("(@a subagent) extra")).toBe(false);
+  test("no parentID, email-like text -> false", () => {
+    expect(isSubagentSession({ title: "email@example.com session" })).toBe(
+      false,
+    );
   });
 
-  test("undefined title -> false", () => {
-    expect(isSubagentSession(undefined)).toBe(false);
+  test("no parentID, mentions 'subagents' mid-string -> false", () => {
+    expect(isSubagentSession({ title: "discussing subagents" })).toBe(false);
+  });
+
+  test("no parentID, pattern present but not at suffix -> false", () => {
+    expect(isSubagentSession({ title: "(@a subagent) extra" })).toBe(false);
+  });
+
+  test("no parentID, no title -> false", () => {
+    expect(isSubagentSession({})).toBe(false);
   });
 });
 
@@ -113,6 +127,17 @@ describe("toSessionRows includeSubagents", () => {
       { includeSubagents: true },
     );
     expect(rows.map((r) => r.id)).toEqual(["s1", "s2"]);
+  });
+
+  test("default (false) filters out sessions with parentID regardless of title", () => {
+    const rows = toSessionRows(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "No subagent marker", parentID: "s1" }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1"]);
   });
 
   test("needsAttention on a hidden subagent session does not leak once filtered", () => {

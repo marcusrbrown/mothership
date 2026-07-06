@@ -41,6 +41,14 @@ export interface StoredSession {
   /** Real server-side creation timestamp (epoch ms), same caveats as
    * `updatedAt`. Currently unused by consumers; captured opportunistically. */
   createdAt?: number;
+  /** The parent session's id, present on subagent/child sessions. Read
+   * from the loosely-typed `parentID` field that space-bus's `$loose`
+   * session schema passes through at runtime but doesn't type statically
+   * (same caveats as `updatedAt`/`createdAt` — see `parentIdOf`). This is
+   * the PRIMARY, reliable signal for subagent detection in
+   * `sessions-view.ts`'s `isSubagentSession`; the title-suffix regex is
+   * only a fallback for payloads/fixtures that lack this field. */
+  parentID?: string;
 }
 
 export interface StoredQuestion {
@@ -111,6 +119,16 @@ function timeFieldsOf(raw: unknown): { updated?: number; created?: number } {
   return { updated: num(t.updated), created: num(t.created) };
 }
 
+/** Narrow, `any`-free accessor for the `parentID` field that space-bus's
+ * `$loose` session schema passes through at runtime (OpenCode stamps this
+ * on subagent/child sessions) but that isn't present in the static
+ * session/event types. Reads defensively: any unexpected shape yields
+ * `undefined` rather than throwing. */
+function parentIdOf(raw: unknown): string | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  return str((raw as { parentID?: unknown }).parentID);
+}
+
 export function createSessionStore(): SessionStore {
   const sessions = new Map<string, StoredSession>();
   // sessionID -> directory, tracked separately so reconcile() can scope
@@ -138,6 +156,7 @@ export function createSessionStore(): SessionStore {
     status?: SessionBusyState;
     updatedAt?: number;
     createdAt?: number;
+    parentID?: string;
   }): void {
     const existing = sessions.get(partial.id);
     const merged: StoredSession = {
@@ -147,6 +166,7 @@ export function createSessionStore(): SessionStore {
       status: partial.status ?? existing?.status ?? "unknown",
       updatedAt: partial.updatedAt ?? existing?.updatedAt,
       createdAt: partial.createdAt ?? existing?.createdAt,
+      parentID: partial.parentID ?? existing?.parentID,
     };
     sessions.set(partial.id, merged);
     if (merged.directory) sessionDirectory.set(partial.id, merged.directory);
@@ -197,6 +217,7 @@ export function createSessionStore(): SessionStore {
             title: str(props.title),
             updatedAt: time.updated ?? time.created,
             createdAt: time.created,
+            parentID: parentIdOf(props),
           });
           notify();
           return;
@@ -296,6 +317,7 @@ export function createSessionStore(): SessionStore {
             : undefined,
           updatedAt: time.updated ?? time.created,
           createdAt: time.created,
+          parentID: parentIdOf(s),
         });
       }
 

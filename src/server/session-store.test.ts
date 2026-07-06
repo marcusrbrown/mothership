@@ -20,6 +20,14 @@ describe("createSessionStore applyEvent", () => {
     });
   });
 
+  test("session.created with parentID populates parentID (subagent detection signal)", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", { id: "ses_child", parentID: "ses_parent" }),
+    );
+    expect(store.getSession("ses_child")?.parentID).toBe("ses_parent");
+  });
+
   test("session.status mutates busy state", () => {
     const store = createSessionStore();
     store.applyEvent(evt("session.created", { id: "ses_1" }));
@@ -175,6 +183,24 @@ describe("createSessionStore reconcile", () => {
       sessions: [{ id: "ses_1", time: { created: 500, updated: 1500 } }],
     });
     expect(store.getSession("ses_1")?.updatedAt).toBe(1500);
+  });
+
+  test("reconcile with sessions carrying parentID populates parentID (subagent detection signal)", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: "/proj",
+      sessions: [{ id: "ses_child", parentID: "ses_parent" }],
+    });
+    expect(store.getSession("ses_child")?.parentID).toBe("ses_parent");
+  });
+
+  test("reconcile session missing parentID -> parentID stays undefined", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: "/proj",
+      sessions: [{ id: "ses_1" }],
+    });
+    expect(store.getSession("ses_1")?.parentID).toBeUndefined();
   });
 
   test("reconcile session missing time -> updatedAt stays undefined", () => {
