@@ -70,7 +70,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 ## Implementation Units
 
-- [ ] **Unit 1: Store integrity — wipe guard and zombie guard**
+- [x] **Unit 1: Store integrity — wipe guard and zombie guard**
 
 **Goal:** A directory's sessions survive transient REST failures, and status-only events can't fabricate sessions.
 
@@ -93,7 +93,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 **Verification:** Both regression tests fail on current code, pass after; full suite green.
 
-- [ ] **Unit 2: Transcript ordering — generation guard + live-append proof**
+- [x] **Unit 2: Transcript ordering — generation guard + live-append proof**
 
 **Goal:** The transcript never shows stale data after fast session switches, and dispatch → deltas stream without re-click.
 
@@ -116,7 +116,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 **Verification:** Race test fails on current code, passes after; live-append confirmed in Unit 6.
 
-- [ ] **Unit 3: Subagent session filtering**
+- [x] **Unit 3: Subagent session filtering**
 
 **Goal:** Sessions panel shows top-level sessions only by default; subagents behind a toggle.
 
@@ -136,7 +136,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 **Verification:** Tests green; toggle behavior confirmed in Unit 6.
 
-- [ ] **Unit 4: Supervisor races**
+- [x] **Unit 4: Supervisor races**
 
 **Goal:** No double-spawn, no orphaned children, no shutdown-time respawn.
 
@@ -156,7 +156,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 **Verification:** `cargo test` green; no regression in adopt-vs-owned behavior (existing tests).
 
-- [ ] **Unit 5: Workspace schema tolerance**
+- [x] **Unit 5: Workspace schema tolerance**
 
 **Goal:** Unknown `spacebus.json` fields never break workspace load.
 
