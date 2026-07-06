@@ -13,39 +13,37 @@
  */
 import { z } from "zod";
 
-export const manifestSchema = z
-  .object({
-    server: z
-      .object({
-        baseUrl: z.string().url().optional(),
-        managed: z
-          .object({
-            command: z.array(z.string()).optional(),
-            cwd: z.string().optional(),
-            port: z.number().int().nonnegative().optional(),
-          })
-          .optional(),
-      })
-      .superRefine((server, ctx) => {
-        const hasBaseUrl = server.baseUrl !== undefined;
-        const hasManaged = server.managed !== undefined;
-        if (hasBaseUrl === hasManaged) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message:
-              "spacebus.json server must set exactly one of baseUrl or managed",
-          });
-        }
-      }),
-    projects: z.array(
-      z.object({
-        name: z.string(),
-        path: z.string(),
-        description: z.string(),
-      }),
-    ),
-  })
-  .strict();
+export const manifestSchema = z.object({
+  server: z
+    .object({
+      baseUrl: z.string().url().optional(),
+      managed: z
+        .object({
+          command: z.array(z.string()).optional(),
+          cwd: z.string().optional(),
+          port: z.number().int().nonnegative().optional(),
+        })
+        .optional(),
+    })
+    .superRefine((server, ctx) => {
+      const hasBaseUrl = server.baseUrl !== undefined;
+      const hasManaged = server.managed !== undefined;
+      if (hasBaseUrl === hasManaged) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "spacebus.json server must set exactly one of baseUrl or managed",
+        });
+      }
+    }),
+  projects: z.array(
+    z.object({
+      name: z.string(),
+      path: z.string(),
+      description: z.string(),
+    }),
+  ),
+});
 
 export type Manifest = z.infer<typeof manifestSchema>;
 
