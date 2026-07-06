@@ -1,0 +1,10 @@
+# Release-critical paths require review from a repo owner before merge.
+# Keeping this narrow: it protects the settings/workflow surface that
+# guards release secrets and tags, not the whole tree.
+
+/.github/rulesets/            @marcusrbrown
+/.github/workflows/release.yml @marcusrbrown
+/scripts/apply-release-settings.ts  @marcusrbrown
+/scripts/verify-release-settings.ts @marcusrbrown
+/src-tauri/entitlements*.plist @marcusrbrown
+/src-tauri/tauri.conf.json     @marcusrbrown
