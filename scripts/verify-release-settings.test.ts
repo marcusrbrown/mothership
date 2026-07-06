@@ -17,6 +17,7 @@ const declaredRuleset = {
         required_status_checks: [
           { context: "Design Check" },
           { context: "verify (typecheck)" },
+          { context: "Release Config Smoke" },
         ],
       },
     },

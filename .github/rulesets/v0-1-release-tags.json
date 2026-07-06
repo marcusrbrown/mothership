@@ -32,6 +32,7 @@
           { "context": "verify (typecheck)" },
           { "context": "verify (lint)" },
           { "context": "verify (test)" },
+          { "context": "Release Config Smoke" },
           { "context": "Check Workflows" }
         ]
       }
