@@ -58,7 +58,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 - Fix at the resolution/guard layer, not by restructuring the live-data model — the hybrid poll + single-SSE architecture is settled; these are correctness holes in it.
 - Generation counters over locks for async UI races (backfill) — matches the existing submitRef/ref-reading patterns in the codebase.
-- Subagent detection by title suffix pattern `(@<name> subagent)` — the only signal available today; if space-bus/opencode later exposes a structured field, swap the predicate (single seam in sessions-view).
+- Subagent detection uses `parentID` as the primary signal, with the title suffix pattern `(@<name> subagent)` as a fallback for payloads without it (single seam in sessions-view).
 - Supervisor fix re-validates state after reacquiring the lock (kill the losing child) rather than holding the lock across a blocking spawn or adding a second synchronization primitive — minimal lock hold beats serialized spawns.
 
 ## Open Questions

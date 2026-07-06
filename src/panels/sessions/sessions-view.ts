@@ -65,7 +65,10 @@ export type SessionsViewState =
  * proxy. Sessions without a timestamp (older server, or not yet
  * reconciled) sink below all timestamped sessions; when timestamps are
  * equal or both absent, original (insertion) order is preserved as a
- * stable fallback. */
+ * stable fallback.
+ *
+ * Subagent sessions (see `isSubagentSession`) are hidden by default; pass
+ * `{ includeSubagents: true }` to include them. */
 export function toSessionRows(
   sessions: StoredSession[],
   pendingSessionIds: ReadonlySet<string>,
