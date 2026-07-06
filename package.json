@@ -13,7 +13,10 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint": "biome check .",
-    "fix": "biome check --write ."
+    "fix": "biome check --write .",
+    "changeset": "changeset",
+    "version": "changeset version && bun scripts/sync-version.ts",
+    "version:check": "bun scripts/sync-version.ts --check"
   },
   "dependencies": {
     "@fro.bot/space-bus": "0.7.0",
@@ -36,13 +39,14 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@changesets/cli": "^2.31.0",
+    "@tauri-apps/cli": "^2",
+    "@types/bun": "latest",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@types/bun": "latest",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4",
-    "@tauri-apps/cli": "^2",
-    "@biomejs/biome": "^1.9.4"
+    "vite": "^7.0.4"
   }
 }
