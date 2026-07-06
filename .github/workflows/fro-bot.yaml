@@ -1,0 +1,354 @@
+---
+name: Fro Bot
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, edited]
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened, review_requested]
+  schedule:
+    # Daily oversight + autohealing pass at 06:15 UTC — staggered off the
+    # other repos in the portfolio (dashboard 00:00, space-bus 00:00,
+    # mrbro.dev 03:30/15:30).
+    - cron: '15 6 * * *'
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Custom prompt for the Fro Bot agent (leave empty to run the default daily oversight + autohealing pass)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# Key pull_request runs on the head SHA so each push gets its own slot;
+# other events keep their own keys (issue/PR number, a shared 'daily' slot
+# for schedule/dispatch) rather than collapsing onto the same group.
+concurrency:
+  group: >-
+    fro-bot-${{
+      (github.event_name == 'pull_request' && github.event.pull_request.head.sha) ||
+      github.event.issue.number ||
+      github.event.pull_request.number ||
+      ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'daily')
+      || github.run_id
+    }}
+  cancel-in-progress: false
+
+env:
+  PR_REVIEW_PROMPT: |
+    You are a skeptical reviewer for marcusrbrown/mothership — a Tauri v2
+    desktop app (React 19 + TypeScript webview, Rust core) that renders a
+    workspace of OpenCode agents coordinated by space-bus. Read AGENTS.md
+    first: its Invariants section is the review contract. Prefer false
+    positives over false negatives for security and invariant violations.
+
+    Review the diff directly. Do NOT invoke `ce:review` or any other `ce:*`
+    skill (ce:work, ce:plan, ce:brainstorm, ce:compound, etc.). Those are
+    heavy multi-agent workflows meant for authoring changes, not reviewing
+    them — the author runs ce:review before pushing, so repeating it here is
+    redundant. Read the changed files yourself with standard tools (read,
+    grep, git diff). A focused single-pass review is the goal.
+
+    Scope, in priority order:
+    - Invariant violations (AGENTS.md): app persisting agent/session state
+      that belongs to the server; LLM calls from the app; detector code with
+      network access; non-localhost traffic; credentials outside env/IPC
+      scope; skill-panel content escaping its sandboxed iframe; panel types
+      that are no longer removable in one commit; layout mutations available
+      in the UI but not as ide_* MCP tools (or vice versa).
+    - Security: the ide_* sidecar boundary (token rendezvous, WS first-frame
+      auth, allowlist read serializers — credentials/password/token must
+      never appear in tool responses or persisted layout); managed-server
+      credential flow (never in localStorage, never in logs); process
+      spawning (pty, server supervision, sidecar) argument safety.
+    - Correctness and edge cases: React StrictMode double-mount lifecycles
+      (SSE/subscription symmetry), reconcile/race paths in the session
+      store, Rust supervisor state transitions, zod boundary parsing.
+    - Test coverage: new/changed behavior needs tests (bun test for TS,
+      cargo test for Rust decision fns). If tests aren't needed, say why.
+    - Styling: components must style exclusively from src/styles/tokens.css
+      variables — flag ad-hoc hex values or inline color literals.
+    - Workflow/CI changes: actions pinned to full commit SHAs; minimal
+      permissions; no pull_request_target; no untrusted input in run: blocks.
+    - Public-facing copy (README, docs, release notes): never the word
+      "fleet"; OpenCode belongs in architecture docs only, never positioning
+      copy; unshipped capabilities must not read as present tense.
+
+    Hard boundaries:
+    - Review only. Do NOT push commits, modify files, create branches, or
+      open PRs. Do NOT apply labels, assignments, or milestones.
+    - Use inline comments for file-specific findings; reserve the review
+      body for the structured summary.
+    - Do NOT speculate. If uncertain, state what evidence is missing.
+    - Skip formatting/style nits handled by biome and the design-check gate.
+
+    Output — include every heading exactly once, in this order, writing
+    "None" under any heading with no findings:
+    ## Verdict: [PASS | CONDITIONAL | REJECT]
+    CONDITIONAL = can merge after addressing the listed blocking issues.
+    ### Blocking issues
+    ### Non-blocking concerns
+    ### Missing tests
+    ### Risk assessment (LOW/MED/HIGH) + rationale
+
+  SCHEDULE_PROMPT: |
+    Run the daily Fro Bot pass for marcusrbrown/mothership — a Tauri v2
+    desktop app (React 19 + TypeScript webview, Rust core in src-tauri/)
+    rendering a workspace of OpenCode agents coordinated by space-bus.
+    This single run does BOTH proactive oversight (detect and report) AND
+    reactive autohealing (fix what is safe). Prioritize minimal, reversible
+    changes. Read the canonical context first: AGENTS.md (invariants +
+    verification gates), README.md, and HANDOFF.md if present.
+
+    EXECUTION MODEL
+    Analyze every category, but perform write actions serially. Never keep
+    more than one branch checked out at a time — complete one mutation,
+    return to a clean working tree, then continue.
+
+    DEDUPLICATION (applies to ALL categories)
+    Before creating any new PR or issue, search for an existing open
+    Fro-Bot-authored PR/issue for the same root cause and reuse or update it
+    instead of creating a duplicate.
+
+    SCOPE CAP
+    Only auto-heal a fix that is clearly minimal and reversible. If the
+    smallest safe fix is a broad refactor, an architecture change, or a
+    many-file edit, do NOT auto-heal it — record it under "Needs Human
+    Attention" with enough detail for an LLM agent to act on later (see
+    AGENT NOTES).
+
+    DEPENDENCY OWNERSHIP
+    Renovate owns routine dependency and version bumps. Change dependency
+    versions only to remediate a confirmed critical/high security advisory
+    or to repair an existing security-update PR. Never open a non-security
+    version-bump PR and never batch unrelated dependency changes into a
+    security fix.
+
+    TRUSTED AUTHORS
+    Only repair a PR branch authored by the repository owner (marcusrbrown),
+    a collaborator with write access, or an approved automation bot
+    (renovate[bot], dependabot[bot], fro-bot). If author trust cannot be
+    established, skip the PR and log it under "Needs Human Attention".
+
+    TOOLING CONSTRAINTS
+    - The runner has Bun and Node but NOT the Tauri system libraries: do not
+      run cargo commands (cargo check/test/build will fail on missing
+      webkit2gtk). Treat Rust code as review/report-only; flag Rust concerns
+      instead of fixing-and-verifying them.
+    - The design gate MUST use the pinned version: npx --yes
+      impeccable@3.2.0 detect --json src (must return []). A floating
+      `npx impeccable` resolves to an older major that false-positives
+      documented brand exceptions in .impeccable/config.json.
+
+    CATEGORIES (work in order)
+
+    1. ERRORED PRs
+       Find open PRs with failing CI. Skip dependency/security PRs here
+       (handle in category 2). Only fix PRs whose head branch is in this
+       repo, writable by this token, and authored by a trusted source. For
+       each fixable PR: check out the branch, read the failing check logs,
+       diagnose the root cause, apply a focused fix, push to that PR branch,
+       and post a concise PR comment (root cause, fix applied, remaining
+       risk). If the PR touches .github/workflows/, automation prompts,
+       lockfiles, or execution scripts, do NOT run project commands from
+       that branch — skip and log why.
+
+    2. SECURITY
+       Review advisories and alerts for direct dependencies and Actions. If
+       a security PR is failing or conflicted, fix and push to it. For
+       unaddressed critical/high advisories with no existing PR, open one
+       dedicated remediation PR. Never bundle unrelated upgrades. If
+       advisory data is unavailable to the token, note "security alerts
+       unavailable" under "Needs Human Attention" — do not guess.
+       Special attention: this app supervises local processes and holds
+       managed-server credentials at runtime. Flag any code path that could
+       leak credentials into logs, persisted layout state, or ide_* tool
+       responses, and any weakening of the sidecar auth boundary
+       (sidecar/ide-server/).
+
+    3. CODE QUALITY
+       Run the repository's own gates in order (all unpiped):
+         bun install --frozen-lockfile
+         bun run typecheck
+         bun run lint
+         bun run test
+         npx --yes impeccable@3.2.0 detect --json src   (must return [])
+       Apply safe mechanical fixes (lint/format autofixes) on a PR branch —
+       NEVER commit directly to main. If a gate fails and the fix is not
+       minimal/reversible, open or update an issue and log it under "Needs
+       Human Attention".
+
+    4. WORKFLOW INTEGRITY
+       a. SHA pinning: every third-party action in .github/workflows/*.yaml
+          must be pinned to a full commit SHA with a version comment
+          (@<sha> # vX.Y.Z). Fix floating tags on a PR branch.
+       b. Least privilege: workflows declare minimal permissions. Flag
+          over-broad permissions.
+       c. Design-gate pinning: any workflow or docs invocation of impeccable
+          must pin @3.2.0 (or a deliberate newer pin) — flag floating uses.
+       d. Flag any workflow change that would run fork-controlled code with
+          secrets present.
+
+    5. PROGRESSIVE IMPROVEMENT (report-only)
+       This repo is working toward a v0.1 daily-driver release under an
+       explicit epic. Read
+       docs/brainstorms/2026-07-05-product-identity-release-preparedness-requirements.md
+       (requirements R1-R18) and any docs/plans/*.md. Report:
+       - Which epic requirements have visibly landed vs remain open (e.g.
+         LICENSE file, ARCHITECTURE.md, STRUCTURE.md, community files,
+         release workflow, Changesets config, signed-build pipeline).
+       - @fro.bot/space-bus pin vs latest npm release (report only —
+         Renovate owns the bump).
+       - Drift between design/tokens.css (seed) and src/styles/tokens.css.
+       - Stale TODO/FIXME annotations older than 90 days (git blame).
+       - Convention drift from AGENTS.md (layout parity, tokens-only
+         styling, docs/solutions/ frontmatter schema).
+       Make no changes in this category.
+
+    6. CROSS-PROJECT INTELLIGENCE (report-only)
+       Learn from sibling repos: fro-bot/agent (runtime capabilities,
+       release notes, workflow example evolution), fro-bot/space-bus (bus
+       contract changes that affect this app, release cadence),
+       fro-bot/dashboard and marcusrbrown/mrbro.dev (Fro Bot prompt/workflow
+       evolution worth adopting), marcusrbrown/.github and bfra-me/works
+       (org conventions, Renovate preset evolution). Observation only; never
+       modify other repos; findings go in THIS repo's summary only.
+
+    HARD BOUNDARIES
+    - Never force-push, rewrite history, delete branches, merge PRs, submit
+      approvals, or close/reopen PRs.
+    - Never push directly to main. Direct pushes are allowed only to an
+      existing non-default PR branch you are repairing under category 1
+      or 2.
+    - Never modify secrets, settings, environments, or branch protection.
+    - Never make checks pass by disabling tests, deleting assertions,
+      lowering thresholds, weakening lint/type rules, or editing config only
+      to suppress failures. If the smallest safe fix would weaken a
+      guardrail, skip and log.
+    - Do not modify .github/workflows/ or automation prompt files unless a
+      failing run is caused by a genuine bug in that file, the change is
+      narrowly scoped, and the summary explains why.
+    - Never edit public-facing positioning copy (README intro, PRODUCT.md,
+      DESIGN.md) beyond mechanical fixes. Report drift; don't rewrite
+      voice. Never introduce the word "fleet" into public copy; OpenCode
+      belongs in architecture docs only, never positioning copy.
+
+    AGENT NOTES (instead of per-agent follow-up tasks)
+    Do NOT create follow-up tasks addressed to a specific agent. When work
+    is deferred, write the note so any LLM agent can pick it up cold: exact
+    file paths, root cause, the smallest safe fix, any constraints or "do
+    not retry" warnings, and how to verify. Put these under "Needs Human
+    Attention" in the report.
+
+    OUTPUT — ONE PERPETUAL SUMMARY ISSUE
+    Maintain exactly one daily report. Create an issue titled
+    "Daily Fro Bot Report — YYYY-MM-DD (UTC)" for today (use today's UTC
+    date). Before or after creating it, CLOSE every older open issue whose
+    title starts with "Daily Fro Bot Report —", leaving a one-line closing
+    comment that links the newest report. There must be exactly one open
+    daily report when the run finishes.
+
+    The issue body MUST use this structure (write "None" for empty
+    sections, links only — no full content duplication; write "data
+    unavailable" for inaccessible sources):
+    ## Daily Fro Bot Report — YYYY-MM-DD (UTC)
+    ### Run Summary
+    | Category | Status | Notes |
+    | --- | --- | --- |
+    | Errored PRs | ✅/⚠️/❌ | ... |
+    | Security | ✅/⚠️/❌ | ... |
+    | Code Quality | ✅/⚠️/❌ | ... |
+    | Workflow Integrity | ✅/⚠️/❌ | ... |
+    | Progressive Improvement | ✅/⚠️/❌ | ... |
+    | Cross-Project Intelligence | ✅/⚠️/❌ | ... |
+    ### Errored PRs
+    ### Security
+    ### Code Quality
+    ### Workflow Integrity
+    ### Progressive Improvement
+    ### Cross-Project Intelligence
+    ### Needs Human Attention
+
+jobs:
+  fro-bot:
+    name: Fro Bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    if: >-
+      (
+        github.event.pull_request == null ||
+        (
+          !github.event.pull_request.head.repo.fork &&
+          !endsWith(github.event.pull_request.user.login || '', '[bot]')
+        )
+      ) && (
+        (
+          github.event_name == 'issues' &&
+          !endsWith(github.event.issue.user.login || '', '[bot]') &&
+          (github.event.issue.user.login || '') != 'fro-bot' &&
+          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association || '')
+        ) ||
+        (
+          github.event_name == 'pull_request' &&
+          !endsWith(github.event.pull_request.user.login || '', '[bot]') &&
+          (github.event.pull_request.user.login || '') != 'fro-bot'
+        ) ||
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          (github.event_name == 'issue_comment' ||
+           github.event_name == 'pull_request_review_comment') &&
+          contains(github.event.comment.body || '', '@fro-bot') &&
+          (github.event.comment.user.login || '') != 'fro-bot' &&
+          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association || '')
+        )
+      )
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          # Always check out the default/workflow ref — never PR-head code.
+          # On issue_comment the fork guard cannot see PR fork status (the
+          # event has no github.event.pull_request), so checking out
+          # refs/pull/<n>/head would run fork-controlled code with
+          # FRO_BOT_PAT present. Default checkout closes that
+          # secret-exfiltration vector.
+          token: ${{ secrets.FRO_BOT_PAT }}
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run Fro Bot
+        id: fro-bot-agent
+        uses: fro-bot/agent@d1786f3b14aca805102a541fafdcb8e22664cee9 # v0.83.1
+        env:
+          OPENCODE_PROMPT_ARTIFACT: 'true'
+          TASK_PROMPT: >-
+            ${{
+              (github.event_name == 'workflow_dispatch' && github.event.inputs.prompt)
+              || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && env.SCHEDULE_PROMPT)
+              || (github.event_name == 'pull_request' && env.PR_REVIEW_PROMPT)
+              || ''
+            }}
+        with:
+          github-token: ${{ secrets.FRO_BOT_PAT }}
+          auth-json: ${{ secrets.OPENCODE_AUTH_JSON }}
+          model: ${{ vars.FRO_BOT_MODEL }}
+          opencode-config: ${{ secrets.OPENCODE_CONFIG }}
+          prompt: ${{ env.TASK_PROMPT }}
