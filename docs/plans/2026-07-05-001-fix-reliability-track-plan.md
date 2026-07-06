@@ -176,7 +176,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 **Verification:** New test fails on `.strict()`, passes after; suite green.
 
-- [ ] **Unit 6: Live window verification**
+- [x] **Unit 6: Live window verification**
 
 **Goal:** Prove the fixed paths against the real workspace; capture evidence.
 
@@ -190,7 +190,7 @@ The v0.1 release bar is "Marcus runs his real workspace through Mothership daily
 
 **Test scenarios:** Test expectation: none — live verification unit; the scenarios ARE the runbook above.
 
-**Verification:** All runbook items pass in one window session; evidence attached to the session/PR; any failure loops back into the owning unit before this plan closes.
+**Verification:** Live window passed for deleted-session recovery, active-project highlight, session-row highlight, transcript routing, live transcript update, and parentID-based subagent hiding. Auto-scroll remains a non-blocking residual by operator decision.
 
 ## System-Wide Impact
 
