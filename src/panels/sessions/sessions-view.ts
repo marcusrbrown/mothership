@@ -17,6 +17,36 @@ export interface SessionRow {
   needsAttention: boolean;
 }
 
+/** Suffix pattern OpenCode uses for subagent session titles, e.g.
+ * "Fix the tests (@fixer subagent)". Suffix-anchored so titles that merely
+ * contain "@" or "subagent" mid-string (an email address, a sentence
+ * discussing subagents) are NOT treated as subagent sessions. Used only as
+ * a FALLBACK when `parentID` is absent (older server/fixture payloads) —
+ * see `isSubagentSession`. */
+const SUBAGENT_SUFFIX = /\(@[^()]+ subagent\)$/;
+
+/** True when `session` is a subagent/child session. PRIMARY signal is
+ * `parentID`: OpenCode stamps subagent sessions with the parent session's
+ * id, which is a reliable structural marker (unlike title text, which is
+ * free-form and can be edited/renamed). Falls back to the `(@<name>
+ * subagent)` title-suffix marker when `parentID` is absent, so this still
+ * works against older payloads/fixtures that predate the field. Used to
+ * hide subagent noise from the sessions panel by default (R8). */
+export function isSubagentSession(session: {
+  parentID?: string;
+  title?: string;
+}): boolean {
+  if (session.parentID != null) return true;
+  if (!session.title) return false;
+  return SUBAGENT_SUFFIX.test(session.title);
+}
+
+export interface ToSessionRowsOptions {
+  /** When true, subagent sessions are included alongside top-level
+   * sessions. Default false (top-level only). */
+  includeSubagents?: boolean;
+}
+
 export type SessionsViewState =
   | { status: "loading" }
   | { status: "empty" }
@@ -35,12 +65,18 @@ export type SessionsViewState =
  * proxy. Sessions without a timestamp (older server, or not yet
  * reconciled) sink below all timestamped sessions; when timestamps are
  * equal or both absent, original (insertion) order is preserved as a
- * stable fallback. */
+ * stable fallback.
+ *
+ * Subagent sessions (see `isSubagentSession`) are hidden by default; pass
+ * `{ includeSubagents: true }` to include them. */
 export function toSessionRows(
   sessions: StoredSession[],
   pendingSessionIds: ReadonlySet<string>,
+  options: ToSessionRowsOptions = {},
 ): SessionRow[] {
+  const { includeSubagents = false } = options;
   return sessions
+    .filter((s) => includeSubagents || !isSubagentSession(s))
     .map((s, index) => ({ s, index }))
     .sort((a, b) => {
       const at = a.s.updatedAt;
@@ -69,9 +105,14 @@ export function toSessionsViewState(
         pendingSessionIds: ReadonlySet<string>;
       }
     | { ok: false; error: string },
+  options: ToSessionRowsOptions = {},
 ): SessionsViewState {
   if (!result.ok) return { status: "error", message: result.error };
-  const rows = toSessionRows(result.sessions, result.pendingSessionIds);
+  const rows = toSessionRows(
+    result.sessions,
+    result.pendingSessionIds,
+    options,
+  );
   if (rows.length === 0) return { status: "empty" };
   return { status: "ready", rows };
 }

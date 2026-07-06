@@ -66,9 +66,14 @@ export async function reconcileProject(
     client.getSessionStatus(directory),
     client.listQuestions(directory),
   ]);
+  // A failed listSessions is NOT authoritative — reconcile with an empty
+  // array would wipe every session previously known for this directory.
+  // Skip the reconcile entirely and let the next tick (poller or SSE
+  // reconnect) recover once listSessions succeeds again.
+  if (!sessionsRes.ok) return;
   store.reconcile({
     directory,
-    sessions: sessionsRes.ok ? sessionsRes.value : [],
+    sessions: sessionsRes.value,
     statuses: statusRes.ok ? statusRes.value : undefined,
     questions: questionsRes.ok ? questionsRes.value : undefined,
   });
@@ -210,6 +215,13 @@ interface LiveParamContext {
    * onto the transcript panel only (its directory is the active directory
    * by construction) so its backfill effect re-runs on reconnect. */
   reconnectNonce?: number;
+  /** Issue 3 fix: expanded-path directory of the project currently active
+   * (viewed via a session selection, or just dispatched to) — mirrors the
+   * `activeSession` state DockviewShell already threads to PromptBar.
+   * Pushed onto the roster panel so the target project's row gets the
+   * cyan active highlight, matching the sessions-view active-row
+   * treatment. */
+  activeDirectory?: string;
   callbacks: {
     onSelectProject: (name: string) => void;
     onSelectSession: (sessionId: string) => void;
@@ -232,6 +244,7 @@ function liveParamsForPanel(
         context: ctx.context,
         store: ctx.live?.store,
         onSelectProject: ctx.callbacks.onSelectProject,
+        activeDirectory: ctx.activeDirectory,
       };
     case "sessions":
       return {
@@ -241,9 +254,14 @@ function liveParamsForPanel(
       };
     case "transcript":
       // sessionID comes from selection/dispatch, not the seed/restore path.
+      // `store` (issue 2 fix): lets the panel detect a session pruned by
+      // the reconcile poller for its OWN directory even when no
+      // `session.deleted` SSE event reaches it (the active SSE stream
+      // follows only ONE directory at a time).
       return {
         client: ctx.live?.client,
         demux: ctx.live?.demux,
+        store: ctx.live?.store,
         directory: ctx.directory,
         reconnectNonce: ctx.reconnectNonce,
       };
@@ -521,6 +539,13 @@ export function DockviewShell({
       apiRef.current
         ?.getPanel("sessions")
         ?.api.updateParameters({ directory: project.expandedPath });
+      // Issue 3 fix: mirror the newly-selected project onto the roster
+      // panel's `activeDirectory` so its row gets the active highlight —
+      // selecting a project in the roster is itself an "activation" even
+      // before any session in it is picked.
+      apiRef.current
+        ?.getPanel("roster")
+        ?.api.updateParameters({ activeDirectory: project.expandedPath });
       // Switch the one live SSE stream to the newly-selected project so
       // its transcript/session events stream immediately.
       activeSseRef.current?.setActiveDirectory(project.expandedPath);
@@ -558,6 +583,11 @@ export function DockviewShell({
       // sessions/transcript highlight can never diverge from what the
       // transcript is showing.
       setActiveSession({ sessionId, directory: sessionsDirectory });
+      // Issue 3 fix: keep the roster row highlight in lockstep with the
+      // session that's now driving the transcript.
+      apiRef.current
+        ?.getPanel("roster")
+        ?.api.updateParameters({ activeDirectory: sessionsDirectory });
     }
   }, []);
 
@@ -577,6 +607,7 @@ export function DockviewShell({
           context,
           live,
           directory: context?.roster.projects[0]?.expandedPath,
+          activeDirectory: activeSession?.directory,
           callbacks: {
             onSelectProject: handleSelectProject,
             onSelectSession: handleSelectSession,
@@ -625,6 +656,7 @@ export function DockviewShell({
       live,
       handleSelectProject,
       handleSelectSession,
+      activeSession,
     ],
   );
 
@@ -654,6 +686,13 @@ export function DockviewShell({
       apiRef.current
         ?.getPanel("sessions")
         ?.api.updateParameters({ directory, activeSessionId: sessionId });
+      // Issue 3 fix: the roster regression — the dispatched-to project's
+      // row must highlight, mirroring the sessions-view active-row
+      // treatment. Lost when `activeSession` state was introduced without
+      // being threaded to the roster panel's params.
+      apiRef.current
+        ?.getPanel("roster")
+        ?.api.updateParameters({ activeDirectory: directory });
       // The exact case the hybrid model exists for: a cross-project
       // dispatch (e.g. @dashboard) must stream live immediately, not wait
       // for the next poll tick — switch the one active SSE stream to the

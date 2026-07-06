@@ -41,7 +41,9 @@ struct PtyExitPayload {
 fn shell_command(cwd: Option<&str>) -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(&shell);
-    cmd.arg("-l"); // login shell, matches plan's "spawn $SHELL or /bin/zsh login shell"
+    // Login shell, matches plan's "spawn $SHELL or /bin/zsh login shell".
+    cmd.arg("-l");
+
     // No cwd previously meant the shell inherited the Tauri process's cwd
     // (home dir / app bundle dir when double-clicked) instead of the
     // workspace the user launched/selected — surprising for a terminal
@@ -250,9 +252,7 @@ mod tests {
         let mut writer = pair.master.take_writer().expect("writer");
         let mut reader = pair.master.try_clone_reader().expect("reader");
 
-        writer
-            .write_all(b"echo hi-from-pty-test\n")
-            .expect("write");
+        writer.write_all(b"echo hi-from-pty-test\n").expect("write");
 
         let mut collected = String::new();
         let deadline = Instant::now() + Duration::from_secs(5);

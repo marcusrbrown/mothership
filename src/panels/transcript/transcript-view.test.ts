@@ -3,11 +3,15 @@ import type { MessageList } from "../../server/types";
 import {
   addPendingQuestion,
   applyPartUpdate,
+  checkSessionStillTracked,
   fromBackfill,
   initialTranscriptState,
+  partUpdateFromEventProperties,
   removePendingQuestion,
+  resolveBackfill,
   setAnswerError,
   setAnswerSending,
+  shouldAutoScroll,
   toReadOnly,
 } from "./transcript-view";
 
@@ -143,6 +147,77 @@ describe("pending questions", () => {
   });
 });
 
+describe("resolveBackfill", () => {
+  test("happy path: single in-flight backfill resolves to ready state", async () => {
+    const messages: MessageList = [
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "hi" }] },
+    ];
+    const state = await resolveBackfill(
+      async () => ({ ok: true, value: messages }),
+      1,
+      () => true,
+    );
+    expect(state?.status).toBe("ready");
+    expect(state?.parts).toEqual([
+      { id: "0:0", role: "assistant", type: "text", text: "hi" },
+    ]);
+  });
+
+  test("race: A's backfill resolving after B's is discarded, B's result wins", async () => {
+    let currentGeneration = 1;
+    let resolveA!: (v: {
+      ok: true;
+      value: MessageList;
+    }) => void;
+    const aPromise = new Promise<{ ok: true; value: MessageList }>(
+      (resolve) => {
+        resolveA = resolve;
+      },
+    );
+
+    const aResultPromise = resolveBackfill(
+      () => aPromise,
+      1,
+      (gen) => gen === currentGeneration,
+    );
+
+    // B starts second and bumps the generation immediately (sync fetch).
+    currentGeneration = 2;
+    const bMessages: MessageList = [
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "B" }] },
+    ];
+    const bResultPromise = resolveBackfill(
+      async () => ({ ok: true, value: bMessages }),
+      2,
+      (gen) => gen === currentGeneration,
+    );
+
+    const bResult = await bResultPromise;
+    resolveA({
+      ok: true,
+      value: [
+        { info: { role: "assistant" }, parts: [{ type: "text", text: "A" }] },
+      ],
+    });
+    const aResult = await aResultPromise;
+
+    expect(aResult).toBeUndefined();
+    expect(bResult?.parts).toEqual([
+      { id: "0:0", role: "assistant", type: "text", text: "B" },
+    ]);
+  });
+
+  test("error result is only applied when generation is current", async () => {
+    const state = await resolveBackfill(
+      async () => ({ ok: false, error: { message: "boom" } }),
+      1,
+      () => true,
+    );
+    expect(state?.status).toBe("error");
+    expect(state?.message).toBe("boom");
+  });
+});
+
 describe("toReadOnly", () => {
   test("session.deleted flips status to read-only, preserving parts", () => {
     let state = fromBackfill([
@@ -151,5 +226,132 @@ describe("toReadOnly", () => {
     state = toReadOnly(state);
     expect(state.status).toBe("read-only");
     expect(state.parts).toHaveLength(1);
+  });
+});
+
+describe("checkSessionStillTracked (issue 2: deleted-elsewhere detection)", () => {
+  const readyState = fromBackfill([
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "hi" }] },
+  ]);
+
+  test("session absent from a NON-EMPTY reconciled directory -> read-only", () => {
+    const next = checkSessionStillTracked(
+      readyState,
+      [{ id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next.status).toBe("read-only");
+    expect(next.parts).toHaveLength(1); // parts preserved
+  });
+
+  test("session present in the directory -> unchanged", () => {
+    const next = checkSessionStillTracked(
+      readyState,
+      [{ id: "ses_deleted" }, { id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next).toBe(readyState);
+  });
+
+  test("EMPTY directory session list is inconclusive (not-yet-reconciled) -> unchanged, NOT read-only", () => {
+    const next = checkSessionStillTracked(readyState, [], "ses_fresh");
+    expect(next.status).toBe("ready");
+    expect(next).toBe(readyState);
+  });
+
+  test("no sessionID -> unchanged (no session selected yet)", () => {
+    const next = checkSessionStillTracked(
+      readyState,
+      [{ id: "ses_other" }],
+      undefined,
+    );
+    expect(next).toBe(readyState);
+  });
+
+  test("non-ready/empty states (loading/error) are left alone", () => {
+    const loading = initialTranscriptState();
+    const next = checkSessionStillTracked(
+      loading,
+      [{ id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next).toBe(loading);
+  });
+
+  test("already read-only stays read-only (idempotent, no crash on already-transitioned state)", () => {
+    const already = toReadOnly(readyState);
+    const next = checkSessionStillTracked(
+      already,
+      [{ id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next).toBe(already);
+  });
+});
+
+describe("partUpdateFromEventProperties (real message.part.updated wire shape)", () => {
+  // Wire shape (EventMessagePartUpdated):
+  // `properties: { part: { id, sessionID, messageID, type, text }, delta? }`
+  test("extracts partId/type/text/role from a real text part payload", () => {
+    const update = partUpdateFromEventProperties({
+      part: {
+        id: "prt_1",
+        sessionID: "ses_1",
+        messageID: "msg_1",
+        type: "text",
+        text: "hello",
+      },
+    });
+    expect(update).toEqual({
+      partId: "prt_1",
+      type: "text",
+      text: "hello",
+      delta: undefined,
+      role: "assistant",
+    });
+  });
+
+  test("carries the delta field alongside the part for streaming appends", () => {
+    const update = partUpdateFromEventProperties({
+      part: {
+        id: "prt_1",
+        sessionID: "ses_1",
+        messageID: "msg_1",
+        type: "text",
+        text: "hello",
+      },
+      delta: " there",
+    });
+    expect(update?.delta).toBe(" there");
+  });
+
+  test("missing part -> undefined (malformed event, no-op)", () => {
+    expect(partUpdateFromEventProperties({})).toBeUndefined();
+  });
+
+  test("part with no id -> undefined", () => {
+    expect(
+      partUpdateFromEventProperties({ part: { type: "text", text: "x" } }),
+    ).toBeUndefined();
+  });
+});
+
+describe("shouldAutoScroll (issue 4: auto-scroll on live updates)", () => {
+  test("already at the bottom (distance 0) -> auto-scroll", () => {
+    expect(shouldAutoScroll(0)).toBe(true);
+  });
+
+  test("within the default tolerance -> auto-scroll", () => {
+    expect(shouldAutoScroll(48)).toBe(true);
+    expect(shouldAutoScroll(30)).toBe(true);
+  });
+
+  test("scrolled well up past tolerance -> do NOT auto-scroll (preserves the user's read position)", () => {
+    expect(shouldAutoScroll(400)).toBe(false);
+  });
+
+  test("custom threshold is respected", () => {
+    expect(shouldAutoScroll(100, 150)).toBe(true);
+    expect(shouldAutoScroll(200, 150)).toBe(false);
   });
 });

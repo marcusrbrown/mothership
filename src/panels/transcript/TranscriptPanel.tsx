@@ -11,31 +11,42 @@ import type { IDockviewPanelProps } from "dockview-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpencodeClient } from "../../server/client";
 import type { Demux } from "../../server/demux";
+import type { SessionStore } from "../../server/session-store";
 import type { SseEvent } from "../../server/types";
 import {
   type PendingQuestionView,
   type TranscriptState,
   addPendingQuestion,
   applyPartUpdate,
-  fromBackfill,
+  checkSessionStillTracked,
   initialTranscriptState,
+  partUpdateFromEventProperties,
   removePendingQuestion,
+  resolveBackfill,
   setAnswerError,
   setAnswerSending,
+  shouldAutoScroll,
   toErrorState,
   toReadOnly,
 } from "./transcript-view";
 
+/** Issue 4: scroll-position tolerance in px — mirrors
+ * `shouldAutoScroll`'s default threshold so the DOM measurement and the
+ * pure decision agree on what counts as "already at the bottom". */
+const AUTO_SCROLL_THRESHOLD_PX = 48;
+
 export interface TranscriptPanelParams {
   client?: OpencodeClient;
   demux?: Demux;
+  /** Session store: lets this panel detect a session pruned out-of-band
+   * by the reconcile poller (e.g. deleted via the TUI) and flip read-only
+   * even without a `session.deleted` SSE event. Absent -> detection is
+   * skipped. */
+  store?: SessionStore;
   directory?: string;
   sessionID?: string;
-  /** Bumped by DockviewShell on every active-directory SSE (re)connect
-   * (bug 209's reconnect safety net) — added to the backfill effect's deps
-   * so a reconnect re-runs `listMessages`, recovering any message-part
-   * deltas missed during the stream teardown/reopen gap. The value itself
-   * carries no meaning beyond "changed". */
+  /** Bumped on every SSE (re)connect to re-run the backfill, recovering
+   * message-part deltas missed during the stream teardown/reopen gap. */
   reconnectNonce?: number;
 }
 
@@ -46,61 +57,49 @@ function str(value: unknown): string | undefined {
 export function TranscriptPanel(
   props: IDockviewPanelProps<TranscriptPanelParams>,
 ) {
-  const { client, demux, directory, sessionID, reconnectNonce } = props.params;
+  const { client, demux, store, directory, sessionID, reconnectNonce } =
+    props.params;
   const [state, setState] = useState<TranscriptState>(initialTranscriptState());
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // Incremented at the start of every backfill; `resolveBackfill` discards
+  // a resolved result whose generation is stale (superseded by a faster
+  // session switch).
+  const generationRef = useRef(0);
 
   const backfill = useCallback(async () => {
     if (!client || !directory || !sessionID) {
       setState(toErrorState("No session selected."));
       return;
     }
+    const generation = ++generationRef.current;
     setState(initialTranscriptState());
-    const result = await client.listMessages(directory, sessionID);
-    if (!result.ok) {
-      setState(toErrorState(result.error.message));
-      return;
-    }
-    setState(fromBackfill(result.value));
+    const nextState = await resolveBackfill(
+      () => client.listMessages(directory, sessionID),
+      generation,
+      (gen) => gen === generationRef.current,
+    );
+    if (nextState !== undefined) setState(nextState);
   }, [client, directory, sessionID]);
 
-  // reconnectNonce is intentionally in this effect's deps (not backfill's)
-  // — bug 209's reconnect safety net: every active-directory SSE
-  // (re)connect bumps it, re-running the listMessages backfill to recover
-  // any message-part deltas missed during the stream teardown/reopen gap,
-  // without needing a manual re-click.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reconnectNonce drives a deliberate re-run, not read in the body
   useEffect(() => {
     void backfill();
   }, [backfill, reconnectNonce]);
 
   useEffect(() => {
-    // `typeof demux.subscribe !== "function"` (not just `!demux`) is
-    // required to survive stale pre-fix localStorage: JSON.stringify
-    // reduced a persisted `Demux` instance to `{}`, which is truthy but has
-    // no methods. Without this guard a restored session crashes the whole
-    // window on `demux.subscribe is not a function` before the live
-    // re-injection (DockviewShell's reinjectLiveParams) can run.
+    // Guard against a stale persisted `Demux` (JSON.stringify reduces it to
+    // `{}`, which is truthy but has no methods) until live re-injection runs.
     if (!demux || typeof demux.subscribe !== "function" || !sessionID) return;
     const unsubscribe = demux.subscribe(sessionID, (event: SseEvent) => {
       const props = (event.properties ?? {}) as Record<string, unknown>;
 
       switch (event.type) {
         case "message.part.updated": {
-          const partId = str(props.partId) ?? str(props.id);
-          const type = str(props.type) ?? "text";
-          const role = str(props.role) ?? "assistant";
-          if (!partId) return;
-          setState((prev) =>
-            applyPartUpdate(prev, {
-              partId,
-              role,
-              type,
-              text: str(props.text),
-              delta: str(props.delta),
-            }),
-          );
+          const update = partUpdateFromEventProperties(props);
+          if (!update) return;
+          setState((prev) => applyPartUpdate(prev, update));
           return;
         }
 
@@ -133,10 +132,7 @@ export function TranscriptPanel(
         }
 
         case "session.status": {
-          // Confirms an unblock — clearing is already handled by
-          // question.replied; session.status is a secondary confirmation
-          // signal for the optimistic-lock state machine (no-op here since
-          // removePendingQuestion already ran on question.replied).
+          // Secondary confirmation signal; clearing already happens on question.replied.
           return;
         }
 
@@ -149,8 +145,44 @@ export function TranscriptPanel(
           return;
       }
     });
-    return unsubscribe;
+
+    // Defer unsubscribe to a microtask so the new session's subscribe
+    // (next effect body) runs before the old one is removed — no tick
+    // where switching sessions leaves neither listener registered.
+    return () => {
+      queueMicrotask(unsubscribe);
+    };
   }, [demux, sessionID]);
+
+  // React to the store pruning a session deleted out-of-band, even when no
+  // SSE event reaches this panel's own demux subscription.
+  useEffect(() => {
+    if (!store || typeof store.subscribe !== "function" || !directory) return;
+    const check = () => {
+      setState((prev) =>
+        checkSessionStillTracked(prev, store.getSessions(directory), sessionID),
+      );
+    };
+    check();
+    return store.subscribe(check);
+  }, [store, directory, sessionID]);
+
+  // Ref-based (not state): scroll position is DOM-owned, transient UI
+  // state that shouldn't trigger re-renders.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Cheap signature of rendered content, not `state` wholesale — avoids
+  // re-measuring on pendingQuestions-only changes.
+  const lastPart = state.parts[state.parts.length - 1];
+  const contentSignature = `${state.status}:${state.parts.length}:${lastPart?.text.length ?? 0}`;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: contentSignature deliberately drives a re-run (like reconnectNonce elsewhere in this file), not read in the body
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (shouldAutoScroll(distanceFromBottom, AUTO_SCROLL_THRESHOLD_PX)) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [contentSignature]);
 
   const submitAnswer = useCallback(
     async (question: PendingQuestionView, label: string) => {
@@ -165,9 +197,7 @@ export function TranscriptPanel(
         );
         return;
       }
-      // Optimistic lock clears on the confirming question.replied event
-      // (demux subscription above) — no direct mutation here, matching the
-      // "wait for the event" requirement.
+      // Optimistic lock clears on the confirming question.replied event above.
     },
     [client, directory],
   );
@@ -185,7 +215,7 @@ export function TranscriptPanel(
         overflow: "auto",
       }}
     >
-      {renderBody(state, submitAnswer)}
+      {renderBody(state, submitAnswer, scrollRef)}
     </div>
   );
 }
@@ -193,6 +223,7 @@ export function TranscriptPanel(
 function renderBody(
   state: TranscriptState,
   submitAnswer: (question: PendingQuestionView, label: string) => void,
+  scrollRef: React.RefObject<HTMLDivElement | null>,
 ) {
   if (state.status === "loading") {
     return <StatusMessage tone="muted">Loading transcript…</StatusMessage>;
@@ -224,6 +255,7 @@ function renderBody(
         </div>
       )}
       <div
+        ref={scrollRef}
         style={{
           flex: 1,
           overflow: "auto",

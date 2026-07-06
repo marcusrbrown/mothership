@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createDemux } from "../server/demux";
 import { createSessionStore } from "../server/session-store";
 import type { BusContext, SseEvent } from "../server/types";
-import { connectActiveDirectorySse } from "./DockviewShell";
+import { connectActiveDirectorySse, reconcileProject } from "./DockviewShell";
 
 /**
  * Regression coverage for the connection-cap hang (fixed after commit
@@ -262,5 +262,72 @@ describe("connectActiveDirectorySse", () => {
 
     handle.setActiveDirectory("/repo/a");
     expect(opened).toEqual(["/repo/a"]);
+  });
+});
+
+describe("reconcileProject", () => {
+  test("a transient listSessions failure keeps prior sessions for the directory (no wipe)", async () => {
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_1", directory: "/repo/a" },
+    });
+    expect(store.getSessions("/repo/a")).toHaveLength(1);
+
+    const failingClient = {
+      async listSessions() {
+        return { ok: false as const, error: new Error("network down") };
+      },
+      async getSessionStatus() {
+        return { ok: true as const, value: {} };
+      },
+      async listQuestions() {
+        return { ok: true as const, value: [] };
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: minimal test double
+    } as any;
+
+    await reconcileProject(failingClient, store, "/repo/a");
+
+    expect(store.getSessions("/repo/a").map((s) => s.id)).toEqual(["ses_1"]);
+  });
+
+  test("a later successful listSessions reconciles normally after a prior failure", async () => {
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_1", directory: "/repo/a" },
+    });
+
+    const failingClient = {
+      async listSessions() {
+        return { ok: false as const, error: new Error("network down") };
+      },
+      async getSessionStatus() {
+        return { ok: true as const, value: {} };
+      },
+      async listQuestions() {
+        return { ok: true as const, value: [] };
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: minimal test double
+    } as any;
+    await reconcileProject(failingClient, store, "/repo/a");
+    expect(store.getSessions("/repo/a")).toHaveLength(1);
+
+    const succeedingClient = {
+      async listSessions() {
+        return { ok: true as const, value: [{ id: "ses_2" }] };
+      },
+      async getSessionStatus() {
+        return { ok: true as const, value: {} };
+      },
+      async listQuestions() {
+        return { ok: true as const, value: [] };
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: minimal test double
+    } as any;
+    await reconcileProject(succeedingClient, store, "/repo/a");
+
+    expect(store.getSessions("/repo/a").map((s) => s.id)).toEqual(["ses_2"]);
   });
 });

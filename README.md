@@ -37,7 +37,7 @@ bun install
 bun run dev          # opens the Tauri window; spawns or adopts opencode serve
 ```
 
-The app opens the [space-bus fixture workspace](https://github.com/fro-bot/space-bus) by default (see the `TODO` in `src/app/` — workspace selection is a follow-up). Point it at your own workspace by editing that default to any directory containing a `spacebus.json`.
+The app opens the workspace named by `MOTHERSHIP_WORKSPACE`, or — when that variable is unset — the directory it was launched from. Point it at your own workspace by setting `MOTHERSHIP_WORKSPACE` to any directory containing a [`spacebus.json`](https://github.com/fro-bot/space-bus) roster. A dedicated workspace picker is a follow-up.
 
 Other scripts:
 

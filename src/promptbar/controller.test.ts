@@ -123,6 +123,33 @@ describe("submitPrompt controller", () => {
     expect(state.sending).toBe(false);
   });
 
+  test("bug A regression: a raw server NotFoundError body (deleted mid-session, async failure) clears the remembered sessionId and surfaces the error", async () => {
+    // Live-observed shape from the transcript SSE payload when a dispatch
+    // targets a session deleted out-of-band (e.g. in the TUI): the server's
+    // JSON error body embeds `"name":"NotFoundError"` — space-bus's thrown
+    // error string carries this verbatim. Previously only the
+    // "no manifest project has a session with id" / "session...not...found"
+    // wording matched, so this literal NotFoundError shape slipped through
+    // and the stale sessionId was retried forever with no banner.
+    const dispatch = async () => ({
+      ok: false as const,
+      error:
+        'space-bus: follow-up prompt to session ses_0ccf76c09ffe3k9GXL96trIzYR failed (404): {"name":"NotFoundError","data":{"message":"Session not found: ses_0ccf76c09ffe3k9GXL96trIzYR"}}',
+    });
+
+    const stateWithStaleSession = { sending: false, sessionId: "sess-stale" };
+    const state = await submitPrompt(
+      stateWithStaleSession,
+      context,
+      "What is this repo?",
+      { dispatch },
+    );
+
+    expect(state.error).toContain("NotFoundError");
+    expect(state.sessionId).toBeUndefined();
+    expect(state.sending).toBe(false);
+  });
+
   test("a non-session-not-found dispatch error preserves the remembered sessionId (still a follow-up target)", async () => {
     const dispatch = async () => ({
       ok: false as const,

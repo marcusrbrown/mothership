@@ -81,18 +81,56 @@ describe("loadWorkspace", () => {
     expect(result.message).toContain("not valid JSON");
   });
 
-  test("extra unknown fields (strict schema) -> error kind", async () => {
+  test("extra unknown top-level fields are stripped, not rejected", async () => {
     const manifest = {
       server: { baseUrl: "http://127.0.0.1:4096" },
       projects: [],
-      extra: "field",
+      futureField: { some: "thing" },
     };
     const result = await loadWorkspace("/workspace", {
       readTextFile: stubReader({
         "/workspace/spacebus.json": JSON.stringify(manifest),
       }),
     });
-    expect(result.kind).toBe("error");
+    expect(result.kind).toBe("workspace");
+    if (result.kind !== "workspace") throw new Error("expected workspace");
+    expect(result.config.server.baseUrl).toBe("http://127.0.0.1:4096");
+    expect(result.config).not.toHaveProperty("futureField");
+  });
+
+  test("unknown fields nested in server/managed are stripped, not rejected", async () => {
+    const manifest = {
+      server: {
+        baseUrl: "http://127.0.0.1:4096",
+        futureServerField: true,
+      },
+      projects: [],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("workspace");
+    if (result.kind !== "workspace") throw new Error("expected workspace");
+    expect(result.config.server).not.toHaveProperty("futureServerField");
+
+    const manifest2 = {
+      server: {
+        managed: { command: ["harness", "serve"], futureManagedField: 1 },
+      },
+      projects: [],
+    };
+    const result2 = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest2),
+      }),
+    });
+    expect(result2.kind).toBe("workspace");
+    if (result2.kind !== "workspace") throw new Error("expected workspace");
+    expect(result2.config.server.managed).not.toHaveProperty(
+      "futureManagedField",
+    );
   });
 
   test("non-localhost baseUrl -> refusal", async () => {

@@ -73,6 +73,30 @@ export function toErrorState(message: string): TranscriptState {
   return { status: "error", message, parts: [], pendingQuestions: [] };
 }
 
+export type BackfillResult =
+  | { ok: true; value: MessageList }
+  | { ok: false; error: { message: string } };
+
+export type BackfillFetcher = () => Promise<BackfillResult>;
+
+/**
+ * Runs one backfill attempt, only returning a state update if `generation`
+ * is still current by the time the fetch resolves (checked via
+ * `isCurrent`). Returns `undefined` when stale — callers must NOT call
+ * `setState` in that case (guards against a fast session switch where an
+ * older fetch resolves after a newer one).
+ */
+export async function resolveBackfill(
+  fetchMessages: BackfillFetcher,
+  generation: number,
+  isCurrent: (generation: number) => boolean,
+): Promise<TranscriptState | undefined> {
+  const result = await fetchMessages();
+  if (!isCurrent(generation)) return undefined;
+  if (!result.ok) return toErrorState(result.error.message);
+  return fromBackfill(result.value);
+}
+
 /**
  * Applies a `message.part.updated` event's payload. `delta` present ->
  * append to the existing part's text (or create it if new); `delta` absent
@@ -111,6 +135,39 @@ export function applyPartUpdate(
       : [...state.parts, nextPart];
 
   return { ...state, status: "ready", parts };
+}
+
+/**
+ * Extracts the fields `applyPartUpdate` needs from a `message.part.updated`
+ * event's `properties` payload. Wire shape (opencode server SDK's
+ * `EventMessagePartUpdated`): `{ part: { id, sessionID, messageID, type,
+ * text?, ... }, delta? }` — part fields nest under `properties.part`, not
+ * flat on `properties`.
+ *
+ * `Part` carries no `role` field (it lives on the parent `Message`) —
+ * defaults to `"assistant"` since that's what streams live.
+ */
+export function partUpdateFromEventProperties(
+  properties: Record<string, unknown>,
+):
+  | {
+      partId: string;
+      role: string;
+      type: string;
+      text?: string;
+      delta?: string;
+    }
+  | undefined {
+  const part = properties.part;
+  if (part === null || typeof part !== "object") return undefined;
+  const p = part as Record<string, unknown>;
+  const partId = typeof p.id === "string" ? p.id : undefined;
+  if (!partId) return undefined;
+  const type = typeof p.type === "string" ? p.type : "text";
+  const text = typeof p.text === "string" ? p.text : undefined;
+  const delta =
+    typeof properties.delta === "string" ? properties.delta : undefined;
+  return { partId, role: "assistant", type, text, delta };
 }
 
 /** Adds a pending question to the state (from `question.asked`, live or via
@@ -190,4 +247,41 @@ export function setAnswerError(
  * read-only historical view — parts remain visible, no further mutation. */
 export function toReadOnly(state: TranscriptState): TranscriptState {
   return { ...state, status: "read-only" };
+}
+
+/**
+ * Detects a session deleted out-of-band (via the reconcile poller pruning
+ * the store, not a live `session.deleted` SSE event for this session) and
+ * flips the panel read-only.
+ *
+ * `sessionsInDirectory` must be `store.getSessions(directory)` for the
+ * panel's OWN directory. An EMPTY list means "not yet reconciled", not
+ * "all sessions deleted" — treated as inconclusive so a freshly-dispatched
+ * session isn't flipped read-only before the store catches up.
+ * Already-read-only or non-ready/non-empty states are left alone.
+ */
+export function checkSessionStillTracked(
+  state: TranscriptState,
+  sessionsInDirectory: { id: string }[],
+  sessionID: string | undefined,
+): TranscriptState {
+  if (!sessionID) return state;
+  if (state.status !== "ready" && state.status !== "empty") return state;
+  if (sessionsInDirectory.length === 0) return state; // inconclusive — not yet reconciled
+  const stillExists = sessionsInDirectory.some((s) => s.id === sessionID);
+  if (stillExists) return state;
+  return toReadOnly(state);
+}
+
+/**
+ * "Stick to bottom" decision: auto-scroll only when the user was already at
+ * (or near) the bottom before the append, so scrolled-up history reads
+ * aren't yanked. `thresholdPx` tolerates rounding gaps in browser scroll
+ * math.
+ */
+export function shouldAutoScroll(
+  distanceFromBottomPx: number,
+  thresholdPx = 48,
+): boolean {
+  return distanceFromBottomPx <= thresholdPx;
 }

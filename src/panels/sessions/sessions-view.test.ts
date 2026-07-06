@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { StoredSession } from "../../server/session-store";
-import { toSessionRows, toSessionsViewState } from "./sessions-view";
+import {
+  isSubagentSession,
+  toSessionRows,
+  toSessionsViewState,
+} from "./sessions-view";
 
 function session(overrides: Partial<StoredSession> = {}): StoredSession {
   return { id: "s1", status: "idle", ...overrides };
@@ -61,6 +65,87 @@ describe("toSessionRows", () => {
 
   test("no sessions -> empty rows", () => {
     expect(toSessionRows([], new Set())).toEqual([]);
+  });
+});
+
+describe("isSubagentSession", () => {
+  test("parentID present -> true regardless of title", () => {
+    expect(
+      isSubagentSession({ parentID: "parent-1", title: "Top level" }),
+    ).toBe(true);
+  });
+
+  test("parentID present and no title -> true", () => {
+    expect(isSubagentSession({ parentID: "parent-1" })).toBe(true);
+  });
+
+  test("no parentID, suffix match -> true (fallback)", () => {
+    expect(
+      isSubagentSession({ title: "Fix the tests (@fixer subagent)" }),
+    ).toBe(true);
+  });
+
+  test("no parentID, email-like text -> false", () => {
+    expect(isSubagentSession({ title: "email@example.com session" })).toBe(
+      false,
+    );
+  });
+
+  test("no parentID, mentions 'subagents' mid-string -> false", () => {
+    expect(isSubagentSession({ title: "discussing subagents" })).toBe(false);
+  });
+
+  test("no parentID, pattern present but not at suffix -> false", () => {
+    expect(isSubagentSession({ title: "(@a subagent) extra" })).toBe(false);
+  });
+
+  test("no parentID, no title -> false", () => {
+    expect(isSubagentSession({})).toBe(false);
+  });
+});
+
+describe("toSessionRows includeSubagents", () => {
+  test("default (false) filters out subagent sessions, preserving order", () => {
+    const rows = toSessionRows(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "Fix (@fixer subagent)" }),
+        session({ id: "s3", title: "Another top level" }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1", "s3"]);
+  });
+
+  test("includeSubagents: true keeps all sessions", () => {
+    const rows = toSessionRows(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "Fix (@fixer subagent)" }),
+      ],
+      new Set(),
+      { includeSubagents: true },
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1", "s2"]);
+  });
+
+  test("default (false) filters out sessions with parentID regardless of title", () => {
+    const rows = toSessionRows(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "No subagent marker", parentID: "s1" }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1"]);
+  });
+
+  test("needsAttention on a hidden subagent session does not leak once filtered", () => {
+    const rows = toSessionRows(
+      [session({ id: "s2", title: "Fix (@fixer subagent)" })],
+      new Set(["s2"]),
+    );
+    expect(rows).toEqual([]);
   });
 });
 

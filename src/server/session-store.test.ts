@@ -20,6 +20,14 @@ describe("createSessionStore applyEvent", () => {
     });
   });
 
+  test("session.created with parentID populates parentID (subagent detection signal)", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", { id: "ses_child", parentID: "ses_parent" }),
+    );
+    expect(store.getSession("ses_child")?.parentID).toBe("ses_parent");
+  });
+
   test("session.status mutates busy state", () => {
     const store = createSessionStore();
     store.applyEvent(evt("session.created", { id: "ses_1" }));
@@ -177,6 +185,24 @@ describe("createSessionStore reconcile", () => {
     expect(store.getSession("ses_1")?.updatedAt).toBe(1500);
   });
 
+  test("reconcile with sessions carrying parentID populates parentID (subagent detection signal)", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: "/proj",
+      sessions: [{ id: "ses_child", parentID: "ses_parent" }],
+    });
+    expect(store.getSession("ses_child")?.parentID).toBe("ses_parent");
+  });
+
+  test("reconcile session missing parentID -> parentID stays undefined", () => {
+    const store = createSessionStore();
+    store.reconcile({
+      directory: "/proj",
+      sessions: [{ id: "ses_1" }],
+    });
+    expect(store.getSession("ses_1")?.parentID).toBeUndefined();
+  });
+
   test("reconcile session missing time -> updatedAt stays undefined", () => {
     const store = createSessionStore();
     store.reconcile({
@@ -209,5 +235,118 @@ describe("createSessionStore reconcile", () => {
     const pending = store.getPendingQuestions("ses_1");
     expect(pending).toHaveLength(1);
     expect(pending[0]?.requestID).toBe("que_fresh");
+  });
+});
+
+describe("createSessionStore — real wire shape (session nested under properties.info)", () => {
+  // Wire shape: `properties: { info: Session }`, where `Session` carries
+  // `id`, `directory`, `title`, `parentID`, `time`.
+  test("session.created with a nested `info` payload adds the session", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", {
+        info: { id: "ses_1", directory: "/proj", title: "t" },
+      }),
+    );
+    expect(store.getSession("ses_1")).toEqual({
+      id: "ses_1",
+      directory: "/proj",
+      title: "t",
+      status: "unknown",
+    });
+  });
+
+  test("session.updated with a nested `info` payload updates the session", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", { info: { id: "ses_1", title: "old" } }),
+    );
+    store.applyEvent(
+      evt("session.updated", { info: { id: "ses_1", title: "new" } }),
+    );
+    expect(store.getSession("ses_1")?.title).toBe("new");
+  });
+
+  test("session.created nested info carries parentID (subagent detection signal)", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", {
+        info: { id: "ses_child", parentID: "ses_parent" },
+      }),
+    );
+    expect(store.getSession("ses_child")?.parentID).toBe("ses_parent");
+  });
+
+  test("session.created nested info carries time.updated/created for updatedAt", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.created", {
+        info: { id: "ses_1", time: { created: 1000, updated: 2000 } },
+      }),
+    );
+    expect(store.getSession("ses_1")?.updatedAt).toBe(2000);
+  });
+
+  test("session.deleted with a nested `info` payload removes the session", () => {
+    const store = createSessionStore();
+    store.applyEvent(evt("session.created", { info: { id: "ses_1" } }));
+    store.applyEvent(evt("session.deleted", { info: { id: "ses_1" } }));
+    expect(store.getSession("ses_1")).toBeUndefined();
+  });
+
+  test("session.status with a nested `status.type` payload (real wire shape) mutates busy state", () => {
+    const store = createSessionStore();
+    store.applyEvent(evt("session.created", { info: { id: "ses_1" } }));
+    store.applyEvent(
+      evt("session.status", {
+        sessionID: "ses_1",
+        status: { type: "busy" },
+      }),
+    );
+    expect(store.getSession("ses_1")?.status).toBe("busy");
+  });
+});
+
+describe("createSessionStore — zombie guard for status-only events", () => {
+  test("session.status for an unknown session id is a no-op", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_ghost", type: "busy" }),
+    );
+    expect(store.getSession("ses_ghost")).toBeUndefined();
+  });
+
+  test("session.idle for an unknown session id is a no-op", () => {
+    const store = createSessionStore();
+    store.applyEvent(evt("session.idle", { sessionID: "ses_ghost" }));
+    expect(store.getSession("ses_ghost")).toBeUndefined();
+  });
+
+  test("session.status applies once the session exists via reconcile", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_1", type: "busy" }),
+    );
+    expect(store.getSession("ses_1")).toBeUndefined();
+
+    store.reconcile({ directory: "/proj", sessions: [{ id: "ses_1" }] });
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_1", type: "busy" }),
+    );
+    expect(store.getSession("ses_1")?.status).toBe("busy");
+  });
+
+  test("session.idle/status for a just-deleted session does not resurrect it", () => {
+    const store = createSessionStore();
+    store.applyEvent(evt("session.created", { id: "ses_1" }));
+    store.applyEvent(evt("session.deleted", { id: "ses_1" }));
+
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_1", type: "busy" }),
+    );
+    expect(store.getSession("ses_1")).toBeUndefined();
+
+    store.applyEvent(evt("session.idle", { sessionID: "ses_1" }));
+    expect(store.getSession("ses_1")).toBeUndefined();
   });
 });

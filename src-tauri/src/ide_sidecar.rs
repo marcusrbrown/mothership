@@ -1,32 +1,15 @@
-//! `ide_*` MCP sidecar supervision. Mirrors
-//! `server_supervisor.rs`'s spawn/monitor/restart pattern for a second
-//! supervised child: the Bun `sidecar/ide-server` process that hosts both
-//! the MCP streamable-HTTP server and the WS bridge the webview dials.
+//! `ide_*` MCP sidecar supervision. Mirrors `server_supervisor.rs`'s
+//! spawn/monitor/restart pattern for the Bun `sidecar/ide-server` process
+//! (MCP streamable-HTTP server + WS bridge the webview dials).
 //!
-//! Token/rendezvous contract: a fresh random 32-byte hex bearer token is
-//! generated per launch and passed to the child via the `MOTHERSHIP_IDE_TOKEN`
-//! env var (NEVER argv — argv is visible to every local user via `ps`). The
-//! child prints `IDE_PORT=<n>` as its first stdout line once its
-//! OS-assigned port is bound; we parse that line, then write `{port, token}`
-//! as JSON to a 0600 rendezvous file under the Tauri app-data dir. This file
-//! is the env-readable location an external MCP client config (opencode)
-//! points at to connect directly, e.g.:
+//! A fresh random bearer token is generated per launch and passed to the
+//! child via the `MOTHERSHIP_IDE_TOKEN` env var (never argv — argv is
+//! visible to every local user via `ps`). The child prints `IDE_PORT=<n>`
+//! on stdout once bound; we parse it and write `{port, token}` to a 0600
+//! rendezvous file under the Tauri app-data dir, which an external MCP
+//! client config (opencode) can read to connect directly.
 //!
-//! ```jsonc
-//! // opencode MCP config (see docs note in shutdown() below for the full
-//! // snippet) — command/env pulled from the rendezvous file:
-//! {
-//!   "mcpServers": {
-//!     "mothership-ide": {
-//!       "type": "remote",
-//!       "url": "http://127.0.0.1:<port>/mcp",
-//!       "headers": { "Authorization": "Bearer <token>" }
-//!     }
-//!   }
-//! }
-//! ```
-//!
-//! `ide_bridge_info()` exposes the same {port, token} pair to the webview
+//! `ide_bridge_info()` exposes the same `{port, token}` pair to the webview
 //! over Tauri IPC so the in-process bridge client can dial `/ws` without
 //! reading the rendezvous file itself.
 
@@ -39,7 +22,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
-use crate::supervisor_common::{should_restart, window_expired};
+use crate::supervisor_common::{resolve_spawn_race, should_restart, window_expired, RaceWinner};
 
 const SPAWN_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_POLL: Duration = Duration::from_millis(500);
@@ -47,10 +30,8 @@ const MAX_RESTARTS: u32 = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const RENDEZVOUS_FILE: &str = "ide-bridge.json";
 
+/// 64 hex chars from two concatenated v4 UUIDs — no extra RNG dependency.
 fn generate_token() -> String {
-    // 32 random bytes, hex-encoded — no external RNG crate needed beyond
-    // `uuid` (already a dependency): four v4 UUIDs concatenated give 64
-    // hex-nibble-equivalent bytes of randomness, well past the 32-byte bar.
     let mut token = String::with_capacity(64);
     for _ in 0..2 {
         token.push_str(&uuid::Uuid::new_v4().simple().to_string());
@@ -99,14 +80,13 @@ fn rendezvous_path(app_data_dir: &std::path::Path) -> std::path::PathBuf {
     app_data_dir.join(RENDEZVOUS_FILE)
 }
 
-/// Writes `{port, token}` to the rendezvous file such that the file is
-/// never observably world/group-readable, even for an instant: on Unix we
-/// write to a sibling temp file created with mode 0600 from the start
-/// (`OpenOptions::mode`, not a post-hoc `set_permissions` after a plain
-/// `fs::write`), then atomically rename it over the target. The parent
-/// app-data dir is also tightened to 0700 (best-effort — a failure here
-/// isn't fatal, since the file itself is still 0600).
-fn write_rendezvous_file(app_data_dir: &std::path::Path, info: &IdeBridgeInfo) -> std::io::Result<()> {
+/// Writes `{port, token}` to the rendezvous file, never observably
+/// world/group-readable: created at mode 0600 via a sibling temp file, then
+/// atomically renamed over the target (Unix only).
+fn write_rendezvous_file(
+    app_data_dir: &std::path::Path,
+    info: &IdeBridgeInfo,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(app_data_dir)?;
 
     #[cfg(unix)]
@@ -144,19 +124,15 @@ fn write_rendezvous_file(app_data_dir: &std::path::Path, info: &IdeBridgeInfo) -
     }
 }
 
-/// Resolves the default sidecar dir to an ABSOLUTE path anchored on
-/// `CARGO_MANIFEST_DIR` (which is `<repo>/src-tauri` at build time), so the
-/// child process's CWD (which under `tauri dev` is `src-tauri/`) never
-/// matters. Canonicalizes to normalize the `..` component; if the path
-/// doesn't exist yet, falls back to the raw joined path so any resulting
-/// error message still names a concrete absolute path.
-///
-/// This anchor is correct for `bun run dev` (dev only).
+/// Resolves the default sidecar dir as an absolute path anchored on
+/// `CARGO_MANIFEST_DIR`, independent of the child process's CWD. Dev only.
 // TODO(packaging): a production-bundled app must ship the sidecar as a
-// Tauri resource and resolve it via `app.path().resource_dir()` instead of
-// this dev-only CARGO_MANIFEST_DIR anchor.
+// Tauri resource and resolve it via `app.path().resource_dir()` instead.
 fn default_sidecar_dir() -> String {
-    let joined = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../sidecar/ide-server"));
+    let joined = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sidecar/ide-server"
+    ));
     match std::fs::canonicalize(&joined) {
         Ok(canon) => canon.to_string_lossy().into_owned(),
         Err(_) => joined.to_string_lossy().into_owned(),
@@ -174,16 +150,10 @@ fn truncate_tail(bytes: &[u8], max: usize) -> String {
     s
 }
 
-/// Spawns `bun run <sidecar_dir>/index.ts` with the token in env (never
-/// argv), reads the `IDE_PORT=<n>` line from its stdout, and returns the
-/// running child plus the parsed port. Blocks (with a bounded timeout) on
-/// the child's stdout only for that one line. Captures stderr so a spawn
-/// or port-timeout failure can surface a diagnosable tail instead of
-/// failing silently.
-fn spawn_and_await_port(
-    sidecar_dir: &str,
-    token: &str,
-) -> std::io::Result<(Child, u16)> {
+/// Spawns `bun run <sidecar_dir>/index.ts` with the token in env, reads the
+/// `IDE_PORT=<n>` line from stdout, and returns the child plus parsed port.
+/// Captures stderr so a spawn/timeout failure has a diagnosable tail.
+fn spawn_and_await_port(sidecar_dir: &str, token: &str) -> std::io::Result<(Child, u16)> {
     let entry = format!("{sidecar_dir}/index.ts");
     if !std::path::Path::new(&entry).exists() {
         return Err(std::io::Error::other(format!(
@@ -271,13 +241,15 @@ fn spawn_and_await_port(
     }
 }
 
-/// Probes `/health` with the bearer token (the endpoint requires auth like
-/// every other pre-auth surface — see `sidecar/ide-server/index.ts`).
+/// Probes `/health` with the bearer token (auth required, per
+/// `sidecar/ide-server/index.ts`).
 fn probe_health(port: u16, token: &str) -> bool {
     use std::net::TcpStream;
     let addr = format!("127.0.0.1:{port}");
     let Ok(mut stream) = TcpStream::connect_timeout(
-        &addr.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+        &addr
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
         Duration::from_millis(300),
     ) else {
         return false;
@@ -294,6 +266,13 @@ fn probe_health(port: u16, token: &str) -> bool {
     matches!(stream.read(&mut buf), Ok(n) if n > 0 && buf.starts_with(b"HTTP/1.1 200"))
 }
 
+/// Like `resolve_spawn_race`, but also checks the existing child's liveness:
+/// a published/owned info whose child already died is stale and must not
+/// win the race.
+fn ide_race_winner(info_present: bool, owned: bool, existing_alive: bool) -> RaceWinner {
+    resolve_spawn_race(info_present && owned && existing_alive)
+}
+
 /// Starts (or reuses) the ide sidecar and returns `{port, token}` for the
 /// webview bridge. `sidecar_dir` is the absolute path to
 /// `<repo>/sidecar/ide-server`.
@@ -304,9 +283,20 @@ pub fn ide_bridge_info(
     sidecar_dir: Option<String>,
 ) -> Result<IdeBridgeInfo, String> {
     {
-        let inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(info) = &inner.info {
-            return Ok(info.clone());
+        let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.info.is_some() {
+            // Confirm liveness: the health monitor reaps dead children
+            // asynchronously, so `info` may still be stale here.
+            let alive = matches!(inner.child.as_mut().map(|c| c.try_wait()), Some(Ok(None)));
+            if alive {
+                return Ok(inner.info.clone().expect("info present"));
+            }
+            if let Some(mut child) = inner.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            inner.info = None;
+            inner.owned = false;
         }
     }
 
@@ -316,13 +306,40 @@ pub fn ide_bridge_info(
     };
     let token = generate_token();
     let (child, port) = spawn_and_await_port(&dir, &token).map_err(|e| e.to_string())?;
-    let info = IdeBridgeInfo { port, token: token.clone() };
+    let info = IdeBridgeInfo {
+        port,
+        token: token.clone(),
+    };
 
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    write_rendezvous_file(&app_data_dir, &info).map_err(|e| e.to_string())?;
 
+    let mut child = child;
     {
+        // Re-validate after reacquiring the lock: a concurrent
+        // `ide_bridge_info` call may have won this race while we were
+        // unlocked spawning; kill our loser instead of orphaning it.
         let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+        let existing_alive = matches!(inner.child.as_mut().map(|c| c.try_wait()), Some(Ok(None)));
+        let race_winner = ide_race_winner(inner.info.is_some(), inner.owned, existing_alive);
+        if race_winner == RaceWinner::Existing {
+            let existing = inner.info.clone();
+            drop(inner);
+            let _ = child.kill();
+            let _ = child.wait();
+            return existing
+                .ok_or_else(|| "ide sidecar race lost but no existing info".to_string());
+        }
+        if inner.info.is_some() && inner.owned && !existing_alive {
+            // Winner's child died before we reacquired the lock: reap the
+            // stale state so our fresh child installs cleanly below.
+            if let Some(mut stale_child) = inner.child.take() {
+                let _ = stale_child.kill();
+                let _ = stale_child.wait();
+            }
+            inner.info = None;
+            inner.owned = false;
+        }
+        write_rendezvous_file(&app_data_dir, &info).map_err(|e| e.to_string())?;
         inner.child = Some(child);
         inner.token = token;
         inner.info = Some(info.clone());
@@ -359,8 +376,7 @@ fn spawn_health_monitor(app: AppHandle) {
             (port, token, exited)
         };
 
-        let unhealthy =
-            exited || !port.map(|p| probe_health(p, &token)).unwrap_or(false);
+        let unhealthy = exited || !port.map(|p| probe_health(p, &token)).unwrap_or(false);
         if !unhealthy {
             continue;
         }
@@ -404,7 +420,10 @@ fn spawn_health_monitor(app: AppHandle) {
                     let _ = child.wait();
                     return;
                 }
-                let info = IdeBridgeInfo { port: new_port, token: token.clone() };
+                let info = IdeBridgeInfo {
+                    port: new_port,
+                    token: token.clone(),
+                };
                 if let Some(app_data_dir) = &inner.app_data_dir {
                     let _ = write_rendezvous_file(app_data_dir, &info);
                 }
@@ -440,8 +459,21 @@ pub fn shutdown(state: &IdeSidecar) {
 mod tests {
     use super::*;
 
-    // Restart-cap policy unit tests (`should_restart`/`window_expired`) live
-    // in `supervisor_common.rs`, the module these fns are imported from.
+    #[test]
+    fn ide_race_winner_rejects_stale_info_when_existing_child_died() {
+        assert_eq!(ide_race_winner(true, true, false), RaceWinner::New);
+    }
+
+    #[test]
+    fn ide_race_winner_accepts_existing_when_still_alive() {
+        assert_eq!(ide_race_winner(true, true, true), RaceWinner::Existing);
+    }
+
+    #[test]
+    fn ide_race_winner_new_when_not_owned_or_no_info() {
+        assert_eq!(ide_race_winner(false, true, true), RaceWinner::New);
+        assert_eq!(ide_race_winner(true, false, true), RaceWinner::New);
+    }
 
     #[test]
     fn generate_token_is_64_hex_chars_and_varies() {

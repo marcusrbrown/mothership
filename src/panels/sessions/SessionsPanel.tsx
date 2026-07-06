@@ -31,6 +31,9 @@ export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
   const [state, setState] = useState<SessionsViewState>({
     status: "loading",
   });
+  // Panel-local, intentionally not persisted: R8 wants subagent noise
+  // hidden by default every time the panel mounts.
+  const [includeSubagents, setIncludeSubagents] = useState(false);
 
   const refresh = useCallback(() => {
     // `typeof store.getSessions !== "function"` guards against a
@@ -47,8 +50,13 @@ export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
     const pendingSessionIds = new Set(
       store.getPendingQuestions().map((q) => q.sessionID),
     );
-    setState(toSessionsViewState({ ok: true, sessions, pendingSessionIds }));
-  }, [store, directory]);
+    setState(
+      toSessionsViewState(
+        { ok: true, sessions, pendingSessionIds },
+        { includeSubagents },
+      ),
+    );
+  }, [store, directory, includeSubagents]);
 
   useEffect(() => {
     refresh();
@@ -69,6 +77,24 @@ export function SessionsPanel(props: IDockviewPanelProps<SessionsPanelParams>) {
         overflow: "auto",
       }}
     >
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--space-2)",
+          padding: "var(--space-2)",
+          fontSize: "var(--text-sm)",
+          color: "var(--color-text-muted)",
+          cursor: "pointer",
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={includeSubagents}
+          onChange={(e) => setIncludeSubagents(e.target.checked)}
+        />
+        Include subagents
+      </label>
       {renderBody(state, onSelectSession, activeSessionId)}
     </div>
   );

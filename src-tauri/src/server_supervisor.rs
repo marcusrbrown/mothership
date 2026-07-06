@@ -1,14 +1,8 @@
-//! Minimal `opencode serve` supervision — the app owns the server
-//! lifecycle instead of deferring it. Adopt-don't-spawn: if a server already
+//! `opencode serve` supervision. Adopt-don't-spawn: if a server already
 //! answers on `127.0.0.1:4096`, we never spawn a second one and never kill
-//! it on quit. Otherwise we spawn `opencode serve` as a supervised child,
-//! restart it on unexpected exit with a capped-retry window, and kill only
-//! the owned child on app exit.
-//!
-//! No HTTP client dependency: the probe is a raw one-shot GET over
-//! `std::net::TcpStream` against `/doc` (cheap, always present per
-//! docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md).
-//! Spawning uses `std::process::Command` — no `tauri-plugin-shell` needed.
+//! it on quit. Otherwise we spawn a supervised child, restart it on
+//! unexpected exit with a capped-retry window, and kill only the owned
+//! child on app exit.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -20,7 +14,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::supervisor_common::{should_restart, window_expired};
+use crate::supervisor_common::{
+    resolve_spawn_race, should_respawn, should_restart, window_expired, RaceWinner,
+};
 
 const SERVER_HOST: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 4096;
@@ -68,6 +64,7 @@ struct Inner {
     window_start: Instant,
     workspace_dir: Option<String>,
     state: ServerState,
+    shutting_down: bool,
 }
 
 impl Default for Inner {
@@ -83,6 +80,7 @@ impl Default for Inner {
                 adopted: false,
                 reason: None,
             },
+            shutting_down: false,
         }
     }
 }
@@ -99,8 +97,6 @@ fn probe_once(timeout: Duration) -> bool {
     let mut stream = match stream {
         Ok(s) => s,
         Err(_) => {
-            // Re-resolve isn't needed (literal IP), kept for clippy's benefit
-            // that `resolved` is used above.
             let _ = &mut resolved;
             return false;
         }
@@ -143,6 +139,13 @@ fn spawn_child(dir: Option<&str>) -> std::io::Result<Child> {
 
 fn emit_state(app: &AppHandle, state: &ServerState) {
     let _ = app.emit("server://state", state.clone());
+}
+
+/// Pure decision for the post-spawn re-acquire in `ensure_server`: if
+/// shutdown started while we were unlocked spawning/probing, the freshly
+/// spawned child must be killed and never installed/emitted as running.
+fn shutdown_started_during_spawn(shutting_down: bool, mode: Mode) -> bool {
+    shutting_down || mode == Mode::ShuttingDown
 }
 
 /// Probes for an existing server; adopts it if present, otherwise spawns and
@@ -194,7 +197,24 @@ pub fn ensure_server(
     match spawn_child(dir.as_deref()) {
         Ok(child) => {
             if wait_for_probe(SPAWN_PROBE_TIMEOUT) {
+                let mut child = child;
                 let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+                // Re-validate after reacquiring the lock: a concurrent
+                // `ensure_server` may have won this race while we were
+                // unlocked; kill our loser instead of orphaning it.
+                let race_winner =
+                    resolve_spawn_race(inner.child.is_some() && inner.mode == Mode::Owned);
+                if race_winner == RaceWinner::Existing
+                    || shutdown_started_during_spawn(inner.shutting_down, inner.mode)
+                {
+                    drop(inner);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+                    let out = inner.state.clone();
+                    drop(inner);
+                    return out;
+                }
                 inner.mode = Mode::Owned;
                 inner.child = Some(child);
                 inner.restart_count = 0;
@@ -263,7 +283,7 @@ fn spawn_monitor(app: AppHandle) {
         let state = app.state::<ServerSupervisor>();
         let exited = {
             let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
-            if inner.mode != Mode::Owned {
+            if inner.shutting_down || inner.mode != Mode::Owned {
                 return;
             }
             match inner.child.as_mut() {
@@ -277,13 +297,19 @@ fn spawn_monitor(app: AppHandle) {
 
         let (restart_allowed, dir) = {
             let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+            if inner.shutting_down {
+                return;
+            }
             inner.child = None;
             let now = Instant::now();
             if window_expired(inner.window_start, now, RESTART_WINDOW) {
                 inner.restart_count = 0;
                 inner.window_start = now;
             }
-            let allowed = should_restart(inner.restart_count, MAX_RESTARTS);
+            let allowed = should_respawn(
+                inner.shutting_down,
+                should_restart(inner.restart_count, MAX_RESTARTS),
+            );
             if allowed {
                 inner.restart_count += 1;
                 inner.state = ServerState {
@@ -296,7 +322,9 @@ fn spawn_monitor(app: AppHandle) {
                 inner.state = ServerState {
                     status: ServerStatus::Failed,
                     adopted: false,
-                    reason: Some("opencode serve exited repeatedly; restart cap exceeded".to_string()),
+                    reason: Some(
+                        "opencode serve exited repeatedly; restart cap exceeded".to_string(),
+                    ),
                 };
             }
             let out = inner.state.clone();
@@ -313,9 +341,8 @@ fn spawn_monitor(app: AppHandle) {
         match spawn_child(dir.as_deref()) {
             Ok(child) if wait_for_probe(SPAWN_PROBE_TIMEOUT) => {
                 let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
-                if inner.mode != Mode::Owned {
-                    // Shut down or otherwise superseded while we were
-                    // restarting — don't resurrect state, just reap.
+                if inner.shutting_down || inner.mode != Mode::Owned {
+                    // Superseded while restarting — reap, don't resurrect state.
                     let mut child = child;
                     let _ = child.kill();
                     let _ = child.wait();
@@ -368,6 +395,7 @@ fn spawn_monitor(app: AppHandle) {
 /// alongside `pty::kill_all`.
 pub fn shutdown(state: &ServerSupervisor) {
     let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+    inner.shutting_down = true;
     inner.mode = Mode::ShuttingDown;
     if let Some(mut child) = inner.child.take() {
         let _ = child.kill();
@@ -375,5 +403,22 @@ pub fn shutdown(state: &ServerSupervisor) {
     }
 }
 
-// Restart-cap policy unit tests (`should_restart`/`window_expired`) live in
-// `supervisor_common.rs`, the module these fns are imported from.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_started_during_spawn_detects_flag() {
+        assert!(shutdown_started_during_spawn(true, Mode::Owned));
+    }
+
+    #[test]
+    fn shutdown_started_during_spawn_detects_mode() {
+        assert!(shutdown_started_during_spawn(false, Mode::ShuttingDown));
+    }
+
+    #[test]
+    fn shutdown_started_during_spawn_false_when_not_shutting_down() {
+        assert!(!shutdown_started_during_spawn(false, Mode::Owned));
+    }
+}
