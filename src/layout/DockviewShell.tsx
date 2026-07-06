@@ -66,9 +66,14 @@ export async function reconcileProject(
     client.getSessionStatus(directory),
     client.listQuestions(directory),
   ]);
+  // A failed listSessions is NOT authoritative — reconcile with an empty
+  // array would wipe every session previously known for this directory.
+  // Skip the reconcile entirely and let the next tick (poller or SSE
+  // reconnect) recover once listSessions succeeds again.
+  if (!sessionsRes.ok) return;
   store.reconcile({
     directory,
-    sessions: sessionsRes.ok ? sessionsRes.value : [],
+    sessions: sessionsRes.value,
     statuses: statusRes.ok ? statusRes.value : undefined,
     questions: questionsRes.ok ? questionsRes.value : undefined,
   });

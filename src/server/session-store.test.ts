@@ -211,3 +211,47 @@ describe("createSessionStore reconcile", () => {
     expect(pending[0]?.requestID).toBe("que_fresh");
   });
 });
+
+describe("createSessionStore — zombie guard for status-only events", () => {
+  test("session.status for an unknown session id is a no-op", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_ghost", type: "busy" }),
+    );
+    expect(store.getSession("ses_ghost")).toBeUndefined();
+  });
+
+  test("session.idle for an unknown session id is a no-op", () => {
+    const store = createSessionStore();
+    store.applyEvent(evt("session.idle", { sessionID: "ses_ghost" }));
+    expect(store.getSession("ses_ghost")).toBeUndefined();
+  });
+
+  test("session.status applies once the session exists via reconcile", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_1", type: "busy" }),
+    );
+    expect(store.getSession("ses_1")).toBeUndefined();
+
+    store.reconcile({ directory: "/proj", sessions: [{ id: "ses_1" }] });
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_1", type: "busy" }),
+    );
+    expect(store.getSession("ses_1")?.status).toBe("busy");
+  });
+
+  test("session.idle/status for a just-deleted session does not resurrect it", () => {
+    const store = createSessionStore();
+    store.applyEvent(evt("session.created", { id: "ses_1" }));
+    store.applyEvent(evt("session.deleted", { id: "ses_1" }));
+
+    store.applyEvent(
+      evt("session.status", { sessionID: "ses_1", type: "busy" }),
+    );
+    expect(store.getSession("ses_1")).toBeUndefined();
+
+    store.applyEvent(evt("session.idle", { sessionID: "ses_1" }));
+    expect(store.getSession("ses_1")).toBeUndefined();
+  });
+});

@@ -213,6 +213,11 @@ export function createSessionStore(): SessionStore {
         case "session.status": {
           const sessionID = str(props.sessionID) ?? str(props.id);
           if (!sessionID) return;
+          // Status events are updates, not creations — an unknown session
+          // id must no-op rather than upsert a directory-less zombie.
+          // reconcile()/session.created/session.updated are the only
+          // creation paths.
+          if (!sessions.has(sessionID)) return;
           const time = timeFieldsOf(props);
           upsertSession({
             id: sessionID,
@@ -226,6 +231,7 @@ export function createSessionStore(): SessionStore {
         case "session.idle": {
           const sessionID = str(props.sessionID) ?? str(props.id);
           if (!sessionID) return;
+          if (!sessions.has(sessionID)) return;
           const time = timeFieldsOf(props);
           upsertSession({
             id: sessionID,
