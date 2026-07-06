@@ -40,8 +40,17 @@ export interface Demux {
 function extractSessionID(event: SseEvent): string | undefined {
   const props = event.properties;
   if (props === null || typeof props !== "object") return undefined;
-  const sessionID = (props as Record<string, unknown>).sessionID;
-  return typeof sessionID === "string" ? sessionID : undefined;
+  const record = props as Record<string, unknown>;
+  const flat = record.sessionID;
+  if (typeof flat === "string") return flat;
+  // `message.part.updated` nests sessionID under `properties.part.sessionID`
+  // (EventMessagePartUpdated), not at the top level like other events.
+  const part = record.part;
+  if (part !== null && typeof part === "object") {
+    const nested = (part as Record<string, unknown>).sessionID;
+    if (typeof nested === "string") return nested;
+  }
+  return undefined;
 }
 
 export function createDemux(): Demux {
@@ -74,9 +83,7 @@ export function createDemux(): Demux {
       }
 
       if (!LIFECYCLE_EVENT_TYPES.has(event.type)) {
-        // Open-union posture: unknown type strings are logged, never
-        // thrown. Still fanned out — a future-known type shouldn't be
-        // silently dropped just because this build doesn't recognize it.
+        // Unknown types are logged, not thrown, and still fanned out.
         console.info("[demux] unrecognized event type", event.type);
       }
 

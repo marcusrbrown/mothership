@@ -6,6 +6,7 @@ import {
   checkSessionStillTracked,
   fromBackfill,
   initialTranscriptState,
+  partUpdateFromEventProperties,
   removePendingQuestion,
   resolveBackfill,
   setAnswerError,
@@ -163,7 +164,6 @@ describe("resolveBackfill", () => {
   });
 
   test("race: A's backfill resolving after B's is discarded, B's result wins", async () => {
-    // A starts first (generation 1) but resolves after B (generation 2).
     let currentGeneration = 1;
     let resolveA!: (v: {
       ok: true;
@@ -193,7 +193,6 @@ describe("resolveBackfill", () => {
     );
 
     const bResult = await bResultPromise;
-    // Now let A resolve, after B already won.
     resolveA({
       ok: true,
       value: [
@@ -255,9 +254,6 @@ describe("checkSessionStillTracked (issue 2: deleted-elsewhere detection)", () =
   });
 
   test("EMPTY directory session list is inconclusive (not-yet-reconciled) -> unchanged, NOT read-only", () => {
-    // A freshly dispatched session in a directory whose reconcile hasn't
-    // landed yet must not be misread as "deleted" — this is the same
-    // conservative posture as DockviewShell's stale-activeSession guard.
     const next = checkSessionStillTracked(readyState, [], "ses_fresh");
     expect(next.status).toBe("ready");
     expect(next).toBe(readyState);
@@ -290,6 +286,53 @@ describe("checkSessionStillTracked (issue 2: deleted-elsewhere detection)", () =
       "ses_deleted",
     );
     expect(next).toBe(already);
+  });
+});
+
+describe("partUpdateFromEventProperties (real message.part.updated wire shape)", () => {
+  // Wire shape (EventMessagePartUpdated):
+  // `properties: { part: { id, sessionID, messageID, type, text }, delta? }`
+  test("extracts partId/type/text/role from a real text part payload", () => {
+    const update = partUpdateFromEventProperties({
+      part: {
+        id: "prt_1",
+        sessionID: "ses_1",
+        messageID: "msg_1",
+        type: "text",
+        text: "hello",
+      },
+    });
+    expect(update).toEqual({
+      partId: "prt_1",
+      type: "text",
+      text: "hello",
+      delta: undefined,
+      role: "assistant",
+    });
+  });
+
+  test("carries the delta field alongside the part for streaming appends", () => {
+    const update = partUpdateFromEventProperties({
+      part: {
+        id: "prt_1",
+        sessionID: "ses_1",
+        messageID: "msg_1",
+        type: "text",
+        text: "hello",
+      },
+      delta: " there",
+    });
+    expect(update?.delta).toBe(" there");
+  });
+
+  test("missing part -> undefined (malformed event, no-op)", () => {
+    expect(partUpdateFromEventProperties({})).toBeUndefined();
+  });
+
+  test("part with no id -> undefined", () => {
+    expect(
+      partUpdateFromEventProperties({ part: { type: "text", text: "x" } }),
+    ).toBeUndefined();
   });
 });
 

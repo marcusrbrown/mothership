@@ -63,6 +63,26 @@ describe("createDemux", () => {
     expect(firehose).toHaveLength(0);
   });
 
+  test("message.part.updated carries sessionID nested under properties.part.sessionID, not properties.sessionID — must still route to that session's subscriber", () => {
+    const demux = createDemux();
+    const received: SseEvent[] = [];
+    demux.subscribe("ses_1", (e) => received.push(e));
+
+    demux.dispatch(
+      evt("message.part.updated", {
+        part: {
+          id: "prt_1",
+          sessionID: "ses_1",
+          messageID: "msg_1",
+          type: "text",
+          text: "hi",
+        },
+      }),
+    );
+
+    expect(received).toHaveLength(1);
+  });
+
   test("unsubscribe stops further delivery", () => {
     const demux = createDemux();
     const received: SseEvent[] = [];

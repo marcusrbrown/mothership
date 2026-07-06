@@ -20,6 +20,7 @@ import {
   applyPartUpdate,
   checkSessionStillTracked,
   initialTranscriptState,
+  partUpdateFromEventProperties,
   removePendingQuestion,
   resolveBackfill,
   setAnswerError,
@@ -37,22 +38,15 @@ const AUTO_SCROLL_THRESHOLD_PX = 48;
 export interface TranscriptPanelParams {
   client?: OpencodeClient;
   demux?: Demux;
-  /** Shared session store (issue 2 fix): the reconcile poller prunes a
-   * session deleted out-of-band (e.g. via the TUI on a directory OTHER
-   * than the one the active SSE stream follows) on its own ~2.5s cadence
-   * regardless of which directory is "active" — this panel subscribes to
-   * the store so it can detect that prune and flip read-only even when no
-   * `session.deleted` SSE event ever reaches its own demux subscription.
-   * Absent -> the detection is skipped (documented degradation, mirrors
-   * every other optional-store panel in this codebase). */
+  /** Session store: lets this panel detect a session pruned out-of-band
+   * by the reconcile poller (e.g. deleted via the TUI) and flip read-only
+   * even without a `session.deleted` SSE event. Absent -> detection is
+   * skipped. */
   store?: SessionStore;
   directory?: string;
   sessionID?: string;
-  /** Bumped by DockviewShell on every active-directory SSE (re)connect
-   * (bug 209's reconnect safety net) — added to the backfill effect's deps
-   * so a reconnect re-runs `listMessages`, recovering any message-part
-   * deltas missed during the stream teardown/reopen gap. The value itself
-   * carries no meaning beyond "changed". */
+  /** Bumped on every SSE (re)connect to re-run the backfill, recovering
+   * message-part deltas missed during the stream teardown/reopen gap. */
   reconnectNonce?: number;
 }
 
@@ -69,14 +63,9 @@ export function TranscriptPanel(
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Generation guard (R4): incremented at the start of every backfill.
-  // `resolveBackfill` re-checks this after the `listMessages` await and
-  // discards (no setState) a result whose generation has since been
-  // superseded — e.g. a fast A->B session switch where A's fetch resolves
-  // after B's. A ref (not state) survives StrictMode's
-  // mount->cleanup->mount without losing the count, so the *current*
-  // generation's result is never discarded across that cycle — only a
-  // truly superseded one is.
+  // Incremented at the start of every backfill; `resolveBackfill` discards
+  // a resolved result whose generation is stale (superseded by a faster
+  // session switch).
   const generationRef = useRef(0);
 
   const backfill = useCallback(async () => {
@@ -94,42 +83,23 @@ export function TranscriptPanel(
     if (nextState !== undefined) setState(nextState);
   }, [client, directory, sessionID]);
 
-  // reconnectNonce is intentionally in this effect's deps (not backfill's)
-  // — bug 209's reconnect safety net: every active-directory SSE
-  // (re)connect bumps it, re-running the listMessages backfill to recover
-  // any message-part deltas missed during the stream teardown/reopen gap,
-  // without needing a manual re-click.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reconnectNonce drives a deliberate re-run, not read in the body
   useEffect(() => {
     void backfill();
   }, [backfill, reconnectNonce]);
 
   useEffect(() => {
-    // `typeof demux.subscribe !== "function"` (not just `!demux`) is
-    // required to survive stale pre-fix localStorage: JSON.stringify
-    // reduced a persisted `Demux` instance to `{}`, which is truthy but has
-    // no methods. Without this guard a restored session crashes the whole
-    // window on `demux.subscribe is not a function` before the live
-    // re-injection (DockviewShell's reinjectLiveParams) can run.
+    // Guard against a stale persisted `Demux` (JSON.stringify reduces it to
+    // `{}`, which is truthy but has no methods) until live re-injection runs.
     if (!demux || typeof demux.subscribe !== "function" || !sessionID) return;
     const unsubscribe = demux.subscribe(sessionID, (event: SseEvent) => {
       const props = (event.properties ?? {}) as Record<string, unknown>;
 
       switch (event.type) {
         case "message.part.updated": {
-          const partId = str(props.partId) ?? str(props.id);
-          const type = str(props.type) ?? "text";
-          const role = str(props.role) ?? "assistant";
-          if (!partId) return;
-          setState((prev) =>
-            applyPartUpdate(prev, {
-              partId,
-              role,
-              type,
-              text: str(props.text),
-              delta: str(props.delta),
-            }),
-          );
+          const update = partUpdateFromEventProperties(props);
+          if (!update) return;
+          setState((prev) => applyPartUpdate(prev, update));
           return;
         }
 
@@ -162,10 +132,7 @@ export function TranscriptPanel(
         }
 
         case "session.status": {
-          // Confirms an unblock — clearing is already handled by
-          // question.replied; session.status is a secondary confirmation
-          // signal for the optimistic-lock state machine (no-op here since
-          // removePendingQuestion already ran on question.replied).
+          // Secondary confirmation signal; clearing already happens on question.replied.
           return;
         }
 
@@ -179,33 +146,16 @@ export function TranscriptPanel(
       }
     });
 
-    // Subscribe-before-unsubscribe (R1/R4): the new session's listener is
-    // already registered on the line above — the demux's per-session Map
-    // (`src/server/demux.ts`) allows two sessions' subscriptions to be
-    // live at once, so there's no exclusivity to violate. Deferring the
-    // actual unsubscribe to a microtask (instead of calling it
-    // synchronously in this cleanup) means that when sessionID changes,
-    // React invokes this cleanup and then synchronously runs the next
-    // effect's body — subscribing the new session — before the
-    // microtask queue drains and the old subscription is removed. That
-    // closes the missed-event window: there is no tick where switching
-    // from session A to session B leaves neither listener registered.
+    // Defer unsubscribe to a microtask so the new session's subscribe
+    // (next effect body) runs before the old one is removed — no tick
+    // where switching sessions leaves neither listener registered.
     return () => {
       queueMicrotask(unsubscribe);
     };
   }, [demux, sessionID]);
 
-  // Issue 2 fix: react to the store's prune of a session deleted OUT-OF-
-  // BAND (a directory other than the one this panel/its demux subscription
-  // is following — e.g. deleted via the TUI while a different project's
-  // transcript streams live). The reconcile poller prunes every roster
-  // project's directory on its own cadence regardless of which one is
-  // "active" (see DockviewShell's `startReconcilePoller` wiring), so the
-  // store WILL eventually reflect the deletion even with no SSE event ever
-  // reaching this panel — `checkSessionStillTracked` is the conservative,
-  // reconciled-vs-not-yet-reconciled-aware seam that turns that prune into
-  // a read-only transition instead of continuing to render (and accept
-  // appends into) a session that no longer exists server-side.
+  // React to the store pruning a session deleted out-of-band, even when no
+  // SSE event reaches this panel's own demux subscription.
   useEffect(() => {
     if (!store || typeof store.subscribe !== "function" || !directory) return;
     const check = () => {
@@ -217,20 +167,11 @@ export function TranscriptPanel(
     return store.subscribe(check);
   }, [store, directory, sessionID]);
 
-  // Issue 4 fix: auto-scroll to the live edge on backfill/append, but only
-  // when the user was already at (or very near) the bottom — see
-  // `shouldAutoScroll`'s doc comment. Ref-based (no state) since scroll
-  // position is DOM-owned, transient UI state that shouldn't trigger
-  // re-renders; reading it synchronously after each render via a layout
-  // effect avoids the flash of an unscrolled frame a passive effect could
-  // produce.
+  // Ref-based (not state): scroll position is DOM-owned, transient UI
+  // state that shouldn't trigger re-renders.
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  // Depend on a cheap signature of the rendered content (part count + last
-  // part's text length + status), not `state` wholesale — pendingQuestions-
-  // only changes (e.g. an answer's sending/error lock) shouldn't force a
-  // re-measure that could yank a deliberately-scrolled-up read. Length
-  // alone (not the full text) is enough to detect a streaming delta
-  // append without recreating this string on every keystroke-sized delta.
+  // Cheap signature of rendered content, not `state` wholesale — avoids
+  // re-measuring on pendingQuestions-only changes.
   const lastPart = state.parts[state.parts.length - 1];
   const contentSignature = `${state.status}:${state.parts.length}:${lastPart?.text.length ?? 0}`;
   // biome-ignore lint/correctness/useExhaustiveDependencies: contentSignature deliberately drives a re-run (like reconnectNonce elsewhere in this file), not read in the body
@@ -256,9 +197,7 @@ export function TranscriptPanel(
         );
         return;
       }
-      // Optimistic lock clears on the confirming question.replied event
-      // (demux subscription above) — no direct mutation here, matching the
-      // "wait for the event" requirement.
+      // Optimistic lock clears on the confirming question.replied event above.
     },
     [client, directory],
   );

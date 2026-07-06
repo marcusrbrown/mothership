@@ -80,16 +80,11 @@ export type BackfillResult =
 export type BackfillFetcher = () => Promise<BackfillResult>;
 
 /**
- * Runs one backfill attempt against `fetchMessages`, but only returns a
- * state update if `generation` is still current by the time the fetch
- * resolves (checked via `isCurrent`). Returns `undefined` when stale —
- * callers must NOT call `setState` in that case.
- *
- * This is the ordering guard for R4: `TranscriptPanel` increments a
- * ref-counted generation before calling this, and passes a closure that
- * always reads the latest ref value. A fast A->B session switch bumps the
- * generation past A's in-flight call; if A's `listMessages` resolves after
- * B's, its result is discarded here instead of overwriting B's transcript.
+ * Runs one backfill attempt, only returning a state update if `generation`
+ * is still current by the time the fetch resolves (checked via
+ * `isCurrent`). Returns `undefined` when stale — callers must NOT call
+ * `setState` in that case (guards against a fast session switch where an
+ * older fetch resolves after a newer one).
  */
 export async function resolveBackfill(
   fetchMessages: BackfillFetcher,
@@ -140,6 +135,39 @@ export function applyPartUpdate(
       : [...state.parts, nextPart];
 
   return { ...state, status: "ready", parts };
+}
+
+/**
+ * Extracts the fields `applyPartUpdate` needs from a `message.part.updated`
+ * event's `properties` payload. Wire shape (opencode server SDK's
+ * `EventMessagePartUpdated`): `{ part: { id, sessionID, messageID, type,
+ * text?, ... }, delta? }` — part fields nest under `properties.part`, not
+ * flat on `properties`.
+ *
+ * `Part` carries no `role` field (it lives on the parent `Message`) —
+ * defaults to `"assistant"` since that's what streams live.
+ */
+export function partUpdateFromEventProperties(
+  properties: Record<string, unknown>,
+):
+  | {
+      partId: string;
+      role: string;
+      type: string;
+      text?: string;
+      delta?: string;
+    }
+  | undefined {
+  const part = properties.part;
+  if (part === null || typeof part !== "object") return undefined;
+  const p = part as Record<string, unknown>;
+  const partId = typeof p.id === "string" ? p.id : undefined;
+  if (!partId) return undefined;
+  const type = typeof p.type === "string" ? p.type : "text";
+  const text = typeof p.text === "string" ? p.text : undefined;
+  const delta =
+    typeof properties.delta === "string" ? properties.delta : undefined;
+  return { partId, role: "assistant", type, text, delta };
 }
 
 /** Adds a pending question to the state (from `question.asked`, live or via
@@ -222,29 +250,15 @@ export function toReadOnly(state: TranscriptState): TranscriptState {
 }
 
 /**
- * Issue 2 fix: detects a session deleted OUT-OF-BAND — i.e. via a live
- * `session.deleted` SSE event for a DIFFERENT directory than the one
- * currently streaming (so this panel's demux subscription never saw it;
- * see `TranscriptPanel.tsx`'s demux subscription which is scoped to a
- * single sessionID/directory pair). The reconcile poller (`reconcile-
- * poller.ts`) polls every roster project on a ~2.5s cadence regardless of
- * which directory is "active", so it eventually prunes the deleted session
- * from the store even when no SSE event reaches this client — this
- * function is the seam that reacts to that prune and flips the panel
- * read-only instead of continuing to render (and accept appends into) a
- * dead session.
+ * Detects a session deleted out-of-band (via the reconcile poller pruning
+ * the store, not a live `session.deleted` SSE event for this session) and
+ * flips the panel read-only.
  *
  * `sessionsInDirectory` must be `store.getSessions(directory)` for the
- * panel's OWN directory — comparing against the wrong directory would
- * always report the session as absent. Deliberately conservative like
- * DockviewShell's own stale-`activeSession` guard: an EMPTY
- * `sessionsInDirectory` means "this directory hasn't been reconciled yet"
- * (not "every session in it was deleted"), so it's treated as
- * inconclusive and the state passes through unchanged — otherwise a
- * freshly-dispatched session in a not-yet-reconciled directory would flip
- * read-only before the store had a chance to catch up. Already-read-only
- * or non-ready/non-empty states (loading/error) are left alone; this is
- * purely a `ready`/`empty` -> `read-only` transition once conclusive.
+ * panel's OWN directory. An EMPTY list means "not yet reconciled", not
+ * "all sessions deleted" — treated as inconclusive so a freshly-dispatched
+ * session isn't flipped read-only before the store catches up.
+ * Already-read-only or non-ready/non-empty states are left alone.
  */
 export function checkSessionStillTracked(
   state: TranscriptState,
@@ -260,16 +274,10 @@ export function checkSessionStillTracked(
 }
 
 /**
- * Issue 4 fix: pure decision for whether a newly-appended message/delta
- * should pull the transcript's scroll position down to the live edge.
- * Standard "stick to bottom" chat/log pattern — auto-scroll ONLY when the
- * user was already at (or very near) the bottom before the append;
- * otherwise they've scrolled up to read history and an auto-scroll would
- * yank the view out from under them. `thresholdPx` (default 48) tolerates
- * sub-pixel/rounding gaps from browser scroll math without requiring an
- * exact 0 gap. DOM-free — `TranscriptPanel.tsx`'s scroll effect is the
- * thin, untestable-at-this-layer wiring around this decision (measuring
- * `scrollHeight - scrollTop - clientHeight` and calling `scrollTo`).
+ * "Stick to bottom" decision: auto-scroll only when the user was already at
+ * (or near) the bottom before the append, so scrolled-up history reads
+ * aren't yanked. `thresholdPx` tolerates rounding gaps in browser scroll
+ * math.
  */
 export function shouldAutoScroll(
   distanceFromBottomPx: number,
