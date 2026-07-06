@@ -1,18 +1,14 @@
 /**
- * Reconcilable session store — the fix for the space-bus `/core` session-
- * listing gap (no per-session listing, only project aggregates +
- * pendingQuestions). Accumulates authoritative per-project session state
- * from two sources:
+ * Reconcilable session store. Accumulates authoritative per-project session
+ * state from two sources:
  *
  * 1. `applyEvent()` — incremental updates from the demux firehose
  *    (`session.created/updated/deleted`, `session.status`, `session.idle`,
  *    `question.asked`/`question.replied`/`question.rejected`).
  * 2. `reconcile()` — full-state replacement from `listSessions()` +
- *    `getSessionStatus()` + `listQuestions()`, run on every SSE (re)connect
- *    per the SSE contract facts doc: the wire has no `id:` field, so deltas
- *    are never trusted across a reconnect gap. `reconcile()` is the
- *    authority — any session present before but absent from a reconcile
- *    call is removed.
+ *    `getSessionStatus()` + `listQuestions()`, run on every SSE (re)connect.
+ *    `reconcile()` is the authority — any session present before but absent
+ *    from a reconcile call is removed.
  *
  * Pure logic, DOM-free, fully unit-testable.
  */
@@ -31,23 +27,16 @@ export interface StoredSession {
   directory?: string;
   title?: string;
   status: SessionBusyState;
-  /** Real server-side recency timestamp (epoch ms), read from the
-   * loosely-typed `time.updated`/`time.created` fields that space-bus's
-   * `$loose` session schema passes through at runtime but doesn't type
-   * statically. Undefined when the source payload lacked a `time` field
-   * (e.g. an older server). Basis for "most recent session" — NOT store
-   * insertion order. */
+  /** Server-side recency timestamp (epoch ms), read from the loosely-typed
+   * `time.updated`/`time.created` fields (untyped on the static session/event
+   * types). Basis for "most recent session" — NOT store insertion order. */
   updatedAt?: number;
-  /** Real server-side creation timestamp (epoch ms), same caveats as
-   * `updatedAt`. Currently unused by consumers; captured opportunistically. */
+  /** Server-side creation timestamp (epoch ms), same caveats as `updatedAt`. */
   createdAt?: number;
-  /** The parent session's id, present on subagent/child sessions. Read
-   * from the loosely-typed `parentID` field that space-bus's `$loose`
-   * session schema passes through at runtime but doesn't type statically
-   * (same caveats as `updatedAt`/`createdAt` — see `parentIdOf`). This is
-   * the PRIMARY, reliable signal for subagent detection in
+  /** Parent session's id, present on subagent/child sessions (loosely-typed
+   * `parentID` field). Primary signal for subagent detection in
    * `sessions-view.ts`'s `isSubagentSession`; the title-suffix regex is
-   * only a fallback for payloads/fixtures that lack this field. */
+   * only a fallback for payloads/fixtures lacking this field. */
   parentID?: string;
 }
 
@@ -85,9 +74,7 @@ export interface SessionStore {
 function statusTypeToBusyState(type: string | undefined): SessionBusyState {
   if (type === undefined) return "unknown";
   if (type === "idle") return "idle";
-  // Any non-idle known status type (e.g. "busy", "running") counts as busy;
-  // unrecognized types default conservatively to "busy" rather than
-  // silently hiding activity.
+  // Unrecognized non-idle types default to "busy" rather than hiding activity.
   return "busy";
 }
 
@@ -98,6 +85,31 @@ function propsOf(event: SseEvent): Record<string, unknown> {
     : {};
 }
 
+/** `session.created`/`session.updated`/`session.deleted` nest the session
+ * under `properties.info` (`EventSessionCreated`: `{ properties: { info:
+ * Session } }`), not flat on `properties`. Falls back to `props` itself
+ * when `info` is absent, for flat-shape fixture payloads. */
+function sessionFieldsOf(
+  props: Record<string, unknown>,
+): Record<string, unknown> {
+  const info = props.info;
+  return info !== null && typeof info === "object"
+    ? (info as Record<string, unknown>)
+    : props;
+}
+
+/** `session.status` nests the busy-state type under `properties.status.type`
+ * (`EventSessionStatus`), not a flat `properties.type`. Falls back to the
+ * flat field for flat-shape fixtures. */
+function statusTypeOf(props: Record<string, unknown>): string | undefined {
+  const status = props.status;
+  if (status !== null && typeof status === "object") {
+    const nested = str((status as Record<string, unknown>).type);
+    if (nested) return nested;
+  }
+  return str(props.type);
+}
+
 function str(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -106,11 +118,9 @@ function num(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
-/** Narrow, `any`-free accessor for the `time.updated`/`time.created` fields
- * that space-bus's `$loose` session schema passes through at runtime (they
- * carry the SDK `Session.time` shape) but that aren't present in the
- * static session/event types. Reads defensively: any unexpected shape
- * yields `undefined` rather than throwing. */
+/** Narrow accessor for the `time.updated`/`time.created` fields (present at
+ * runtime, untyped statically). Reads defensively: unexpected shapes yield
+ * `undefined` rather than throwing. */
 function timeFieldsOf(raw: unknown): { updated?: number; created?: number } {
   if (raw === null || typeof raw !== "object") return {};
   const time = (raw as { time?: unknown }).time;
@@ -119,11 +129,8 @@ function timeFieldsOf(raw: unknown): { updated?: number; created?: number } {
   return { updated: num(t.updated), created: num(t.created) };
 }
 
-/** Narrow, `any`-free accessor for the `parentID` field that space-bus's
- * `$loose` session schema passes through at runtime (OpenCode stamps this
- * on subagent/child sessions) but that isn't present in the static
- * session/event types. Reads defensively: any unexpected shape yields
- * `undefined` rather than throwing. */
+/** Narrow accessor for the `parentID` field (stamped on subagent/child
+ * sessions, present at runtime, untyped statically). */
 function parentIdOf(raw: unknown): string | undefined {
   if (raw === null || typeof raw !== "object") return undefined;
   return str((raw as { parentID?: unknown }).parentID);
@@ -208,23 +215,25 @@ export function createSessionStore(): SessionStore {
       switch (event.type) {
         case "session.created":
         case "session.updated": {
-          const id = str(props.id) ?? str(props.sessionID);
+          const fields = sessionFieldsOf(props);
+          const id = str(fields.id) ?? str(fields.sessionID);
           if (!id) return;
-          const time = timeFieldsOf(props);
+          const time = timeFieldsOf(fields);
           upsertSession({
             id,
-            directory: str(props.directory),
-            title: str(props.title),
+            directory: str(fields.directory),
+            title: str(fields.title),
             updatedAt: time.updated ?? time.created,
             createdAt: time.created,
-            parentID: parentIdOf(props),
+            parentID: parentIdOf(fields),
           });
           notify();
           return;
         }
 
         case "session.deleted": {
-          const id = str(props.id) ?? str(props.sessionID);
+          const fields = sessionFieldsOf(props);
+          const id = str(fields.id) ?? str(fields.sessionID);
           if (!id) return;
           removeSession(id);
           notify();
@@ -234,15 +243,13 @@ export function createSessionStore(): SessionStore {
         case "session.status": {
           const sessionID = str(props.sessionID) ?? str(props.id);
           if (!sessionID) return;
-          // Status events are updates, not creations — an unknown session
-          // id must no-op rather than upsert a directory-less zombie.
-          // reconcile()/session.created/session.updated are the only
-          // creation paths.
+          // Updates only — an unknown session id no-ops rather than
+          // upserting a directory-less zombie.
           if (!sessions.has(sessionID)) return;
           const time = timeFieldsOf(props);
           upsertSession({
             id: sessionID,
-            status: statusTypeToBusyState(str(props.type)),
+            status: statusTypeToBusyState(statusTypeOf(props)),
             updatedAt: time.updated,
           });
           notify();
