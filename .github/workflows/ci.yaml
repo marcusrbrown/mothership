@@ -131,6 +131,53 @@ jobs:
             --ref refs/tags/v0.0.0-ci-smoke \
             --repo "${{ github.repository }}"
 
+      - name: 🧩 Tauri release config smoke (no secrets, no signing)
+        run: |
+          if [ ! -f src-tauri/tauri.release.conf.json ]; then
+            exit 0
+          fi
+          # Config-shape check only: no macOS runner, no compile, no
+          # signing. Confirms the release config fragment stays valid JSON
+          # and keeps the invariants the release workflow depends on
+          # (externalBin sidecar entry, separate app/sidecar entitlements,
+          # no runtime updater capability grant) so a config regression
+          # fails here instead of surfacing mid-release.
+          python3 - <<'PY'
+          import json, sys
+
+          with open("src-tauri/tauri.release.conf.json") as f:
+              release_conf = json.load(f)
+
+          bundle = release_conf.get("bundle", {})
+          assert "ide-server" in " ".join(bundle.get("externalBin", [])), \
+              "release config must declare the ide-server externalBin sidecar"
+
+          macos = bundle.get("macOS", {})
+          assert macos.get("entitlements") == "Entitlements.plist", \
+              "release config must reference the main-app entitlements file"
+          assert macos.get("hardenedRuntime") is True, \
+              "release config must enable Hardened Runtime for notarization"
+
+          with open("src-tauri/tauri.conf.json") as f:
+              base_conf = json.load(f)
+          assert base_conf.get("app", {}).get("security", {}).get("csp") is not None, \
+              "base config must not ship with a null CSP"
+
+          print("Tauri release config smoke OK.")
+          PY
+
+          if [ -f src-tauri/sidecar-Entitlements.plist ] && [ -f src-tauri/Entitlements.plist ]; then
+            if diff -q src-tauri/Entitlements.plist src-tauri/sidecar-Entitlements.plist > /dev/null; then
+              echo "❌ Main app and sidecar entitlements files are identical — sidecar-only exceptions must not apply to the main webview." >&2
+              exit 1
+            fi
+            if grep -q "disable-library-validation" src-tauri/Entitlements.plist; then
+              echo "❌ Main app entitlements must not include disable-library-validation (sidecar-only exception)." >&2
+              exit 1
+            fi
+            echo "Entitlements separation smoke OK."
+          fi
+
   check-workflows:
     name: Check Workflows
     permissions:

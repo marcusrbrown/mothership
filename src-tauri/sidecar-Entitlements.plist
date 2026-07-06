@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Compiled `ide-server` sidecar (bundle.externalBin) entitlements ONLY.
+  These JIT/DYLD exceptions exist because the sidecar is a compiled Bun
+  binary with its own JS engine and bundled runtime libraries — they must
+  NEVER be copied into src-tauri/Entitlements.plist (the main app/webview).
+  See src-tauri/entitlements.allowlist.md for the rationale behind every
+  entry in both files.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

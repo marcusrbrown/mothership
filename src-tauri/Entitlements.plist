@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Main app / main webview process entitlements ONLY. Do not add sidecar-only
+  exceptions (JIT/DYLD library-validation disable) here — see
+  src-tauri/sidecar-Entitlements.plist for the compiled ide-server sidecar
+  and src-tauri/entitlements.allowlist.md for the rationale behind every
+  entry in both files.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
