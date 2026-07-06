@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 // `createFetchHandler` routing/auth logic.
 process.env.MOTHERSHIP_IDE_TOKEN ??= "boot-time-token-for-tests";
 
-const { createFetchHandler } = await import("./index");
+const { createFetchHandler, isPidAlive } = await import("./index");
 
 const TOKEN = "secret-token";
 
@@ -122,5 +122,17 @@ describe("createFetchHandler — 401 uniformity", () => {
     });
     expect(res.status).toBe(401);
     expect(await res.text()).toBe("");
+  });
+});
+
+describe("isPidAlive — parent-death detection", () => {
+  test("returns true for the current process's own pid", () => {
+    expect(isPidAlive(process.pid)).toBe(true);
+  });
+
+  test("returns false for a pid that does not exist", () => {
+    // PID 2^31-1 is outside any realistic pid range and reliably yields
+    // ESRCH on every platform this sidecar targets.
+    expect(isPidAlive(2147483647)).toBe(false);
   });
 });

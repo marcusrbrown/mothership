@@ -185,3 +185,36 @@ function shutdown(): void {
 
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+
+/**
+ * Returns true iff a process with the given pid is alive (signal 0 probes
+ * without actually sending a signal). Any error other than "no such
+ * process" (e.g. EPERM, which still implies the process exists) is treated
+ * as "can't tell" and does NOT trigger a shutdown — we only exit on a
+ * confirmed-dead parent, never on ambiguous errors.
+ */
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code !== "ESRCH";
+  }
+}
+
+// Orphan/force-kill handling: if the Rust supervisor that spawned us dies
+// without a clean SIGTERM (e.g. `kill -9`, forced app quit), we'd otherwise
+// keep the loopback server running forever. The supervisor passes its own
+// pid via env; poll it and self-terminate once it's gone.
+const parentPidRaw = process.env.MOTHERSHIP_IDE_PARENT_PID;
+if (parentPidRaw) {
+  const parentPid = Number.parseInt(parentPidRaw, 10);
+  if (Number.isFinite(parentPid) && parentPid > 0) {
+    setInterval(() => {
+      if (!isPidAlive(parentPid)) {
+        shutdown();
+      }
+    }, 2000);
+  }
+}

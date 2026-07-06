@@ -125,9 +125,9 @@ fn write_rendezvous_file(
 }
 
 /// Resolves the default sidecar dir as an absolute path anchored on
-/// `CARGO_MANIFEST_DIR`, independent of the child process's CWD. Dev only.
-// TODO(packaging): a production-bundled app must ship the sidecar as a
-// Tauri resource and resolve it via `app.path().resource_dir()` instead.
+/// `CARGO_MANIFEST_DIR`, independent of the child process's CWD. Dev only —
+/// production builds never read from the source tree; see
+/// [`resolve_sidecar_command`].
 fn default_sidecar_dir() -> String {
     let joined = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -137,6 +137,48 @@ fn default_sidecar_dir() -> String {
         Ok(canon) => canon.to_string_lossy().into_owned(),
         Err(_) => joined.to_string_lossy().into_owned(),
     }
+}
+
+/// The sidecar name registered in `bundle.externalBin` (target-triple
+/// suffix stripped at build/bundle time by Tauri).
+const BUNDLED_SIDECAR_NAME: &str = "ide-server";
+
+/// How to launch the sidecar process, decided once per spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidecarCommand {
+    /// Debug/dev builds: `bun run <dir>/index.ts` from the source tree.
+    DevSource { entry: String },
+    /// Release builds: exec the compiled, bundled sidecar binary directly
+    /// (no Bun/source-tree dependency at runtime).
+    Bundled { binary: std::path::PathBuf },
+}
+
+/// Pure decision: debug builds always use the source-tree Bun fallback;
+/// release builds always require a resolved bundled-binary path. Kept
+/// separate from filesystem existence checks so it's unit-testable without
+/// touching disk, mirroring `supervisor_common`'s pure-decision pattern.
+fn resolve_sidecar_command(
+    is_debug: bool,
+    bundled_binary: Option<std::path::PathBuf>,
+    dev_dir: &str,
+) -> SidecarCommand {
+    if is_debug {
+        return SidecarCommand::DevSource {
+            entry: format!("{dev_dir}/index.ts"),
+        };
+    }
+    SidecarCommand::Bundled {
+        binary: bundled_binary.unwrap_or_default(),
+    }
+}
+
+/// Resolves the bundled sidecar binary path for release builds: Tauri
+/// places `externalBin` binaries alongside the main app executable (not in
+/// the resource dir), with the target-triple suffix stripped.
+fn bundled_sidecar_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    Some(dir.join(BUNDLED_SIDECAR_NAME))
 }
 
 /// Truncates a byte buffer to at most `max` bytes (on a UTF-8 boundary) for
@@ -150,20 +192,47 @@ fn truncate_tail(bytes: &[u8], max: usize) -> String {
     s
 }
 
-/// Spawns `bun run <sidecar_dir>/index.ts` with the token in env, reads the
-/// `IDE_PORT=<n>` line from stdout, and returns the child plus parsed port.
-/// Captures stderr so a spawn/timeout failure has a diagnosable tail.
+/// Spawns the ide sidecar (dev: `bun run <dir>/index.ts` from the source
+/// tree; release: the bundled compiled binary next to the app executable),
+/// reads the `IDE_PORT=<n>` line from stdout, and returns the child plus
+/// parsed port. Captures stderr so a spawn/timeout failure has a
+/// diagnosable tail.
 fn spawn_and_await_port(sidecar_dir: &str, token: &str) -> std::io::Result<(Child, u16)> {
-    let entry = format!("{sidecar_dir}/index.ts");
-    if !std::path::Path::new(&entry).exists() {
-        return Err(std::io::Error::other(format!(
-            "ide sidecar entry not found at {entry}"
-        )));
-    }
+    let command = resolve_sidecar_command(
+        cfg!(debug_assertions),
+        bundled_sidecar_path(),
+        sidecar_dir,
+    );
 
-    let mut cmd = std::process::Command::new("bun");
-    cmd.arg("run").arg(&entry);
+    let (mut cmd, label) = match &command {
+        SidecarCommand::DevSource { entry } => {
+            if !std::path::Path::new(entry).exists() {
+                return Err(std::io::Error::other(format!(
+                    "ide sidecar entry not found at {entry}"
+                )));
+            }
+            let mut cmd = std::process::Command::new("bun");
+            cmd.arg("run").arg(entry);
+            (cmd, entry.clone())
+        }
+        SidecarCommand::Bundled { binary } => {
+            if !binary.exists() {
+                return Err(std::io::Error::other(format!(
+                    "bundled ide sidecar binary not found at {} — this build is missing its packaged sidecar",
+                    binary.display()
+                )));
+            }
+            let cmd = std::process::Command::new(binary);
+            (cmd, binary.display().to_string())
+        }
+    };
+    let entry = label;
+
     cmd.env("MOTHERSHIP_IDE_TOKEN", token);
+    cmd.env(
+        "MOTHERSHIP_IDE_PARENT_PID",
+        std::process::id().to_string(),
+    );
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -482,5 +551,52 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn debug_build_always_uses_dev_source_fallback() {
+        // Even when a bundled binary path is available, debug builds must
+        // keep using the source-tree Bun launch path.
+        let command = resolve_sidecar_command(
+            true,
+            Some(std::path::PathBuf::from("/some/bundled/ide-server")),
+            "/repo/sidecar/ide-server",
+        );
+        assert_eq!(
+            command,
+            SidecarCommand::DevSource {
+                entry: "/repo/sidecar/ide-server/index.ts".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn release_build_resolves_bundled_sidecar_path() {
+        let command = resolve_sidecar_command(
+            false,
+            Some(std::path::PathBuf::from("/App.app/Contents/MacOS/ide-server")),
+            "/repo/sidecar/ide-server",
+        );
+        assert_eq!(
+            command,
+            SidecarCommand::Bundled {
+                binary: std::path::PathBuf::from("/App.app/Contents/MacOS/ide-server")
+            }
+        );
+    }
+
+    #[test]
+    fn release_build_with_no_resolvable_binary_still_produces_bundled_variant() {
+        // Missing-binary detection (actionable startup error) happens at
+        // spawn time via a filesystem existence check, not in this pure
+        // decision — but the decision itself must never silently fall back
+        // to the dev source tree in release mode.
+        let command = resolve_sidecar_command(false, None, "/repo/sidecar/ide-server");
+        assert_eq!(
+            command,
+            SidecarCommand::Bundled {
+                binary: std::path::PathBuf::new()
+            }
+        );
     }
 }
