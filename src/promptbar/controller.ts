@@ -33,9 +33,17 @@ export type SubmitPromptDeps = Parameters<typeof dispatchPrompt>[1];
  * "no manifest project has a session with id <id>" — deleted mid-session,
  * after the resolution-layer/DockviewShell checks already missed the
  * window. Case-insensitive, tolerant of minor wording drift around
- * "session"/"session id"/"session-not-found". */
+ * "session"/"session id"/"session-not-found", AND the raw opencode server
+ * error shape observed live when a follow-up `prompt_async` targets a
+ * session deleted out-of-band (e.g. in the TUI):
+ * `{"name":"NotFoundError","data":{"message":"Session not found: ses_..."}}`
+ * — that body text is embedded verbatim in space-bus's thrown error
+ * string, so matching the bare `NotFoundError` name is a second,
+ * independent trigger alongside the wording-based match (belt-and-braces:
+ * a future server message that drops the words "session"/"not"/"found"
+ * but keeps the error name still clears the stale session). */
 const SESSION_NOT_FOUND_ERROR =
-  /no manifest project has a session with id|session.*not.*found/i;
+  /no manifest project has a session with id|session.*not.*found|NotFoundError/i;
 
 export async function submitPrompt(
   state: PromptBarState,

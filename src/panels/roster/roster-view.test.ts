@@ -19,6 +19,7 @@ describe("toRosterRow", () => {
       project: expect.objectContaining({ busyCount: 2 }),
       busy: true,
       needsAttention: false,
+      active: false,
     });
   });
 
@@ -45,6 +46,44 @@ describe("toRosterRow", () => {
       kind: "status-error",
       project: expect.objectContaining({ error: "server unreachable" }),
       error: "server unreachable",
+      active: false,
+    });
+  });
+});
+
+describe("toRosterRow active highlight (issue 3)", () => {
+  test("active defaults to false when omitted", () => {
+    const row = toRosterRow(project());
+    expect(row.active).toBe(false);
+  });
+
+  test("active true is threaded through for an ok row", () => {
+    const row = toRosterRow(project(), false, true);
+    expect(row).toEqual({
+      kind: "ok",
+      project: expect.objectContaining({ name: "proj-a" }),
+      busy: false,
+      needsAttention: false,
+      active: true,
+    });
+  });
+
+  test("active true is threaded through for a missing-path row", () => {
+    const row = toRosterRow(project({ exists: false }), false, true);
+    expect(row).toEqual({
+      kind: "missing-path",
+      project: expect.objectContaining({ exists: false }),
+      active: true,
+    });
+  });
+
+  test("active true is threaded through for a status-error row", () => {
+    const row = toRosterRow(project({ error: "boom" }), false, true);
+    expect(row).toEqual({
+      kind: "status-error",
+      project: expect.objectContaining({ error: "boom" }),
+      error: "boom",
+      active: true,
     });
   });
 });
@@ -78,5 +117,33 @@ describe("toRosterViewState", () => {
     expect(state.rows[0]?.kind).toBe("ok");
     expect(state.rows[1]?.kind).toBe("missing-path");
     expect(state.rows[2]?.kind).toBe("status-error");
+  });
+
+  test("issue 3 regression: activeDirectory highlights only the matching project's row (path === expanded directory)", () => {
+    const state = toRosterViewState(
+      {
+        ok: true,
+        projects: [
+          project({ name: "dashboard", path: "/Users/marcus/src/dashboard" }),
+          project({ name: "agent", path: "/Users/marcus/src/agent" }),
+        ],
+      },
+      undefined,
+      "/Users/marcus/src/agent",
+    );
+    expect(state.status).toBe("ready");
+    if (state.status !== "ready") throw new Error("expected ready");
+    expect(state.rows[0]?.active).toBe(false);
+    expect(state.rows[1]?.active).toBe(true);
+  });
+
+  test("no activeDirectory -> no row highlighted (documented degradation, not an error)", () => {
+    const state = toRosterViewState({
+      ok: true,
+      projects: [project({ name: "a" })],
+    });
+    expect(state.status).toBe("ready");
+    if (state.status !== "ready") throw new Error("expected ready");
+    expect(state.rows[0]?.active).toBe(false);
   });
 });

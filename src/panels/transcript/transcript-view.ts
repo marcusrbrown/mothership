@@ -220,3 +220,60 @@ export function setAnswerError(
 export function toReadOnly(state: TranscriptState): TranscriptState {
   return { ...state, status: "read-only" };
 }
+
+/**
+ * Issue 2 fix: detects a session deleted OUT-OF-BAND — i.e. via a live
+ * `session.deleted` SSE event for a DIFFERENT directory than the one
+ * currently streaming (so this panel's demux subscription never saw it;
+ * see `TranscriptPanel.tsx`'s demux subscription which is scoped to a
+ * single sessionID/directory pair). The reconcile poller (`reconcile-
+ * poller.ts`) polls every roster project on a ~2.5s cadence regardless of
+ * which directory is "active", so it eventually prunes the deleted session
+ * from the store even when no SSE event reaches this client — this
+ * function is the seam that reacts to that prune and flips the panel
+ * read-only instead of continuing to render (and accept appends into) a
+ * dead session.
+ *
+ * `sessionsInDirectory` must be `store.getSessions(directory)` for the
+ * panel's OWN directory — comparing against the wrong directory would
+ * always report the session as absent. Deliberately conservative like
+ * DockviewShell's own stale-`activeSession` guard: an EMPTY
+ * `sessionsInDirectory` means "this directory hasn't been reconciled yet"
+ * (not "every session in it was deleted"), so it's treated as
+ * inconclusive and the state passes through unchanged — otherwise a
+ * freshly-dispatched session in a not-yet-reconciled directory would flip
+ * read-only before the store had a chance to catch up. Already-read-only
+ * or non-ready/non-empty states (loading/error) are left alone; this is
+ * purely a `ready`/`empty` -> `read-only` transition once conclusive.
+ */
+export function checkSessionStillTracked(
+  state: TranscriptState,
+  sessionsInDirectory: { id: string }[],
+  sessionID: string | undefined,
+): TranscriptState {
+  if (!sessionID) return state;
+  if (state.status !== "ready" && state.status !== "empty") return state;
+  if (sessionsInDirectory.length === 0) return state; // inconclusive — not yet reconciled
+  const stillExists = sessionsInDirectory.some((s) => s.id === sessionID);
+  if (stillExists) return state;
+  return toReadOnly(state);
+}
+
+/**
+ * Issue 4 fix: pure decision for whether a newly-appended message/delta
+ * should pull the transcript's scroll position down to the live edge.
+ * Standard "stick to bottom" chat/log pattern — auto-scroll ONLY when the
+ * user was already at (or very near) the bottom before the append;
+ * otherwise they've scrolled up to read history and an auto-scroll would
+ * yank the view out from under them. `thresholdPx` (default 48) tolerates
+ * sub-pixel/rounding gaps from browser scroll math without requiring an
+ * exact 0 gap. DOM-free — `TranscriptPanel.tsx`'s scroll effect is the
+ * thin, untestable-at-this-layer wiring around this decision (measuring
+ * `scrollHeight - scrollTop - clientHeight` and calling `scrollTo`).
+ */
+export function shouldAutoScroll(
+  distanceFromBottomPx: number,
+  thresholdPx = 48,
+): boolean {
+  return distanceFromBottomPx <= thresholdPx;
+}

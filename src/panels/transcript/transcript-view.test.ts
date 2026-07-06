@@ -3,12 +3,14 @@ import type { MessageList } from "../../server/types";
 import {
   addPendingQuestion,
   applyPartUpdate,
+  checkSessionStillTracked,
   fromBackfill,
   initialTranscriptState,
   removePendingQuestion,
   resolveBackfill,
   setAnswerError,
   setAnswerSending,
+  shouldAutoScroll,
   toReadOnly,
 } from "./transcript-view";
 
@@ -225,5 +227,88 @@ describe("toReadOnly", () => {
     state = toReadOnly(state);
     expect(state.status).toBe("read-only");
     expect(state.parts).toHaveLength(1);
+  });
+});
+
+describe("checkSessionStillTracked (issue 2: deleted-elsewhere detection)", () => {
+  const readyState = fromBackfill([
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "hi" }] },
+  ]);
+
+  test("session absent from a NON-EMPTY reconciled directory -> read-only", () => {
+    const next = checkSessionStillTracked(
+      readyState,
+      [{ id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next.status).toBe("read-only");
+    expect(next.parts).toHaveLength(1); // parts preserved
+  });
+
+  test("session present in the directory -> unchanged", () => {
+    const next = checkSessionStillTracked(
+      readyState,
+      [{ id: "ses_deleted" }, { id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next).toBe(readyState);
+  });
+
+  test("EMPTY directory session list is inconclusive (not-yet-reconciled) -> unchanged, NOT read-only", () => {
+    // A freshly dispatched session in a directory whose reconcile hasn't
+    // landed yet must not be misread as "deleted" — this is the same
+    // conservative posture as DockviewShell's stale-activeSession guard.
+    const next = checkSessionStillTracked(readyState, [], "ses_fresh");
+    expect(next.status).toBe("ready");
+    expect(next).toBe(readyState);
+  });
+
+  test("no sessionID -> unchanged (no session selected yet)", () => {
+    const next = checkSessionStillTracked(
+      readyState,
+      [{ id: "ses_other" }],
+      undefined,
+    );
+    expect(next).toBe(readyState);
+  });
+
+  test("non-ready/empty states (loading/error) are left alone", () => {
+    const loading = initialTranscriptState();
+    const next = checkSessionStillTracked(
+      loading,
+      [{ id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next).toBe(loading);
+  });
+
+  test("already read-only stays read-only (idempotent, no crash on already-transitioned state)", () => {
+    const already = toReadOnly(readyState);
+    const next = checkSessionStillTracked(
+      already,
+      [{ id: "ses_other" }],
+      "ses_deleted",
+    );
+    expect(next).toBe(already);
+  });
+});
+
+describe("shouldAutoScroll (issue 4: auto-scroll on live updates)", () => {
+  test("already at the bottom (distance 0) -> auto-scroll", () => {
+    expect(shouldAutoScroll(0)).toBe(true);
+  });
+
+  test("within the default tolerance -> auto-scroll", () => {
+    expect(shouldAutoScroll(48)).toBe(true);
+    expect(shouldAutoScroll(30)).toBe(true);
+  });
+
+  test("scrolled well up past tolerance -> do NOT auto-scroll (preserves the user's read position)", () => {
+    expect(shouldAutoScroll(400)).toBe(false);
+  });
+
+  test("custom threshold is respected", () => {
+    expect(shouldAutoScroll(100, 150)).toBe(true);
+    expect(shouldAutoScroll(200, 150)).toBe(false);
   });
 });

@@ -11,24 +11,41 @@ import type { IDockviewPanelProps } from "dockview-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpencodeClient } from "../../server/client";
 import type { Demux } from "../../server/demux";
+import type { SessionStore } from "../../server/session-store";
 import type { SseEvent } from "../../server/types";
 import {
   type PendingQuestionView,
   type TranscriptState,
   addPendingQuestion,
   applyPartUpdate,
+  checkSessionStillTracked,
   initialTranscriptState,
   removePendingQuestion,
   resolveBackfill,
   setAnswerError,
   setAnswerSending,
+  shouldAutoScroll,
   toErrorState,
   toReadOnly,
 } from "./transcript-view";
 
+/** Issue 4: scroll-position tolerance in px — mirrors
+ * `shouldAutoScroll`'s default threshold so the DOM measurement and the
+ * pure decision agree on what counts as "already at the bottom". */
+const AUTO_SCROLL_THRESHOLD_PX = 48;
+
 export interface TranscriptPanelParams {
   client?: OpencodeClient;
   demux?: Demux;
+  /** Shared session store (issue 2 fix): the reconcile poller prunes a
+   * session deleted out-of-band (e.g. via the TUI on a directory OTHER
+   * than the one the active SSE stream follows) on its own ~2.5s cadence
+   * regardless of which directory is "active" — this panel subscribes to
+   * the store so it can detect that prune and flip read-only even when no
+   * `session.deleted` SSE event ever reaches its own demux subscription.
+   * Absent -> the detection is skipped (documented degradation, mirrors
+   * every other optional-store panel in this codebase). */
+  store?: SessionStore;
   directory?: string;
   sessionID?: string;
   /** Bumped by DockviewShell on every active-directory SSE (re)connect
@@ -46,7 +63,8 @@ function str(value: unknown): string | undefined {
 export function TranscriptPanel(
   props: IDockviewPanelProps<TranscriptPanelParams>,
 ) {
-  const { client, demux, directory, sessionID, reconnectNonce } = props.params;
+  const { client, demux, store, directory, sessionID, reconnectNonce } =
+    props.params;
   const [state, setState] = useState<TranscriptState>(initialTranscriptState());
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -177,6 +195,54 @@ export function TranscriptPanel(
     };
   }, [demux, sessionID]);
 
+  // Issue 2 fix: react to the store's prune of a session deleted OUT-OF-
+  // BAND (a directory other than the one this panel/its demux subscription
+  // is following — e.g. deleted via the TUI while a different project's
+  // transcript streams live). The reconcile poller prunes every roster
+  // project's directory on its own cadence regardless of which one is
+  // "active" (see DockviewShell's `startReconcilePoller` wiring), so the
+  // store WILL eventually reflect the deletion even with no SSE event ever
+  // reaching this panel — `checkSessionStillTracked` is the conservative,
+  // reconciled-vs-not-yet-reconciled-aware seam that turns that prune into
+  // a read-only transition instead of continuing to render (and accept
+  // appends into) a session that no longer exists server-side.
+  useEffect(() => {
+    if (!store || typeof store.subscribe !== "function" || !directory) return;
+    const check = () => {
+      setState((prev) =>
+        checkSessionStillTracked(prev, store.getSessions(directory), sessionID),
+      );
+    };
+    check();
+    return store.subscribe(check);
+  }, [store, directory, sessionID]);
+
+  // Issue 4 fix: auto-scroll to the live edge on backfill/append, but only
+  // when the user was already at (or very near) the bottom — see
+  // `shouldAutoScroll`'s doc comment. Ref-based (no state) since scroll
+  // position is DOM-owned, transient UI state that shouldn't trigger
+  // re-renders; reading it synchronously after each render via a layout
+  // effect avoids the flash of an unscrolled frame a passive effect could
+  // produce.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Depend on a cheap signature of the rendered content (part count + last
+  // part's text length + status), not `state` wholesale — pendingQuestions-
+  // only changes (e.g. an answer's sending/error lock) shouldn't force a
+  // re-measure that could yank a deliberately-scrolled-up read. Length
+  // alone (not the full text) is enough to detect a streaming delta
+  // append without recreating this string on every keystroke-sized delta.
+  const lastPart = state.parts[state.parts.length - 1];
+  const contentSignature = `${state.status}:${state.parts.length}:${lastPart?.text.length ?? 0}`;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: contentSignature deliberately drives a re-run (like reconnectNonce elsewhere in this file), not read in the body
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (shouldAutoScroll(distanceFromBottom, AUTO_SCROLL_THRESHOLD_PX)) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [contentSignature]);
+
   const submitAnswer = useCallback(
     async (question: PendingQuestionView, label: string) => {
       if (!client || !directory) return;
@@ -210,7 +276,7 @@ export function TranscriptPanel(
         overflow: "auto",
       }}
     >
-      {renderBody(state, submitAnswer)}
+      {renderBody(state, submitAnswer, scrollRef)}
     </div>
   );
 }
@@ -218,6 +284,7 @@ export function TranscriptPanel(
 function renderBody(
   state: TranscriptState,
   submitAnswer: (question: PendingQuestionView, label: string) => void,
+  scrollRef: React.RefObject<HTMLDivElement | null>,
 ) {
   if (state.status === "loading") {
     return <StatusMessage tone="muted">Loading transcript…</StatusMessage>;
@@ -249,6 +316,7 @@ function renderBody(
         </div>
       )}
       <div
+        ref={scrollRef}
         style={{
           flex: 1,
           overflow: "auto",

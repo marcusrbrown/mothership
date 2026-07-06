@@ -23,6 +23,13 @@ export interface RosterPanelParams {
   store?: SessionStore;
   /** Fired when the operator selects a project row. No-op wiring point for later units. */
   onSelectProject?: (name: string) => void;
+  /** Issue 3 fix: expanded-path directory of the project currently
+   * active (viewed via a session selection, or just dispatched to) —
+   * DockviewShell's single `activeSession` source of truth. Drives the
+   * cyan `--color-accent` active-row highlight, matching the
+   * sessions-view active-row treatment (`SessionsPanel.tsx`'s
+   * `activeSessionId`). Absent → no row highlighted. */
+  activeDirectory?: string;
 }
 
 /** Maps pending-question sessionIDs to project names via the sessions'
@@ -59,7 +66,7 @@ function projectsNeedingAttention(
 }
 
 export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
-  const { context, store } = props.params;
+  const { context, store, activeDirectory } = props.params;
   const [state, setState] = useState<RosterViewState>({ status: "loading" });
   // `store.subscribe` fires on every SSE event on a busy
   // workspace, so `refresh` runs far more often than "the operator did
@@ -93,6 +100,7 @@ export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
           result.ok
             ? projectsNeedingAttention(store, result.projects)
             : undefined,
+          activeDirectory,
         ),
       );
     } catch (err) {
@@ -107,7 +115,12 @@ export function RosterPanel(props: IDockviewPanelProps<RosterPanelParams>) {
         });
       }
     }
-  }, [context, store]);
+    // `activeDirectory` in deps (issue 3 fix): a highlight change alone
+    // (no new snapshot data) still needs `refresh` to re-run
+    // `toRosterViewState` with the new active directory — DockviewShell
+    // updates this param via `updateParameters` on select/dispatch, which
+    // doesn't itself trigger a store notify.
+  }, [context, store, activeDirectory]);
 
   useEffect(() => {
     void refresh();
@@ -177,8 +190,12 @@ function RosterRow({
 }) {
   const busy = row.kind === "ok" && row.busy;
   const needsAttention = row.kind === "ok" && row.needsAttention;
-  const borderColor =
-    row.kind === "missing-path"
+  // Issue 3 fix: active takes priority over missing-path/status-error/
+  // needs-attention borders, matching SessionsPanel's `selected` treatment
+  // (cyan accent + glow wins over the magenta needs-attention marker).
+  const borderColor = row.active
+    ? "var(--color-accent)"
+    : row.kind === "missing-path"
       ? "var(--color-highlight)"
       : row.kind === "status-error"
         ? "var(--color-error)"
@@ -204,6 +221,7 @@ function RosterRow({
         marginBottom: "var(--space-1)",
         borderRadius: "var(--radius-sm)",
         border: `1px solid ${borderColor}`,
+        boxShadow: row.active ? "0 0 6px var(--color-accent)" : "none",
         background: "var(--color-surface-raised)",
         cursor: onSelect ? "pointer" : "default",
       }}
