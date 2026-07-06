@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::supervisor_common::{should_restart, window_expired};
+use crate::supervisor_common::{resolve_spawn_race, should_respawn, should_restart, window_expired, RaceWinner};
 
 const SERVER_HOST: &str = "127.0.0.1";
 const SERVER_PORT: u16 = 4096;
@@ -68,6 +68,7 @@ struct Inner {
     window_start: Instant,
     workspace_dir: Option<String>,
     state: ServerState,
+    shutting_down: bool,
 }
 
 impl Default for Inner {
@@ -83,6 +84,7 @@ impl Default for Inner {
                 adopted: false,
                 reason: None,
             },
+            shutting_down: false,
         }
     }
 }
@@ -194,7 +196,26 @@ pub fn ensure_server(
     match spawn_child(dir.as_deref()) {
         Ok(child) => {
             if wait_for_probe(SPAWN_PROBE_TIMEOUT) {
+                let mut child = child;
                 let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+                // RE-VALIDATE-AFTER-REACQUIRE: another concurrent
+                // `ensure_server` call may have probed-missed and spawned
+                // its own child while we were unlocked in `wait_for_probe`.
+                // Deterministic winner: whichever child got registered
+                // first keeps running; this (later) caller's freshly
+                // spawned child is killed instead of orphaned.
+                let race_winner = resolve_spawn_race(
+                    inner.child.is_some() && inner.mode == Mode::Owned,
+                );
+                if race_winner == RaceWinner::Existing {
+                    drop(inner);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+                    let out = inner.state.clone();
+                    drop(inner);
+                    return out;
+                }
                 inner.mode = Mode::Owned;
                 inner.child = Some(child);
                 inner.restart_count = 0;
@@ -263,7 +284,7 @@ fn spawn_monitor(app: AppHandle) {
         let state = app.state::<ServerSupervisor>();
         let exited = {
             let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
-            if inner.mode != Mode::Owned {
+            if inner.shutting_down || inner.mode != Mode::Owned {
                 return;
             }
             match inner.child.as_mut() {
@@ -277,13 +298,16 @@ fn spawn_monitor(app: AppHandle) {
 
         let (restart_allowed, dir) = {
             let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+            if inner.shutting_down {
+                return;
+            }
             inner.child = None;
             let now = Instant::now();
             if window_expired(inner.window_start, now, RESTART_WINDOW) {
                 inner.restart_count = 0;
                 inner.window_start = now;
             }
-            let allowed = should_restart(inner.restart_count, MAX_RESTARTS);
+            let allowed = should_respawn(inner.shutting_down, should_restart(inner.restart_count, MAX_RESTARTS));
             if allowed {
                 inner.restart_count += 1;
                 inner.state = ServerState {
@@ -313,7 +337,7 @@ fn spawn_monitor(app: AppHandle) {
         match spawn_child(dir.as_deref()) {
             Ok(child) if wait_for_probe(SPAWN_PROBE_TIMEOUT) => {
                 let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
-                if inner.mode != Mode::Owned {
+                if inner.shutting_down || inner.mode != Mode::Owned {
                     // Shut down or otherwise superseded while we were
                     // restarting — don't resurrect state, just reap.
                     let mut child = child;
@@ -368,6 +392,7 @@ fn spawn_monitor(app: AppHandle) {
 /// alongside `pty::kill_all`.
 pub fn shutdown(state: &ServerSupervisor) {
     let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+    inner.shutting_down = true;
     inner.mode = Mode::ShuttingDown;
     if let Some(mut child) = inner.child.take() {
         let _ = child.kill();

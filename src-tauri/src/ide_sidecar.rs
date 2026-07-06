@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
-use crate::supervisor_common::{should_restart, window_expired};
+use crate::supervisor_common::{resolve_spawn_race, should_restart, window_expired, RaceWinner};
 
 const SPAWN_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_POLL: Duration = Duration::from_millis(500);
@@ -319,10 +319,24 @@ pub fn ide_bridge_info(
     let info = IdeBridgeInfo { port, token: token.clone() };
 
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    write_rendezvous_file(&app_data_dir, &info).map_err(|e| e.to_string())?;
 
+    let mut child = child;
     {
+        // RE-VALIDATE-AFTER-REACQUIRE: another concurrent `ide_bridge_info`
+        // call may have won this same race while we were unlocked spawning
+        // and awaiting the port. Deterministic winner: whichever sidecar
+        // got registered first keeps running; kill our loser instead of
+        // orphaning it.
         let mut inner = state.0.lock().unwrap_or_else(|p| p.into_inner());
+        let race_winner = resolve_spawn_race(inner.info.is_some() && inner.owned);
+        if race_winner == RaceWinner::Existing {
+            let existing = inner.info.clone();
+            drop(inner);
+            let _ = child.kill();
+            let _ = child.wait();
+            return existing.ok_or_else(|| "ide sidecar race lost but no existing info".to_string());
+        }
+        write_rendezvous_file(&app_data_dir, &info).map_err(|e| e.to_string())?;
         inner.child = Some(child);
         inner.token = token;
         inner.info = Some(info.clone());
