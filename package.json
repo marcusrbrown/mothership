@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "bun --bun run tauri dev",
+    "dev": "bun --bun run tauri dev --config src-tauri/tauri.dev.conf.json",
     "build": "bun run sidecar:build && bun --bun run tauri build --config src-tauri/tauri.release.conf.json",
     "sidecar:build": "mkdir -p src-tauri/binaries && bun build --compile --target=bun-darwin-arm64 sidecar/ide-server/index.ts --outfile src-tauri/binaries/ide-server-aarch64-apple-darwin && bun build --compile --target=bun-darwin-x64 sidecar/ide-server/index.ts --outfile src-tauri/binaries/ide-server-x86_64-apple-darwin",
     "ui:dev": "vite",
