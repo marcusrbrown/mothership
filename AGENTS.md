@@ -12,6 +12,7 @@ Multimodal agentic IDE: Tauri v2 desktop app rendering a workspace of OpenCode a
 - **Skill panels are sandboxed:** MCP Apps content renders only in sandboxed iframes over postMessage JSON-RPC; no skill-provided code in the main webview context.
 - **Design for deletion:** panels are self-contained; a panel type should be removable in one commit.
 - **Tokens-only styling:** components style exclusively from `src/styles/tokens.css` (seeded from `design/tokens.css`) — no ad-hoc hex, no inline color literals. `PRODUCT.md` and `DESIGN.md` are the design context; the Impeccable skill (`.agents/skills/impeccable/`, `/impeccable <command>`) enforces it and CI's design-check gate (`npx impeccable@3.2.0 detect src`) must stay green. Intentional brand exceptions get scoped entries in `.impeccable/config.json`, never rule-wide disables.
+- **Release secrets never reach PR/agent-triggered workflows:** Apple signing/notarization credentials and the Tauri updater private key live only in the GitHub Actions `release` environment (required reviewers, no `pull_request`/`pull_request_target`/`workflow_run`/`workflow_call` triggers). Runbook, key custody, rollback, and checklist docs live under `docs/release/`; see `docs/release/v0-1-release-runbook.md` and `docs/release/signing-key-custody.md`.
 
 ## Layout (target)
 

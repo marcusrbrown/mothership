@@ -1,0 +1,30 @@
+# Release-critical paths require owner review. Anyone can propose changes;
+# only the listed owner can approve merges that touch the release trust
+# boundary (signing/notarization workflow, Tauri release config,
+# entitlements, and the repo-settings/release-policy scripts that gate
+# secrets access).
+
+# Release workflow and its supporting CI/version workflows.
+/.github/workflows/release.yml   @marcusrbrown
+/.github/workflows/version.yml   @marcusrbrown
+/.github/workflows/ci.yaml       @marcusrbrown
+/.github/CODEOWNERS              @marcusrbrown
+
+# Release-critical repo settings automation.
+/.github/rulesets/                @marcusrbrown
+/scripts/release-policy.ts        @marcusrbrown
+/scripts/release-policy.test.ts   @marcusrbrown
+/scripts/verify-release-settings.ts       @marcusrbrown
+/scripts/verify-release-settings.test.ts  @marcusrbrown
+/scripts/apply-release-settings.ts        @marcusrbrown
+/scripts/sync-version.ts          @marcusrbrown
+/scripts/sync-version.test.ts     @marcusrbrown
+
+# Tauri release/signing configuration and entitlements.
+/src-tauri/tauri.conf.json           @marcusrbrown
+/src-tauri/tauri.release.conf.json   @marcusrbrown
+/src-tauri/tauri.dev.conf.json        @marcusrbrown
+/src-tauri/Entitlements.plist         @marcusrbrown
+/src-tauri/sidecar-Entitlements.plist @marcusrbrown
+/src-tauri/entitlements.allowlist.md  @marcusrbrown
+/src-tauri/capabilities/               @marcusrbrown

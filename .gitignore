@@ -5,6 +5,7 @@ target/
 .DS_Store
 .context/
 .cortexkit/
+.secrets/
 
 # Editor
 .vscode/*
@@ -14,3 +15,6 @@ target/
 # Build artifacts
 dist-ssr/
 *.local
+
+# Compiled sidecar binaries (produced by `bun run sidecar:build`)
+src-tauri/binaries/

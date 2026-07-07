@@ -1,0 +1,41 @@
+{
+  "$comment": "Source of truth for the v0.1 release tag ruleset. Applied by scripts/apply-release-settings.ts and checked by scripts/verify-release-settings.ts. Edit this file, not the GitHub UI — the UI can drift silently.",
+  "name": "v0-1-release-tags",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/v*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "update",
+      "parameters": {
+        "update_allows_fetch_and_merge": false
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "required_status_checks": [
+          { "context": "Design Check" },
+          { "context": "typecheck" },
+          { "context": "lint" },
+          { "context": "test" },
+          { "context": "Release Config Smoke" },
+          { "context": "Check Workflows" }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,800 @@
+---
+name: Release
+
+# Builds, signs, notarizes, and publishes macOS release artifacts. This is
+# the ONLY workflow that can access Apple signing credentials or the Tauri
+# updater private key. Every job is scoped to the minimum permissions its
+# responsibility needs; secrets never reach a job until the "release"
+# GitHub Actions environment (required reviewers configured) approves it.
+#
+# Trigger surface is intentionally narrow: a protected version tag push
+# (refs/tags/vX.Y.Z) or an explicit maintainer workflow_dispatch. No
+# pull_request, pull_request_target, workflow_run, or workflow_call trigger
+# exists here — see scripts/release-policy.ts for the pure eligibility
+# shape check every run repeats as its first job, independent of what
+# trigger config below claims to restrict.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (vX.Y.Z or X.Y.Z). Required for manual dispatch — never derived from the branch ref."
+        required: true
+        type: string
+
+concurrency:
+  # Serial: only one release run proceeds at a time, repo-wide. A second
+  # concurrent release attempt waits rather than racing signing/publish.
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Gate 1: pure event/ref/tag shape check. No secrets, no environment.
+  # Runs on every trigger, including ones that will be rejected, so the
+  # rejection itself is visible in workflow history without ever touching
+  # a secrets-bearing job.
+  # ---------------------------------------------------------------------
+  policy-guard:
+    name: Trigger & Ref Guard
+    if: github.repository == 'marcusrbrown/mothership'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.resolve-sha.outputs.sha }}
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: 🔒 Evaluate release eligibility
+        run: |
+          bun scripts/release-policy.ts \
+            --event "${{ github.event_name }}" \
+            --ref "${{ github.ref }}" \
+            --repo "${{ github.repository }}" \
+            --event-repo "${{ github.event.repository.full_name }}"
+
+      - name: 📌 Resolve version tag
+        id: version
+        # Never trust github.ref_name for the release tag on dispatch: it
+        # is whatever branch/ref the maintainer happened to run the
+        # workflow from (typically "main"), not a version. The only
+        # sources of truth for the release tag are (a) an actual tag push,
+        # or (b) the required workflow_dispatch `version` input.
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          event="${{ github.event_name }}"
+          if [[ "$event" == "push" ]]; then
+            ref="${{ github.ref }}"
+            if [[ "$ref" != refs/tags/v* ]]; then
+              echo "❌ push event without a vX.Y.Z tag ref: $ref" >&2
+              exit 1
+            fi
+            tag="${ref#refs/tags/}"
+          elif [[ "$event" == "workflow_dispatch" ]]; then
+            input="$DISPATCH_VERSION"
+            if [[ -z "$input" ]]; then
+              echo "❌ workflow_dispatch requires a non-empty version input" >&2
+              exit 1
+            fi
+            if [[ "$input" == v* ]]; then
+              tag="$input"
+            else
+              tag="v$input"
+            fi
+          else
+            echo "❌ Unsupported event for version resolution: $event" >&2
+            exit 1
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "❌ Resolved tag \"$tag\" is not a valid vX.Y.Z version tag" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: 🔗 Resolve tag SHA
+        id: resolve-sha
+        # For a tag push, github.sha already IS the tag's commit — no
+        # ambiguity. For workflow_dispatch, github.sha is whatever branch
+        # ref the maintainer ran the workflow from (typically "main"),
+        # which is NOT necessarily the commit the resolved tag points at.
+        # Resolve refs/tags/<tag> explicitly via the GitHub API so every
+        # downstream job (required-check preflight, build, sign, publish,
+        # promote) operates on the exact tagged commit, never on
+        # whatever ref the workflow happened to be dispatched from.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          event="${{ github.event_name }}"
+          tag="${{ steps.version.outputs.tag }}"
+          repo="${{ github.repository }}"
+
+          if [[ "$event" == "push" ]]; then
+            sha="${{ github.sha }}"
+          else
+            ref_json=$(gh api "repos/${repo}/git/refs/tags/${tag}" 2>&1) || {
+              echo "❌ Tag \"$tag\" does not exist on ${repo}: $ref_json" >&2
+              echo "Refusing to build under a dispatch-supplied version that has no corresponding tag." >&2
+              exit 1
+            }
+            object_type=$(echo "$ref_json" | jq -r '.object.type')
+            object_sha=$(echo "$ref_json" | jq -r '.object.sha')
+
+            if [[ "$object_type" == "tag" ]]; then
+              # Annotated tag: dereference to the commit it points at.
+              tag_json=$(gh api "repos/${repo}/git/tags/${object_sha}")
+              sha=$(echo "$tag_json" | jq -r '.object.sha')
+            else
+              sha="$object_sha"
+            fi
+          fi
+
+          if [[ -z "$sha" || "$sha" == "null" ]]; then
+            echo "❌ Could not resolve a commit SHA for tag \"$tag\"." >&2
+            exit 1
+          fi
+
+          echo "✅ Resolved tag \"$tag\" to commit $sha."
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # Gate 2: pre-secrets required-check preflight. Verifies the exact tag
+  # SHA has all required CI contexts passing, and that release-critical
+  # repo settings (ruleset, protected environment) are actually configured
+  # — not just assumed. No secrets used; only a read-scoped GITHUB_TOKEN
+  # for the GitHub API calls inside verify-release-settings.ts.
+  # ---------------------------------------------------------------------
+  required-check-preflight:
+    name: Required-Check & Settings Preflight
+    needs: [policy-guard]
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.policy-guard.outputs.sha }}
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: 📦 Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: 🔎 Verify release-critical repo settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/verify-release-settings.ts --repo "${{ github.repository }}"
+
+      - name: ✅ Required checks for tag SHA
+        # Uses the SHA resolved by policy-guard (refs/tags/<tag>), not
+        # github.sha: on workflow_dispatch, github.sha is whatever branch
+        # ref the workflow was run from, which is never the tagged commit
+        # whose CI runs we actually need to verify.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="${{ needs.policy-guard.outputs.sha }}"
+          repo="${{ github.repository }}"
+          echo "Checking required CI check runs for $sha..."
+
+          # Required-check preflight uses the GitHub Checks API (check
+          # runs), not the legacy combined commit status endpoint: our CI
+          # contexts (typecheck, lint, test, Design Check, Check Workflows,
+          # Release Config Smoke) are all reported as check runs, and the
+          # combined status endpoint silently ignores check-run-only
+          # results, which would make this preflight pass closed on checks
+          # it never actually inspected.
+          required_contexts=(
+            "typecheck"
+            "lint"
+            "test"
+            "Design Check"
+            "Check Workflows"
+            "Release Config Smoke"
+          )
+
+          check_runs_json=$(gh api "repos/${repo}/commits/${sha}/check-runs" --paginate --jq '.check_runs')
+
+          fail=0
+          for context in "${required_contexts[@]}"; do
+            matches=$(echo "$check_runs_json" | jq --arg name "$context" '[.[] | select(.name == $name)]')
+            count=$(echo "$matches" | jq 'length')
+            if [ "$count" -eq 0 ]; then
+              echo "❌ No check run found for required context \"$context\" on $sha."
+              fail=1
+              continue
+            fi
+
+            # If a context reports more than once (reruns), the most
+            # recent completed run governs.
+            latest=$(echo "$matches" | jq 'sort_by(.started_at) | last')
+            status=$(echo "$latest" | jq -r '.status')
+            conclusion=$(echo "$latest" | jq -r '.conclusion')
+
+            if [ "$status" != "completed" ]; then
+              echo "❌ Required check \"$context\" is not completed (status=$status) on $sha."
+              fail=1
+              continue
+            fi
+
+            case "$conclusion" in
+              success | skipped | neutral)
+                echo "✅ Required check \"$context\" is $conclusion."
+                ;;
+              *)
+                echo "❌ Required check \"$context\" concluded \"$conclusion\", not success/skipped/neutral."
+                fail=1
+                ;;
+            esac
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "Refusing to proceed to signing: one or more required checks failed closed."
+            exit 1
+          fi
+
+          echo "✅ All required checks are successful/skipped/neutral for $sha."
+
+  # ---------------------------------------------------------------------
+  # Build: no secrets. Compiles the sidecar, builds the unsigned app
+  # bundle, and uploads artifacts for the signing job to consume.
+  # ---------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [policy-guard, required-check-preflight]
+    permissions:
+      contents: read
+    runs-on: macos-14
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            sidecar_script: "sidecar:build:arm64"
+          - target: x86_64-apple-darwin
+            arch: x64
+            sidecar_script: "sidecar:build:x64"
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.policy-guard.outputs.sha }}
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: 🦀 Setup Rust (${{ matrix.target }})
+        # dtolnay/rust-toolchain has no version tags; pinned to a specific
+        # master commit (their only stable reference point) rather than a
+        # floating branch ref.
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 📦 Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: 📌 Version sync check
+        run: bun run version:check
+
+      - name: 🚫 Guard against a bogus "main" tag
+        # A resolved tag of "main" (or anything not shaped like vX.Y.Z)
+        # would mean policy-guard's version resolution failed open or a
+        # caller bypassed it; refuse to build/sign/publish artifacts under
+        # that condition rather than silently shipping something tagged
+        # off the mainline branch name.
+        run: |
+          tag="${{ needs.policy-guard.outputs.tag }}"
+          if [[ -z "$tag" || "$tag" == "main" || ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "❌ Refusing to build: resolved tag \"$tag\" is not a valid version tag." >&2
+            exit 1
+          fi
+          echo "✅ Building for resolved tag \"$tag\"."
+
+      - name: 🧱 Build sidecar + unsigned app bundle (${{ matrix.target }})
+        # This job has no updater signing key, so createUpdaterArtifacts is
+        # forced off here even though src-tauri/tauri.release.conf.json
+        # declares it true: Tauri's bundler fails closed ("a public key has
+        # been found, but no private key") if it tries to build updater
+        # artifacts without TAURI_SIGNING_PRIVATE_KEY in scope. The
+        # sign-and-notarize job builds the updater archive+signature
+        # itself, from the final signed/notarized/stapled .app, after the
+        # protected "release" environment gate (see Unit 7).
+        #
+        # Only the current matrix target's sidecar arch is built here
+        # (matrix.sidecar_script), not both — each lane compiles its own
+        # native arch's sidecar rather than every lane building both.
+        run: |
+          bun run ${{ matrix.sidecar_script }}
+          bun --bun run tauri build \
+            --config src-tauri/tauri.release.conf.json \
+            --config '{"bundle":{"createUpdaterArtifacts":false}}' \
+            --target ${{ matrix.target }}
+
+      - name: ⬆️ Upload unsigned build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/
+          retention-days: 3
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Sign & notarize: the ONLY job with Apple/updater secrets. Gated behind
+  # the protected "release" GitHub Actions environment (required
+  # reviewers) — the human gate this workflow exists to enforce.
+  # ---------------------------------------------------------------------
+  sign-and-notarize:
+    name: Sign & Notarize (${{ matrix.target }})
+    needs: [policy-guard, build]
+    environment: release
+    permissions:
+      contents: read
+    runs-on: macos-14
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.policy-guard.outputs.sha }}
+
+      - name: ⬇️ Download unsigned build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: unsigned/${{ matrix.target }}
+
+      - name: 🔑 Import signing certificate into ephemeral keychain
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.RELEASE_KEYCHAIN_PASSWORD }}
+        run: |
+          keychain="release-signing.keychain-db"
+          cert_path="$RUNNER_TEMP/cert.p12"
+          # Trap ensures the decoded certificate is wiped even if a later
+          # command in this step fails (e.g. security import rejecting a
+          # bad password) — it must never linger on the runner's disk.
+          trap 'rm -f "$cert_path"' EXIT
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$cert_path"
+          security import "$cert_path" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          echo "MOTHERSHIP_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: ✍️ Sign sidecar and app bundle
+        # No --deep anywhere in the signing calls: --deep on a bundle
+        # signs nested code with whatever ad-hoc/incidental identity it
+        # finds recursively, which can silently skip or mis-sign the
+        # sidecar binary. Instead the sidecar is signed explicitly first,
+        # then the app bundle is signed explicitly (its own code plus the
+        # already-signed sidecar nested inside), and --deep is used only
+        # for verification, where it means "recursively check every nested
+        # signature," which is the correct semantics for a verify step.
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          bundle="unsigned/${{ matrix.target }}/macos/mothership.app"
+          codesign --force --options runtime --timestamp \
+            --entitlements src-tauri/sidecar-Entitlements.plist \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$bundle/Contents/MacOS/ide-server"
+          codesign --force --options runtime --timestamp \
+            --entitlements src-tauri/Entitlements.plist \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "$bundle"
+          codesign --verify --deep --strict --verbose=2 "$bundle"
+
+      - name: 📤 Notarize and staple
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          zip_path="$RUNNER_TEMP/mothership-notarize.zip"
+          # Trap covers both the notarization API key and the transient
+          # submission zip: if notarytool fails/times out, neither should
+          # survive past this step.
+          trap 'rm -f "$key_path" "$zip_path"' EXIT
+
+          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$key_path"
+          bundle="unsigned/${{ matrix.target }}/macos/mothership.app"
+          ditto -c -k --keepParent "$bundle" "$zip_path"
+
+          xcrun notarytool submit "$zip_path" \
+            --key "$key_path" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+
+          xcrun stapler staple "$bundle"
+
+      - name: 📦 Package DMG (${{ matrix.target }})
+        run: |
+          bundle="unsigned/${{ matrix.target }}/macos/mothership.app"
+          out="signed/${{ matrix.target }}"
+          mkdir -p "$out"
+          cp -R "$bundle" "$out/"
+          # DMG creation intentionally uses the existing tauri-built .dmg
+          # scaffold when present; otherwise create one from the stapled app.
+          hdiutil create -volname "Mothership" -srcfolder "$bundle" \
+            -ov -format UDZO "$out/mothership-${{ matrix.target }}.dmg"
+
+      - name: 📦 Create updater archive (${{ matrix.target }})
+        # Built from the final signed, notarized, stapled .app — never
+        # from the unsigned build job's bundle — so the updater archive
+        # and its signature describe exactly what users install.
+        run: |
+          out="signed/${{ matrix.target }}"
+          archive="$out/mothership-${{ matrix.target }}.app.tar.gz"
+          # Updater artifacts are .tar.gz per Tauri v2 macOS updater format;
+          # tar directly, no intermediate zip.
+          tar -czf "$archive" -C "unsigned/${{ matrix.target }}/macos" mothership.app
+
+      - name: ✍️ Sign updater archive (${{ matrix.target }})
+        # Only the updater private key touches this step. It never enters
+        # the unsigned build job (see Unit 6/7 boundary notes above) and
+        # is scoped to this environment-gated job like the Apple secrets.
+        # The key/password are passed via env vars consumed by `tauri
+        # signer sign`'s TAURI_SIGNING_PRIVATE_KEY[_PASSWORD] support, not
+        # as -k/-p argv — process argv (and `ps`) is readable by any other
+        # process on the runner, so putting secrets there is a needless
+        # local-exfiltration surface.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          archive="signed/${{ matrix.target }}/mothership-${{ matrix.target }}.app.tar.gz"
+          bun --bun run tauri signer sign "$archive"
+          test -f "$archive.sig"
+
+      - name: 🧹 Clean up ephemeral keychain
+        if: always()
+        run: |
+          security delete-keychain "$MOTHERSHIP_RELEASE_KEYCHAIN" 2>/dev/null || true
+
+      - name: ⬆️ Upload signed artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-${{ matrix.target }}
+          path: signed/${{ matrix.target }}/
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Attest: OIDC-based build provenance. Least-privilege id-token; no
+  # signing/updater secrets.
+  # ---------------------------------------------------------------------
+  attest:
+    name: Attest Provenance (${{ matrix.target }})
+    needs: [sign-and-notarize]
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - name: ⬇️ Download signed artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-${{ matrix.target }}
+          path: signed/${{ matrix.target }}
+
+      - name: 📜 Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            signed/${{ matrix.target }}/*.dmg
+            signed/${{ matrix.target }}/*.app.tar.gz
+            signed/${{ matrix.target }}/*.app.tar.gz.sig
+
+  # ---------------------------------------------------------------------
+  # Publish: release-write permissions only. Creates a draft GitHub
+  # release with signed artifacts. Publishing (removing draft status) is
+  # a separate maintainer action per the runbook — this workflow never
+  # auto-publishes.
+  # ---------------------------------------------------------------------
+  publish-draft:
+    name: Create Draft Release
+    needs: [policy-guard, attest]
+    environment: release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.policy-guard.outputs.sha }}
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: 📦 Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: ⬇️ Download signed artifact (aarch64-apple-darwin)
+        # Explicit per-target downloads, not a pattern-matched multi-download:
+        # actions/download-artifact places pattern-matched artifacts into a
+        # subdirectory named after the *artifact* (signed-aarch64-apple-darwin/),
+        # not the target (aarch64-apple-darwin/) the rest of this job expects.
+        # Downloading each artifact by exact name into an explicit path keeps
+        # the on-disk layout matching what manifest generation below reads.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-aarch64-apple-darwin
+          path: signed/aarch64-apple-darwin
+
+      - name: ⬇️ Download signed artifact (x86_64-apple-darwin)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-x86_64-apple-darwin
+          path: signed/x86_64-apple-darwin
+
+      - name: 🧾 Generate checksums
+        # Bound to provenance: SHA256SUMS is generated only from the
+        # already-attested signed artifacts (dmg/updater archive/sig), and
+        # its own digest is recorded below for the promotion step to
+        # re-verify immediately before publish.
+        run: |
+          cd signed
+          find . -type f \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' \) \
+            -exec shasum -a 256 {} \; > SHA256SUMS
+          cat SHA256SUMS
+          shasum -a 256 SHA256SUMS > SHA256SUMS.digest
+          cat SHA256SUMS.digest
+
+      - name: 📄 Generate candidate updater manifest
+        # Named latest.json.candidate (not latest.json) so it never enters
+        # GitHub's /releases/latest/download/ feed while this release
+        # stays a draft. The runbook's manual draft→publish promotion
+        # (Unit 8) is the only atomic step that can make this the stable
+        # feed manifest.
+        run: |
+          shopt -s nullglob
+          arm64_archives=(signed/aarch64-apple-darwin/*.app.tar.gz)
+          x64_archives=(signed/x86_64-apple-darwin/*.app.tar.gz)
+          arm64_sigs=(signed/aarch64-apple-darwin/*.app.tar.gz.sig)
+          x64_sigs=(signed/x86_64-apple-darwin/*.app.tar.gz.sig)
+
+          if [ "${#arm64_archives[@]}" -ne 1 ] || [ "${#arm64_sigs[@]}" -ne 1 ]; then
+            echo "❌ Expected exactly one aarch64-apple-darwin .app.tar.gz + .sig, found ${#arm64_archives[@]} archive(s) and ${#arm64_sigs[@]} sig(s)." >&2
+            exit 1
+          fi
+          if [ "${#x64_archives[@]}" -ne 1 ] || [ "${#x64_sigs[@]}" -ne 1 ]; then
+            echo "❌ Expected exactly one x86_64-apple-darwin .app.tar.gz + .sig, found ${#x64_archives[@]} archive(s) and ${#x64_sigs[@]} sig(s)." >&2
+            exit 1
+          fi
+
+          arm64_archive=$(basename "${arm64_archives[0]}")
+          x64_archive=$(basename "${x64_archives[0]}")
+          arm64_sig=$(cat "${arm64_sigs[0]}")
+          x64_sig=$(cat "${x64_sigs[0]}")
+          version="${{ needs.policy-guard.outputs.version }}"
+          repo="${{ github.repository }}"
+          tag="${{ needs.policy-guard.outputs.tag }}"
+          cat > signed/latest.json.candidate <<JSON
+          {
+            "version": "${version}",
+            "notes": "See the GitHub release notes.",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${arm64_sig}",
+                "url": "https://github.com/${repo}/releases/download/${tag}/${arm64_archive}"
+              },
+              "darwin-x86_64": {
+                "signature": "${x64_sig}",
+                "url": "https://github.com/${repo}/releases/download/${tag}/${x64_archive}"
+              }
+            }
+          }
+          JSON
+          cat signed/latest.json.candidate
+
+      - name: 🔎 Look up previously published version
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=$(gh release list --repo "${{ github.repository }}" \
+            --exclude-drafts --exclude-pre-releases --limit 1 \
+            --json tagName --jq '.[0].tagName // empty' | sed 's/^v//')
+          echo "version=${previous}" >> "$GITHUB_OUTPUT"
+
+      - name: ✅ Validate candidate updater manifest
+        # Fails closed on macOS-only shape, missing signature/URL,
+        # checksum mismatch against SHA256SUMS, or a downgrade relative to
+        # the last published (non-draft, non-prerelease) release.
+        run: |
+          args=(--manifest signed/latest.json.candidate --checksums signed/SHA256SUMS)
+          if [ -n "${{ steps.previous.outputs.version }}" ]; then
+            args+=(--previous-version "${{ steps.previous.outputs.version }}")
+          fi
+          bun scripts/validate-updater-manifest.ts "${args[@]}"
+
+      - name: 🚀 Create draft GitHub Release
+        # latest.json is intentionally NOT among the uploaded files: only
+        # the candidate manifest, checksums, and their digest are
+        # attached. The stable latest.json feed asset is added by the
+        # separate promote-updater-manifest job below, gated on this
+        # job's validation having already passed.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: true
+          tag_name: ${{ needs.policy-guard.outputs.tag }}
+          name: "Mothership v${{ needs.policy-guard.outputs.version }}"
+          files: |
+            signed/**/*.dmg
+            signed/**/*.app.tar.gz
+            signed/**/*.app.tar.gz.sig
+            signed/SHA256SUMS
+            signed/SHA256SUMS.digest
+            signed/latest.json.candidate
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------
+  # Promote updater manifest: separate job, same protected environment,
+  # so a reviewer approval is required specifically for making latest.json
+  # part of the release assets. Still attached to a draft release, so it
+  # does not enter GitHub's /releases/latest feed until a maintainer
+  # manually publishes the draft per the release runbook (Unit 8).
+  # ---------------------------------------------------------------------
+  promote-updater-manifest:
+    name: Promote Updater Manifest
+    needs: [policy-guard, publish-draft]
+    environment: release
+    permissions:
+      contents: write
+      attestations: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: ⤵ Checkout Branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.policy-guard.outputs.sha }}
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: 📦 Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: ⬇️ Download candidate manifest, checksums, and signed artifacts from the draft
+        # The dmg/app.tar.gz/sig files are downloaded here (not just the
+        # manifest and checksums) so their GitHub artifact attestations
+        # (generated by the attest job) can be re-verified immediately
+        # before promotion, guarding against tampering between
+        # publish-draft and this approval-gated job.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p signed
+          gh release download "${{ needs.policy-guard.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'SHA256SUMS' --pattern 'SHA256SUMS.digest' \
+            --pattern 'latest.json.candidate' \
+            --pattern '*.dmg' --pattern '*.app.tar.gz' --pattern '*.app.tar.gz.sig' \
+            --dir signed
+
+      - name: ✅ Re-verify checksums digest before promotion
+        # Guards against the draft's SHA256SUMS having been tampered with
+        # or replaced between publish-draft and this approval-gated job.
+        run: |
+          cd signed
+          recorded=$(cut -d' ' -f1 SHA256SUMS.digest)
+          actual=$(shasum -a 256 SHA256SUMS | cut -d' ' -f1)
+          if [ "$recorded" != "$actual" ]; then
+            echo "❌ SHA256SUMS digest mismatch: recorded=$recorded actual=$actual"
+            exit 1
+          fi
+          echo "✅ SHA256SUMS digest verified: $actual"
+
+      - name: ✅ Verify GitHub artifact attestations before promotion
+        # Fails closed if any signed artifact lacks a valid build
+        # provenance attestation (generated by the attest job) tied to
+        # this repo, blocking latest.json promotion on tampered or
+        # unattested artifacts.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd signed
+          shopt -s nullglob
+          artifacts=(*.dmg *.app.tar.gz)
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo "❌ No signed artifacts found to verify attestations for"
+            exit 1
+          fi
+          for artifact in "${artifacts[@]}"; do
+            echo "🔎 Verifying attestation for ${artifact}"
+            gh attestation verify "${artifact}" --repo "${{ github.repository }}"
+          done
+
+      - name: 🔎 Look up previously published version
+        # Same lookup as publish-draft, repeated here so this job's final
+        # revalidation independently re-checks the downgrade guard rather
+        # than trusting a value computed in an earlier job.
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=$(gh release list --repo "${{ github.repository }}" \
+            --exclude-drafts --exclude-pre-releases --limit 1 \
+            --json tagName --jq '.[0].tagName // empty' | sed 's/^v//')
+          echo "version=${previous}" >> "$GITHUB_OUTPUT"
+
+      - name: ✅ Re-validate candidate manifest before promotion
+        run: |
+          cp signed/latest.json.candidate signed/latest.json
+          args=(--manifest signed/latest.json --checksums signed/SHA256SUMS)
+          if [ -n "${{ steps.previous.outputs.version }}" ]; then
+            args+=(--previous-version "${{ steps.previous.outputs.version }}")
+          fi
+          bun scripts/validate-updater-manifest.ts "${args[@]}"
+
+      - name: 🚀 Attach promoted latest.json to the draft release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: true
+          tag_name: ${{ needs.policy-guard.outputs.tag }}
+          files: signed/latest.json
+          fail_on_unmatched_files: true

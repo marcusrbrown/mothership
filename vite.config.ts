@@ -8,6 +8,11 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // Only expose `VITE_*`-prefixed env vars to client code (Vite's default,
+  // stated explicitly). Never widen this to include `TAURI_*` — those carry
+  // build/host details that must stay out of bundled client code.
+  envPrefix: "VITE_",
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
