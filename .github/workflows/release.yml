@@ -80,6 +80,8 @@ jobs:
         # workflow from (typically "main"), not a version. The only
         # sources of truth for the release tag are (a) an actual tag push,
         # or (b) the required workflow_dispatch `version` input.
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
           event="${{ github.event_name }}"
           if [[ "$event" == "push" ]]; then
@@ -90,7 +92,7 @@ jobs:
             fi
             tag="${ref#refs/tags/}"
           elif [[ "$event" == "workflow_dispatch" ]]; then
-            input="${{ inputs.version }}"
+            input="$DISPATCH_VERSION"
             if [[ -z "$input" ]]; then
               echo "❌ workflow_dispatch requires a non-empty version input" >&2
               exit 1
