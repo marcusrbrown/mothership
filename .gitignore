@@ -5,6 +5,7 @@ target/
 .DS_Store
 .context/
 .cortexkit/
+.secrets/
 
 # Editor
 .vscode/*

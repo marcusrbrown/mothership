@@ -225,6 +225,7 @@ flowchart TB
   - Add dev-only allowances for the current Vite dev origin/HMR (`localhost` or `127.0.0.1`) without leaking them into production.
   - Document a no-broadening rule: future CSP exceptions require review and scoped justification.
   - Keep `vite.config.ts` from exposing `TAURI_*` env vars to the frontend bundle.
+  - Scoped exceptions shipped in `src-tauri/tauri.conf.json` / `tauri.dev.conf.json` and their rationale: `style-src 'unsafe-inline'` is required by dockview's runtime-injected inline layout styles (no build-time nonce/hash is feasible for a third-party layout engine that mutates panel styles at runtime); `img-src data:` supports inline data-URI icons/thumbnails (panel/tab icons, avatar-style previews) rendered without a network fetch. Both are local-only allowances — neither permits remote origins — and must be revisited if dockview adds nonce support or if data-URI image usage is removed.
 
 **Patterns to follow:** AGENTS.md runtime invariants; existing `impeccable@3.2.0` CI pin discipline.
 

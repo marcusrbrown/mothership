@@ -14,9 +14,11 @@ This is the operational procedure for shipping a signed, notarized macOS release
 Run once per repo (or after any settings drift):
 
 ```sh
-bun scripts/apply-release-settings.ts --repo marcusrbrown/mothership
+bun scripts/apply-release-settings.ts --repo marcusrbrown/mothership --reviewer marcusrbrown
 bun scripts/verify-release-settings.ts --repo marcusrbrown/mothership
 ```
+
+`--reviewer` takes a **GitHub user login** (e.g. `marcusrbrown`), not a team slug — the `release` environment's required-reviewer configuration only accepts individual user or team reviewers, and this project's release trust boundary requires a specific accountable person, not a team. Pass it once per additional reviewer if more than one is ever configured.
 
 The release workflow re-runs the verifier automatically on every run; a settings regression fails the release before it reaches signing, not after.
 
@@ -24,6 +26,7 @@ The release workflow re-runs the verifier automatically on every run; a settings
 
 - The `release` GitHub Actions environment requires explicit approval from the configured reviewer(s) before the sign-and-notarize, publish-draft, and promote-updater-manifest jobs can execute. This is the human gate that keeps signing/updater secrets out of PR- and fork-triggered runs.
 - CODEOWNERS requires the same reviewer's approval on any PR that touches the release trust boundary (workflows, scripts, Tauri config, entitlements).
+- Reviewer values throughout release tooling (`--reviewer` above, CODEOWNERS entries, environment settings) are always individual GitHub user logins, never team names — the release environment models "who can approve this specific run," which this project treats as a single accountable owner (currently `@marcusrbrown`), not a rotating team.
 
 ## Release sequence
 

@@ -7,12 +7,12 @@
     "macOS": {
       "entitlements": "Entitlements.plist",
       "hardenedRuntime": true,
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "13.0"
     }
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_GENERATED_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxQTU0OEVBQkUxNkE0N0YKUldSL3BCYSs2a2lsMFdvT2ZKdkNJb1BWNE93eFZGcW9rZGpacXovOWxTelVVV2R5aDhJVERINXoK",
       "endpoints": [
         "https://github.com/marcusrbrown/mothership/releases/latest/download/latest.json"
       ]

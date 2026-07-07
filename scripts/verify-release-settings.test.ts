@@ -16,7 +16,7 @@ const declaredRuleset = {
       parameters: {
         required_status_checks: [
           { context: "Design Check" },
-          { context: "verify (typecheck)" },
+          { context: "typecheck" },
           { context: "Release Config Smoke" },
         ],
       },
@@ -54,7 +54,7 @@ describe("checkRulesetShape", () => {
           parameters: {
             required_status_checks: [
               { context: "Design Check" },
-              { context: "verify (typecheck)" },
+              { context: "typecheck" },
             ],
           },
         },
@@ -81,7 +81,7 @@ describe("checkRulesetShape", () => {
       ],
     };
     const failures = checkRulesetShape(declaredRuleset, remote);
-    expect(failures.some((f) => f.includes('"verify (typecheck)"'))).toBe(true);
+    expect(failures.some((f) => f.includes('"typecheck"'))).toBe(true);
   });
 
   test("error path: wrong target or enforcement fails", () => {

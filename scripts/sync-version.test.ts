@@ -47,6 +47,40 @@ describe("syncTauriConfVersion", () => {
       syncTauriConfVersion('{"productName": "mothership"}', "0.2.0"),
     ).toThrow(/Could not find a top-level "version" field/);
   });
+
+  test("edge case: only updates the root version, not a nested version field appearing earlier", () => {
+    const configWithNestedVersion = `{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "version": "9.9.9"
+  },
+  "version": "0.1.0",
+  "identifier": "com.marcusrbrown.mothership"
+}`;
+    const result = syncTauriConfVersion(configWithNestedVersion, "0.2.0");
+    expect(result.changed).toBe(true);
+    const parsed = JSON.parse(result.content) as {
+      version: string;
+      bundle: { version: string };
+    };
+    expect(parsed.version).toBe("0.2.0");
+    expect(parsed.bundle.version).toBe("9.9.9");
+  });
+
+  test("error path: a nested version field alone (no root version) fails clearly", () => {
+    expect(() =>
+      syncTauriConfVersion(
+        '{"bundle": {"version": "0.1.0"}, "productName": "mothership"}',
+        "0.2.0",
+      ),
+    ).toThrow(/Could not find a top-level "version" field/);
+  });
+
+  test("error path: malformed JSON fails clearly", () => {
+    expect(() => syncTauriConfVersion("{not json", "0.2.0")).toThrow(
+      /Could not parse tauri.conf.json as JSON/,
+    );
+  });
 });
 
 describe("syncCargoTomlVersion", () => {

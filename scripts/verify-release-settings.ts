@@ -63,11 +63,11 @@ function requiredStatusContexts(rules: RulesetRule[]): string[] {
   const checks = rule.parameters.required_status_checks;
   if (!Array.isArray(checks)) return [];
   return checks
-    .map((c) =>
-      typeof c === "object" && c && "context" in c
-        ? String((c as { context: unknown }).context)
-        : undefined,
-    )
+    .map((c) => {
+      if (typeof c !== "object" || !c || !("context" in c)) return undefined;
+      const context = (c as { context: unknown }).context;
+      return typeof context === "string" ? context : undefined;
+    })
     .filter((c): c is string => typeof c === "string");
 }
 
@@ -160,16 +160,25 @@ export function checkReleaseEnvironmentShape(
   return failures;
 }
 
+const GH_TIMEOUT_MS = 30_000;
+
 async function gh(
   args: string[],
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { ok: exitCode === 0, stdout, stderr };
+  const timeout = setTimeout(() => {
+    proc.kill();
+  }, GH_TIMEOUT_MS);
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { ok: exitCode === 0, stdout, stderr };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function resolveRepo(explicit: string | undefined): Promise<string> {

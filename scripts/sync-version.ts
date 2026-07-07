@@ -32,26 +32,37 @@ export function isValidSemver(version: string): boolean {
 }
 
 /**
- * Replaces the top-level `"version": "..."` field in a Tauri config's raw
- * JSON text. Operates on the raw string (not parse/stringify) so unrelated
- * formatting is left untouched.
+ * Updates the root-level `version` field in a Tauri config's JSON, without
+ * touching any nested `version` field (e.g. under `bundle` or `plugins`).
+ * Parses and re-serializes with 2-space indentation (Tauri config
+ * convention) and a trailing newline, preserving the original formatting
+ * when no change is needed.
  */
 export function syncTauriConfVersion(
   content: string,
   version: string,
 ): { content: string; changed: boolean } {
-  const pattern = /"version":\s*"([^"]*)"/;
-  const match = pattern.exec(content);
-  if (!match) {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not parse tauri.conf.json as JSON: ${cause}`);
+  }
+
+  if (typeof parsed.version !== "string") {
     throw new Error(
       'Could not find a top-level "version" field in tauri.conf.json.',
     );
   }
-  if (match[1] === version) {
+
+  if (parsed.version === version) {
     return { content, changed: false };
   }
+
+  parsed.version = version;
   return {
-    content: content.replace(pattern, `"version": "${version}"`),
+    content: `${JSON.stringify(parsed, null, 2)}\n`,
     changed: true,
   };
 }

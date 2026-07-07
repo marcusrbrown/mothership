@@ -61,14 +61,20 @@ export function isValidSemver(version: string): boolean {
   return SEMVER_PATTERN.test(version);
 }
 
-/**
- * Compares two valid semver strings, ignoring build metadata and treating
- * any prerelease identifier as older than the same release without one.
- * Returns negative if `a` < `b`, positive if `a` > `b`, zero if equal.
- */
+/** Splits a semver string (with the build-metadata suffix already
+ * stripped) into its core `x.y.z` and full prerelease string, splitting
+ * only at the FIRST hyphen so prerelease identifiers that themselves
+ * contain hyphens (e.g. "1.0.0-alpha-beta") are preserved in full rather
+ * than truncated by a naive `split('-', 2)`. */
+function splitCoreAndPrerelease(version: string): [string, string | undefined] {
+  const hyphenIndex = version.indexOf("-");
+  if (hyphenIndex === -1) return [version, undefined];
+  return [version.slice(0, hyphenIndex), version.slice(hyphenIndex + 1)];
+}
+
 export function compareSemver(a: string, b: string): number {
-  const [aCore, aPre] = a.split("+")[0]?.split("-", 2) ?? [a];
-  const [bCore, bPre] = b.split("+")[0]?.split("-", 2) ?? [b];
+  const [aCore, aPre] = splitCoreAndPrerelease(a.split("+")[0] ?? a);
+  const [bCore, bPre] = splitCoreAndPrerelease(b.split("+")[0] ?? b);
 
   const aParts = (aCore ?? "").split(".").map(Number);
   const bParts = (bCore ?? "").split(".").map(Number);
@@ -81,7 +87,43 @@ export function compareSemver(a: string, b: string): number {
   if (aPre === undefined && bPre === undefined) return 0;
   if (aPre === undefined) return 1; // release > prerelease
   if (bPre === undefined) return -1;
-  return aPre.localeCompare(bPre);
+
+  return comparePrerelease(aPre, bPre);
+}
+
+/**
+ * Compares two prerelease strings per semver 2.0.0 §11: identifiers are
+ * split on `.`, numeric identifiers compare numerically, alphanumeric
+ * identifiers compare lexically (ASCII), numeric identifiers always have
+ * lower precedence than alphanumeric ones, and a shorter identifier list
+ * has lower precedence when all preceding identifiers are equal.
+ */
+function comparePrerelease(a: string, b: string): number {
+  const aIds = a.split(".");
+  const bIds = b.split(".");
+  const len = Math.max(aIds.length, bIds.length);
+
+  for (let i = 0; i < len; i += 1) {
+    const aId = aIds[i];
+    const bId = bIds[i];
+    if (aId === undefined) return -1; // a ran out first: fewer fields
+    if (bId === undefined) return 1;
+
+    const aNum = /^\d+$/.test(aId) ? Number(aId) : undefined;
+    const bNum = /^\d+$/.test(bId) ? Number(bId) : undefined;
+
+    if (aNum !== undefined && bNum !== undefined) {
+      if (aNum !== bNum) return aNum - bNum;
+    } else if (aNum !== undefined) {
+      return -1; // numeric identifiers have lower precedence
+    } else if (bNum !== undefined) {
+      return 1;
+    } else if (aId !== bId) {
+      return aId < bId ? -1 : 1;
+    }
+  }
+
+  return 0;
 }
 
 export function isDowngrade(

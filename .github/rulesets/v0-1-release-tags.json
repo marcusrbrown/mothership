@@ -29,9 +29,9 @@
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
           { "context": "Design Check" },
-          { "context": "verify (typecheck)" },
-          { "context": "verify (lint)" },
-          { "context": "verify (test)" },
+          { "context": "typecheck" },
+          { "context": "lint" },
+          { "context": "test" },
           { "context": "Release Config Smoke" },
           { "context": "Check Workflows" }
         ]

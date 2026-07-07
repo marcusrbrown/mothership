@@ -148,6 +148,10 @@ jobs:
           with open("src-tauri/tauri.release.conf.json") as f:
               release_conf = json.load(f)
 
+          pubkey = release_conf.get("plugins", {}).get("updater", {}).get("pubkey")
+          assert pubkey and pubkey != "REPLACE_WITH_GENERATED_TAURI_UPDATER_PUBLIC_KEY", \
+              "release config must not ship the placeholder updater public key"
+
           bundle = release_conf.get("bundle", {})
           assert "ide-server" in " ".join(bundle.get("externalBin", [])), \
               "release config must declare the ide-server externalBin sidecar"

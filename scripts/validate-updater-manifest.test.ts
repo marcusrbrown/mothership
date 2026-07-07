@@ -61,6 +61,32 @@ describe("compareSemver", () => {
     expect(compareSemver("0.2.0", "0.2.0-rc.1")).toBeGreaterThan(0);
     expect(compareSemver("0.2.0-rc.1", "0.2.0")).toBeLessThan(0);
   });
+
+  test("edge case: numeric prerelease identifiers compare numerically, not lexically", () => {
+    expect(compareSemver("0.2.0-rc.2", "0.2.0-rc.10")).toBeLessThan(0);
+    expect(compareSemver("0.2.0-rc.10", "0.2.0-rc.2")).toBeGreaterThan(0);
+  });
+
+  test("edge case: numeric identifiers have lower precedence than alphanumeric", () => {
+    expect(compareSemver("0.2.0-rc.1", "0.2.0-rc.alpha")).toBeLessThan(0);
+    expect(compareSemver("0.2.0-rc.alpha", "0.2.0-rc.1")).toBeGreaterThan(0);
+  });
+
+  test("edge case: alphanumeric prerelease identifiers compare lexically", () => {
+    expect(compareSemver("0.2.0-alpha", "0.2.0-beta")).toBeLessThan(0);
+  });
+
+  test("edge case: shorter prerelease has lower precedence when equal so far", () => {
+    expect(compareSemver("0.2.0-rc", "0.2.0-rc.1")).toBeLessThan(0);
+    expect(compareSemver("0.2.0-rc.1", "0.2.0-rc")).toBeGreaterThan(0);
+  });
+
+  test("regression: prerelease identifiers containing hyphens are preserved in full, not truncated at the first hyphen", () => {
+    expect(compareSemver("1.0.0-alpha-beta", "1.0.0-alpha")).toBeGreaterThan(0);
+    expect(compareSemver("1.0.0-alpha", "1.0.0-alpha-beta")).toBeLessThan(0);
+    expect(isDowngrade("1.0.0-alpha", "1.0.0-alpha-beta")).toBe(true);
+    expect(isDowngrade("1.0.0-alpha-beta", "1.0.0-alpha")).toBe(false);
+  });
 });
 
 describe("isDowngrade", () => {
