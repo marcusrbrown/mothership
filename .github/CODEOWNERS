@@ -5,7 +5,7 @@
 # secrets access).
 
 # Release workflow and its supporting CI/version workflows.
-/.github/workflows/release.yml   @marcusrbrown
+/.github/workflows/release.yaml   @marcusrbrown
 /.github/workflows/version.yml   @marcusrbrown
 /.github/workflows/ci.yaml       @marcusrbrown
 /.github/CODEOWNERS              @marcusrbrown

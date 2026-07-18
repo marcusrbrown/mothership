@@ -7,7 +7,7 @@ This is the operational procedure for shipping a signed, notarized macOS release
 - GitHub Actions environment named `release` must exist with required reviewers configured (currently `@marcusrbrown`), and must hold the secrets listed in `docs/release/signing-key-custody.md`.
 - `.github/rulesets/v0-1-release-tags.json` protects `v*.*.*` tags: only the repository owner/admins can create or force-push them, and required status checks must be green at the tag SHA before the release workflow's required-check preflight will proceed.
 - `.github/CODEOWNERS` requires owner review on the release workflow, version workflow, CI workflow, release-critical scripts, Tauri release config, and entitlements files — no automation bypasses this.
-- Release settings are automated, not runbook-only assumptions: `scripts/apply-release-settings.ts` applies the ruleset/environment configuration, and `scripts/verify-release-settings.ts` re-verifies it as the first gated step in `.github/workflows/release.yml` before any secret-bearing job runs.
+- Release settings are automated, not runbook-only assumptions: `scripts/apply-release-settings.ts` applies the ruleset/environment configuration, and `scripts/verify-release-settings.ts` re-verifies it as the first gated step in `.github/workflows/release.yaml` before any secret-bearing job runs.
 
 ## Automated release settings
 
@@ -90,9 +90,9 @@ All nine inventory names should be listed. Only then is the environment ready fo
 
 Release builds pin the following toolchain surfaces so a release can be rebuilt and audited without "latest" drift:
 
-- **Bun:** installed via `oven-sh/setup-bun` pinned to a specific commit SHA (see `.github/workflows/release.yml`); the workflow requests `bun-version: 1.3.14`; update this line whenever the pinned Bun runtime changes.
+- **Bun:** installed via `oven-sh/setup-bun` pinned to a specific commit SHA (see `.github/workflows/release.yaml`); the workflow requests `bun-version: 1.3.14`; update this line whenever the pinned Bun runtime changes.
 - **Rust/Tauri toolchain:** installed via `dtolnay/rust-toolchain` pinned to a specific commit SHA (no version tags exist for that action, so the SHA is the pin).
-- **Third-party GitHub Actions:** every action reference in `.github/workflows/release.yml` is pinned to a full commit SHA with a version comment (e.g. `actions/checkout@<sha> # v6.0.3`), not a floating tag.
+- **Third-party GitHub Actions:** every action reference in `.github/workflows/release.yaml` is pinned to a full commit SHA with a version comment (e.g. `actions/checkout@<sha> # v6.0.3`), not a floating tag.
 - **Release scripts:** `scripts/release-policy.ts`, `scripts/verify-release-settings.ts`, `scripts/validate-updater-manifest.ts`, and `scripts/sync-version.ts` are part of the trust boundary and require CODEOWNERS review for any change.
 - **Provenance binding:** GitHub's native artifact attestations (`actions/attest-build-provenance`) bind each signed DMG/updater archive/signature to the exact workflow run, commit SHA, and pinned toolchain that produced it. `SHA256SUMS` is generated only from already-attested artifacts, and its own digest is checked immediately before the manifest promotion step to catch tampering between draft creation and promotion.
 

@@ -6,7 +6,7 @@
  * read, or doesn't match, is a blocking failure — never a warning.
  *
  * Intended to run as a preflight step before the release workflow requests
- * the protected `release` environment (see .github/workflows/release.yml).
+ * the protected `release` environment (see .github/workflows/release.yaml).
  *
  * Usage: bun scripts/verify-release-settings.ts [--repo owner/name]
  */

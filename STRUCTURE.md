@@ -82,7 +82,7 @@ Bun MCP server exposing the 8 `ide_*` tools (`open_panel`, `close_panel`, `split
 - `scripts/sync-version.ts`, `scripts/apply-release-settings.ts`, `scripts/verify-release-settings.ts`, `scripts/validate-updater-manifest.ts`, `scripts/release-policy.ts` — release pipeline tooling; see `docs/release/`.
 - `.github/workflows/ci.yaml` — typecheck, test, lint, design-check gates.
 - `.github/workflows/fro-bot.yaml` — brand-voice / positioning-copy checks (e.g. the "fleet" ban in public copy).
-- `.github/workflows/release.yml` — signed/notarized build pipeline, runs only in the `release` environment with required reviewers.
+- `.github/workflows/release.yaml` — signed/notarized build pipeline, runs only in the `release` environment with required reviewers.
 - `.github/workflows/version.yml` — version bump automation.
 
 ## See also
