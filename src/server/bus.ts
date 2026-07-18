@@ -1,20 +1,20 @@
 /**
- * Thin facade over `@fro.bot/space-bus/core`. Panels and app code import the
- * /core surface from here, never from the package directly — a single
- * audit point for the space-bus dependency and a future swap seam.
+ * Browser-safe facade over `@fro.bot/space-bus/core`. Panels and app code
+ * import the /core surface from here, never from the package directly —
+ * importing only the core subpath keeps Node-only subpaths of the
+ * package out of the browser bundle.
  *
  * Note: /core reads `globalThis.fetch` directly; `CoreOpts` carries only
  * `{context}` (a `BusContext`), no fetch injection. Tests stub
  * `globalThis.fetch` rather than passing a fetch implementation.
  *
- * `@fro.bot/space-bus@0.14.0` (plan Unit 9, KTD15) adds `messages()`,
- * `questions()`, and `answerQuestion()` — full transcript/question read and
- * explicit-answer primitives — and extends `dispatch()`/`toDispatchArgs()`
- * with an opt-in `onPendingQuestion: "blocked"` policy so a follow-up
- * dispatch against a session with a pending question can refuse the
- * mutation entirely (required by `ide_dispatch_prompt`, R2) instead of
- * v0.13.1's default implicit `"question-reply"` behavior, which existing
- * callers keep unless they opt in.
+ * `@fro.bot/space-bus@0.14.0` adds `messages()`, `questions()`, and
+ * `answerQuestion()` — full transcript/question read and explicit-answer
+ * primitives — and extends `dispatch()`/`toDispatchArgs()` with an opt-in
+ * `onPendingQuestion: "blocked"` policy so a follow-up dispatch against a
+ * session with a pending question can refuse the mutation entirely,
+ * instead of the default implicit `"question-reply"` behavior, which
+ * existing callers keep unless they opt in.
  */
 export {
   roster,

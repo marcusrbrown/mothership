@@ -133,12 +133,11 @@ Unverified/skipped: restart resilience (server was pre-running and not ours
 to kill — re-run with a disposable instance, higher priority given the `id:`
 finding); whether `?directory=` filters `/event` output (no A/B collected).
 
-## Update 2026-07-18: message limit/pagination, session lookup scoping, blocked-session dispatch (Unit 1)
+## Update 2026-07-18: message limit/pagination, session lookup scoping, blocked-session dispatch
 
 Re-verified live against two running managed-server instances
 (`v1.17.13+harness.ee55e157` and `v1.17.18+harness.4ec05a47`, both
-password-protected — see auth note below) as part of
-`docs/plans/2026-07-17-001-feat-agent-native-session-tools-plan.md` Unit 1.
+password-protected — see auth note below).
 `GET /doc` still reports 162 total paths and all endpoints this doc already
 lists as verified. New facts:
 
@@ -174,8 +173,8 @@ lists as verified. New facts:
   param appears to only steer where *mutating* requests (`POST
   .../prompt_async`, session creation) land, not where lookups search.
   Session ownership for `ide_*` tools must still be proven against
-  roster/reconciled state before use (KTD3/R7) — this endpoint alone cannot
-  be trusted to reject a session that does not belong to the caller's
+  roster/reconciled state before use — this endpoint alone cannot be
+  trusted to reject a session that does not belong to the caller's
   claimed project.
 - **space-bus v0.13.1's blocked-session dispatch behavior, pinned from
   source** (`node_modules/@fro.bot/space-bus/dist/core.js`,
@@ -188,20 +187,20 @@ lists as verified. New facts:
   "question-reply"}` and never sends the text as a new prompt. If no
   pending question is found, it falls through to a normal
   `prompt_async` follow-up (`mode: "follow-up"}`). This is the exact
-  default behavior Unit 8's pending-question-safe dispatch option must
-  preserve for existing callers while adding an opt-out that instead
-  returns a typed blocked result with **no** mutation (no reply, no
-  prompt) for `ide_dispatch_prompt`.
+  default behavior a pending-question-safe dispatch option must preserve
+  for existing callers while adding an opt-out that instead returns a
+  typed blocked result with **no** mutation (no reply, no prompt) for
+  `ide_dispatch_prompt`.
   - **Live round trip not completed in this pass.** No fixture session with
     an actually-pending question and a disposable target was available
-    within Unit 1's scope (creating one requires a real LLM turn asking a
-    real question in a throwaway session, which this pass did not spend);
-    the source excerpt above is read directly from the installed package,
-    not fabricated, but it has not been exercised end-to-end through
-    `dispatch()` itself. `spikes/0c-server-connectivity/probe.ts` Phase 6
-    supports this via `OPENCODE_PROBE_BLOCKED_SESSION_ID` +
-    `OPENCODE_PROBE_DIRECTORY` and will attempt the live call when set;
-    re-run it once such a fixture exists, before Unit 8 ships.
+    (creating one requires a real LLM turn asking a real question in a
+    throwaway session, which this pass did not spend); the source excerpt
+    above is read directly from the installed package, not fabricated,
+    but it has not been exercised end-to-end through `dispatch()` itself.
+    `spikes/0c-server-connectivity/probe.ts` Phase 6 supports this via
+    `OPENCODE_PROBE_BLOCKED_SESSION_ID` + `OPENCODE_PROBE_DIRECTORY` and
+    will attempt the live call when set; re-run it once such a fixture
+    exists.
 - **Question `requestID` vs SSE envelope id remains the same footgun as
   2026-07-04**, now confirmed by `GET /doc`'s schema: `POST
   /question/{requestID}/reply`'s path param has an explicit `^que` regex
@@ -217,7 +216,5 @@ lists as verified. New facts:
 - Plan: `docs/plans/2026-07-04-001-feat-mothership-tracer-bullet-plan.md`
   (U0.4, U1.3, Verified Server Facts)
 - Plan: `docs/plans/2026-07-17-001-feat-agent-native-session-tools-plan.md`
-  (Unit 1)
-- Fixtures: `src/server/client.test.ts` ("Unit 1 characterization
-  fixtures")
+- Fixtures: `src/server/client.test.ts` ("characterization fixtures")
 - space-bus reference client: `~/src/github.com/fro-bot/space-bus`

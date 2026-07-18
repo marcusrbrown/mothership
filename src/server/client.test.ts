@@ -202,7 +202,7 @@ describe("createOpencodeClient", () => {
     expect(result.ok).toBe(true);
   });
 
-  // --- Unit 1 characterization fixtures ---------------------------------
+  // --- characterization fixtures ------------------------------------------
   // Verified live 2026-07-18 against v1.17.13+harness.ee55e157 and
   // v1.17.18+harness.4ec05a47 (`GET /doc`, `?limit=N` message reads,
   // `GET/POST /question` round trip). See

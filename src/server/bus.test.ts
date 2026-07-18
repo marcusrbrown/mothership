@@ -157,7 +157,7 @@ describe("bus facade (space-bus /core smoke)", () => {
     expect(res.projects[0]).toMatchObject({ name: "proj-a", exists: true });
   });
 
-  // --- Unit 9: adopt released @fro.bot/space-bus@0.14.0 session API ------
+  // --- @fro.bot/space-bus@0.14.0 session API ------------------------------
 
   test("messages() calls /core with our context and returns bounded session messages", async () => {
     stubFetch((url) => {
@@ -336,9 +336,9 @@ describe("bus facade (space-bus /core smoke)", () => {
   });
 });
 
-describe("bus facade browser-safety (Unit 9)", () => {
+describe("bus facade browser-safety", () => {
   // Bundles ../server/bus.ts (this repo's single space-bus audit point) for
-  // a browser target and asserts the new 0.14.0 re-exports don't pull in
+  // a browser target and asserts the 0.14.0 re-exports don't pull in
   // any Node builtin or Node-only space-bus subpath. Mirrors space-bus's
   // own src/browser-safety.test.ts pattern: Bun's browser target silently
   // stubs `node:*` imports instead of failing, so a plugin intercept is

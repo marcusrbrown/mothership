@@ -369,8 +369,8 @@ async function probeQuestionEvents() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5: Unit 1 characterization — message ordering/pagination, session
-// lookup scoping, and space-bus v0.13.1 blocked-session dispatch behavior.
+// Phase 5: message ordering/pagination, session lookup scoping, and
+// space-bus v0.13.1 blocked-session dispatch behavior.
 //
 // Requires OPENCODE_PROBE_DIRECTORY pointing at a project directory with at
 // least one existing session (an unauthenticated/no-directory server has no
@@ -379,7 +379,7 @@ async function probeQuestionEvents() {
 // directory to avoid mutating/creating fixtures during the probe.
 // ---------------------------------------------------------------------------
 async function probeContractCharacterization() {
-  section('PHASE 5: message ordering, pagination, session-lookup scoping (Unit 1)')
+  section('PHASE 5: message ordering, pagination, session-lookup scoping')
 
   if (!PROBE_DIRECTORY) {
     console.log(
@@ -471,7 +471,7 @@ async function probeContractCharacterization() {
         '  NOTE: GET /session/:id appears to resolve globally by session id, not scoped by',
         'the `directory` query param — the param may only steer where a POST/mutation',
         'lands. Session ownership for ide_* tools must still be proven against',
-        'roster/reconciled state before use, per KTD3/R7, not inferred from this response',
+        'roster/reconciled state before use, not inferred from this response',
         'alone.',
       )
     }
@@ -511,7 +511,7 @@ async function probeContractCharacterization() {
 // call against a session with a pending question silently replies to that
 // question with the follow-up prompt text as a single-string answer
 // (`{answers: [[message]]}`), returning `{mode: "question-reply"}"` instead
-// of sending a new prompt. This is the exact behavior Unit 8's
+// of sending a new prompt. This is the exact behavior a
 // pending-question-safe dispatch option must be able to opt OUT of for
 // `ide_dispatch_prompt`, while preserving it as the v0.13.1-compatible
 // default for existing callers.
@@ -545,8 +545,8 @@ async function probeDispatchBlockedSession() {
         'question (GET /question filtered by sessionID), steerSession() replies to that',
         'question with `{answers: [[message]]}` — the follow-up prompt text becomes the',
         'ENTIRE first-option answer string, silently. It returns `{ok: true, mode:',
-        '"question-reply"}`, never sending the text as a new prompt. Unit 8 must add a',
-        'backward-compatible opt-out so `ide_dispatch_prompt` can request a typed blocked',
+        '"question-reply"}`, never sending the text as a new prompt. A backward-compatible',
+        'opt-out is needed so `ide_dispatch_prompt` can request a typed blocked',
         'result with NO mutation (no reply sent, no prompt sent) instead of this implicit',
         'reinterpretation, while existing v0.13.1 callers keep today\'s default.',
       )
@@ -562,7 +562,7 @@ async function probeDispatchBlockedSession() {
       'OPENCODE_PROBE_DIRECTORY) to a session that currently has a pending question to',
       'observe a real dispatch()-against-blocked-session call end to end. No such fixture',
       'was available in this probe run — do not treat the source excerpt above as a',
-      'substitute for a live round trip before Unit 8 ships; re-run this phase once a',
+      'substitute for a live round trip; re-run this phase once a',
       'blocked-session fixture is available.',
     )
     return
