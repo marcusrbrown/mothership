@@ -1,6 +1,6 @@
 # mothership
 
-> The craft the fleet reports back to.
+> The craft your agents report back to.
 
 Mothership is a multimodal agentic IDE — mission control for a workspace of AI coding agents. It is a **renderer for the bus**: `opencode serve` owns all agent state, [space-bus](https://github.com/fro-bot/space-bus) is the control plane, and Mothership is a thin multiplexing client that turns a workspace into an adaptive panel layout.
 
