@@ -22,6 +22,46 @@ bun scripts/verify-release-settings.ts --repo marcusrbrown/mothership
 
 The release workflow re-runs the verifier automatically on every run; a settings regression fails the release before it reaches signing, not after.
 
+## Release environment secrets
+
+All nine release secrets live only in the `release` environment (see `docs/release/signing-key-custody.md` for the authoritative inventory, custody, and rotation rules). The two updater secrets (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) are handled by the custody doc's key-generation flow. The seven Apple secrets are set from local credential material with the commands below — run once per repo, and after any Apple credential rotation.
+
+Prepare the credential material first:
+
+| Secret | Source |
+|---|---|
+| `APPLE_CERTIFICATE_P12_BASE64` + `APPLE_CERTIFICATE_PASSWORD` | Keychain Access → export the **Developer ID Application** certificate (including its private key) as a password-protected `.p12`. |
+| `APPLE_SIGNING_IDENTITY` | `security find-identity -v -p codesigning` → the full `Developer ID Application: <Name> (<Team ID>)` line. |
+| `RELEASE_KEYCHAIN_PASSWORD` | Any strong random string; it only locks/unlocks the ephemeral per-run CI keychain. |
+| `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` / `APPLE_API_KEY_BASE64` | App Store Connect → **Integrations → App Store Connect API** → create a key with the **Developer** role, and download its `.p8` once (Apple does not allow re-downloading it). |
+
+Then set the seven Apple secrets (the `--env release` scope keeps them behind the reviewer gate):
+
+```sh
+R=marcusrbrown/mothership
+
+# Developer ID Application certificate (signing)
+base64 -i DeveloperIDApplication.p12 | gh secret set APPLE_CERTIFICATE_P12_BASE64 --env release --repo $R
+gh secret set APPLE_CERTIFICATE_PASSWORD --env release --repo $R
+gh secret set APPLE_SIGNING_IDENTITY --env release --repo $R
+
+# Ephemeral CI keychain password (any strong random value)
+openssl rand -base64 24 | gh secret set RELEASE_KEYCHAIN_PASSWORD --env release --repo $R
+
+# App Store Connect API key (notarization via notarytool)
+gh secret set APPLE_API_KEY_ID --env release --repo $R
+gh secret set APPLE_API_ISSUER --env release --repo $R
+base64 -i AuthKey_XXXX.p8 | gh secret set APPLE_API_KEY_BASE64 --env release --repo $R
+```
+
+Confirm presence (not correctness — `gh` cannot read values; a real sign/notarize run is the only correctness proof):
+
+```sh
+gh secret list --env release --repo marcusrbrown/mothership
+```
+
+All nine inventory names should be listed. Only then is the environment ready for a signed release run.
+
 ## Required reviewers
 
 - The `release` GitHub Actions environment requires explicit approval from the configured reviewer(s) before the sign-and-notarize, publish-draft, and promote-updater-manifest jobs can execute. This is the human gate that keeps signing/updater secrets out of PR- and fork-triggered runs.
