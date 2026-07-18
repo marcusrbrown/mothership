@@ -21,7 +21,7 @@
     "version:check": "bun scripts/sync-version.ts --check"
   },
   "dependencies": {
-    "@fro.bot/space-bus": "0.10.0",
+    "@fro.bot/space-bus": "0.13.1",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
@@ -50,8 +50,5 @@
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
-  },
-  "patchedDependencies": {
-    "@fro.bot/space-bus@0.10.0": "patches/@fro.bot%2Fspace-bus@0.10.0.patch"
   }
 }
