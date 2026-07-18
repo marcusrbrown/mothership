@@ -1,6 +1,29 @@
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
-  extends: [
-    'github>marcusrbrown/renovate-config#5.2.4'
-  ]
+  extends: ['github>marcusrbrown/renovate-config#5.2.4'],
+  packageRules: [
+    {
+      // bfra-me/renovate-action runs with RENOVATE_BINARY_SOURCE=install, so
+      // Renovate's built-in artifact path calls `install-tool bun <ver>`
+      // before regenerating bun.lock, which fails in this environment (the
+      // "Failed to update lock file" dashboard warning). Skip the built-in
+      // bun.lock update and regenerate it via postUpgradeTasks instead —
+      // the same pattern fro-bot/space-bus uses.
+      matchManagers: ['bun', 'npm'],
+      skipArtifactsUpdate: true,
+    },
+    {
+      // The design gate runs `npx --yes impeccable@3.2.0` in ci.yaml and
+      // fro-bot.yaml. A customManager in the shared preset chain misparses
+      // the npx invocation and treats `--yes impeccable` as an npm package,
+      // which 404s. Disable the phantom dependency so it stops polluting the
+      // dependency dashboard and lookup results.
+      matchDepNames: ['--yes impeccable'],
+      enabled: false,
+    },
+  ],
+  postUpgradeTasks: {
+    commands: ['bun install'],
+    executionMode: 'branch',
+  },
 }
