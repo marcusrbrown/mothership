@@ -234,7 +234,7 @@ export function validatePlatforms(
 /**
  * Validates every platform entry's artifact URL resolves to a checksum
  * recorded in `SHA256SUMS` (generated from the signed artifacts — see
- * .github/workflows/release.yml). Missing or malformed checksum entries
+ * .github/workflows/release.yaml). Missing or malformed checksum entries
  * fail closed rather than being treated as "not yet verified."
  */
 export function validateChecksums(

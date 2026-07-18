@@ -2,7 +2,7 @@
 name: Version
 
 # Opens/updates the Changesets "Version Packages" PR. This workflow never
-# builds, signs, or publishes release artifacts — that's release.yml,
+# builds, signs, or publishes release artifacts — that's release.yaml,
 # triggered separately after a version PR merges and a maintainer creates
 # a protected version tag. Keeping these workflows apart means version PR
 # review never sits in the same trust boundary as release secrets.

@@ -4,7 +4,7 @@ Mothership's v0.1 release trust boundary depends on two categories of secret mat
 
 ## Secret inventory
 
-All secrets below live only in the GitHub Actions `release` environment (repo → Settings → Environments → `release`), which requires reviewer approval before any job that references them can run. No secret in this table is available to `pull_request`, `pull_request_target`, `workflow_run`, or `workflow_call` triggers, and none is available outside `.github/workflows/release.yml`.
+All secrets below live only in the GitHub Actions `release` environment (repo → Settings → Environments → `release`), which requires reviewer approval before any job that references them can run. No secret in this table is available to `pull_request`, `pull_request_target`, `workflow_run`, or `workflow_call` triggers, and none is available outside `.github/workflows/release.yaml`.
 
 | Secret | Category | Purpose |
 |---|---|---|
@@ -79,4 +79,4 @@ Use this path if the old key cannot sign a transition release (fully lost, or th
 ## Roles
 
 - The listed CODEOWNERS release owner (`@marcusrbrown`) is the only reviewer configured on the `release` GitHub Actions environment and is responsible for approving each release run and for holding the offline updater key backup.
-- Any change to `.github/workflows/release.yml`, `.github/workflows/version.yml`, `.github/CODEOWNERS`, the release-critical scripts under `scripts/`, `src-tauri/tauri.conf.json`, `src-tauri/tauri.release.conf.json`, `src-tauri/tauri.dev.conf.json`, the entitlements files, or `src-tauri/capabilities/` requires owner review per `.github/CODEOWNERS`.
+- Any change to `.github/workflows/release.yaml`, `.github/workflows/version.yml`, `.github/CODEOWNERS`, the release-critical scripts under `scripts/`, `src-tauri/tauri.conf.json`, `src-tauri/tauri.release.conf.json`, `src-tauri/tauri.dev.conf.json`, the entitlements files, or `src-tauri/capabilities/` requires owner review per `.github/CODEOWNERS`.

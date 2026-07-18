@@ -125,7 +125,7 @@ jobs:
           # Exercises the script executable path only, with a synthetic
           # eligible context (a real version tag push). This is NOT a
           # real-context release decision — actual gating happens in
-          # release.yml against the workflow's own trigger context.
+          # release.yaml against the workflow's own trigger context.
           bun scripts/release-policy.ts \
             --event push \
             --ref refs/tags/v0.0.0-ci-smoke \

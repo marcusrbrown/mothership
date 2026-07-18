@@ -343,7 +343,7 @@ flowchart TB
 **Dependencies:** Unit 1, Unit 2, Unit 4, Unit 5; implementation-time approval for Tauri updater/signing dependencies; GitHub Actions `release` environment configured with required reviewers and environment secrets.
 
 **Files:**
-  - Create: `.github/workflows/release.yml`
+  - Create: `.github/workflows/release.yaml`
   - Create: `.github/CODEOWNERS`
   - Create: `src-tauri/Entitlements.plist`
   - Create: `src-tauri/sidecar-Entitlements.plist`
@@ -389,7 +389,7 @@ flowchart TB
 **Files:**
   - Create: `scripts/validate-updater-manifest.ts`
   - Create: `scripts/validate-updater-manifest.test.ts`
-  - Modify: `.github/workflows/release.yml`
+  - Modify: `.github/workflows/release.yaml`
   - Modify: `src-tauri/tauri.conf.json`
 
 **Approach:**
