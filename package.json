@@ -21,7 +21,7 @@
     "version:check": "bun scripts/sync-version.ts --check"
   },
   "dependencies": {
-    "@fro.bot/space-bus": "0.13.1",
+    "@fro.bot/space-bus": "0.14.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
