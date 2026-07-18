@@ -10,6 +10,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { BridgeResponse } from "../../src/layout/bridge-protocol";
 import {
   closePanelCommandSchema,
   focusCommandSchema,
@@ -28,37 +29,72 @@ function toolTextResult(payload: unknown, isError = false) {
   };
 }
 
+/** A stable, sanitized MCP error for a bridge response that reached this
+ * layout-only relay but is not actually a `domain:"layout"` success — a
+ * session-domain or transport-domain response routed here would otherwise
+ * be misread as a layout result (or silently produce an empty-success
+ * fallback). Never includes the mismatched response's raw payload/message,
+ * only a stable code naming the mismatch. */
+function unexpectedDomainResult(res: BridgeResponse) {
+  return toolTextResult(
+    {
+      error: {
+        code: "unexpected_domain",
+        message: `expected a layout-domain response, got domain:"${res.domain}"`,
+      },
+    },
+    true,
+  );
+}
+
 /** Relays a mutation command and shapes the MCP tool result: success →
  * `{layout}` with the layout passed through `layoutStructureView` (the same
  * allowlist gate the read path uses — params, including any `context`
  * credentials, are dropped); failure (including `unavailable`/`disconnected`/
  * `timeout` bridge errors and typed executor errors) → an `isError` result
- * carrying the typed error code/message, never a bare success. */
+ * carrying the typed error code/message, never a bare success. A response
+ * that is `ok:true` but NOT `domain:"layout"` (e.g. a session-tool result
+ * misrouted to a layout relay) is also a typed error, never read as if it
+ * carried a layout — `res.layout` only exists on the `domain:"layout"`
+ * branch of `BridgeResponse`. */
 async function relayMutation(bridge: WsBridge, tool: string, params: unknown) {
   const res = await bridge.dispatch(tool, params);
-  if (res.ok) {
+  if (res.ok && res.domain === "layout") {
     return toolTextResult({ layout: layoutStructureView(res.layout) });
   }
-  return toolTextResult({ error: res.error }, true);
+  if (!res.ok) {
+    return toolTextResult({ error: res.error }, true);
+  }
+  return unexpectedDomainResult(res);
 }
 
 /** Relays `ide_list_panels`: returns ONLY [{id, panelType, title}] — no
- * params, no paths, no layout geometry (disclosure boundary). */
+ * params, no paths, no layout geometry (disclosure boundary). A response
+ * that is `ok:true` but not `domain:"layout"` is a typed error, never an
+ * empty-panels fallback. */
 async function relayListPanels(bridge: WsBridge, tool: string) {
   const res = await bridge.dispatch(tool, {});
   if (!res.ok) {
     return toolTextResult({ error: res.error }, true);
+  }
+  if (res.domain !== "layout") {
+    return unexpectedDomainResult(res);
   }
   return toolTextResult({ panels: listPanelsView(res.layout) });
 }
 
 /** Relays `ide_get_layout`: returns the grid/group/panel structure agents
  * need (ordering/positioning + per-panel id/panelType/title) with ALL panel
- * `params` dropped — the allowlist gate for the disclosure boundary. */
+ * `params` dropped — the allowlist gate for the disclosure boundary. A
+ * response that is `ok:true` but not `domain:"layout"` is a typed error,
+ * never an empty-layout fallback. */
 async function relayGetLayout(bridge: WsBridge, tool: string) {
   const res = await bridge.dispatch(tool, {});
   if (!res.ok) {
     return toolTextResult({ error: res.error }, true);
+  }
+  if (res.domain !== "layout") {
+    return unexpectedDomainResult(res);
   }
   return toolTextResult({ layout: layoutStructureView(res.layout) });
 }
