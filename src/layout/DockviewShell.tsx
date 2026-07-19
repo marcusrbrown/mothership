@@ -24,6 +24,7 @@ import {
   type SessionToolDeps,
   registerDiscoveryContextTools,
   registerDispatchTool,
+  registerTranscriptTool,
 } from "../ide/executor";
 import { type FocusController, createFocusController } from "../ide/focus";
 import { auditStore } from "../panels/audit-log";
@@ -610,6 +611,7 @@ export function DockviewShell({
     // mounts/HMR: registering an already-registered tool name is a no-op.
     registerDiscoveryContextTools();
     registerDispatchTool();
+    registerTranscriptTool();
     const bridge = connectLayoutBridge(
       {
         get panels() {

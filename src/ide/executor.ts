@@ -39,6 +39,7 @@ import type {
 import type { BusContext } from "../server/types";
 import {
   type DispatchPromptArgs,
+  type GetTranscriptArgs,
   type ListSessionsArgs,
   type SelectSessionArgs,
   type SessionResultSchema,
@@ -46,7 +47,9 @@ import {
   type SessionToolAuditRecorder,
   type SessionToolResult,
   type SessionToolSource,
+  TRANSCRIPT_DEFAULT_LIMIT,
   dispatchPromptArgsSchema,
+  getTranscriptArgsSchema,
   isBrandedResultSchema,
   isValidProjectName,
   isValidRequestId,
@@ -65,7 +68,12 @@ import {
   normalizeHandlerError,
   toolError,
 } from "./errors";
-import { activeContextView, projectView, toSessionRowViews } from "./views";
+import {
+  activeContextView,
+  projectView,
+  toSessionRowViews,
+  toTranscriptView,
+} from "./views";
 
 /** Every registered session tool name must match this shape: `ide_`
  * prefix, lowercase ASCII letters/digits/underscore only. Enforced at
@@ -1885,6 +1893,114 @@ async function reconcileDispatchFailure(
   return { proven: false, reconciliation: "unavailable" };
 }
 
+// --- get transcript --------------------------------------------------
+
+const transcriptPartResultSchema = z
+  .object({
+    role: z.enum(["user", "assistant"]),
+    text: z.string(),
+    truncated: z.boolean(),
+  })
+  .strict();
+
+const getTranscriptResultSchema = z
+  .object({
+    sessionId: z.string(),
+    messages: z.array(transcriptPartResultSchema),
+    truncated: z.boolean(),
+  })
+  .strict();
+
+/**
+ * `ide_get_transcript`: reads a bounded window of recent user/assistant
+ * text for the already-resolved (roster-owned) session through the
+ * shared space-bus `messages()` /core facade — never `src/server/client.ts`,
+ * never a caller-supplied directory. Target resolution has already proven
+ * the session exists and is owned by a current roster project before this
+ * handler ever runs.
+ *
+ * `args.limit` (validated by `getTranscriptArgsSchema` — a positive
+ * integer no greater than `TRANSCRIPT_MAX_LIMIT`) defaults to
+ * `TRANSCRIPT_DEFAULT_LIMIT` when omitted; this is the ONLY place that
+ * substitutes the default — the schema only bounds an explicit value.
+ * The resolved limit is passed straight through to `bus.messages()`,
+ * which enforces its own hard `MAX_MESSAGE_LIMIT`; this executor never
+ * needs to re-clamp since `TRANSCRIPT_MAX_LIMIT` is already <= that bound.
+ *
+ * `messages()`'s own newest-N-in-ascending-order contract (see
+ * `docs/solutions/documentation-gaps/opencode-server-sse-contract-facts-2026-07-04.md`)
+ * is what gives chronological (oldest-first) UI order for free — this
+ * handler performs no reordering of its own.
+ *
+ * A missing `deps.bus.messages`, a thrown read, or an `ok:false` result
+ * is `upstream_error`/`indeterminate` for a caller-facing read, EXCEPT
+ * this is a read-only operation — see the delivery note below: a read's
+ * failure has no mutation to distinguish `not_sent` from `indeterminate`
+ * for, so `indeterminate` (the executor's default post-invocation
+ * posture) is used uniformly, matching every other post-handler failure
+ * in this module. The raw upstream error string is NEVER forwarded (see
+ * `UPSTREAM_ERROR`'s no-text-parameter shape in `./errors.ts`).
+ *
+ * `toTranscriptView` (`./views.ts`) is the entire disclosure boundary:
+ * only `role: "user"|"assistant"` messages and `type: "text"` parts are
+ * ever admitted, with deterministic per-part/total UTF-8-safe truncation
+ * and explicit truncation metadata. The returned `meta.bytes`/
+ * `meta.truncated` feed the executor's own audit trail (session id,
+ * requested/returned count, bytes, truncation status only — never
+ * transcript text).
+ */
+async function getTranscriptHandler(
+  args: GetTranscriptArgs,
+  target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<SessionToolResult<z.infer<typeof getTranscriptResultSchema>>> {
+  if (target.kind !== "session") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!deps.bus.messages) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  const limit = args.limit ?? TRANSCRIPT_DEFAULT_LIMIT;
+
+  let read: Awaited<ReturnType<NonNullable<typeof deps.bus.messages>>>;
+  try {
+    read = await deps.bus.messages(target.session.id, {
+      context: deps.context,
+      limit,
+    });
+  } catch {
+    return { ok: false, error: UPSTREAM_ERROR("indeterminate") };
+  }
+  if (!read.ok) {
+    return { ok: false, error: UPSTREAM_ERROR("indeterminate") };
+  }
+
+  // Concurrent-focus-change guard: the target session resolved BEFORE
+  // this read was ever issued (see `resolveTarget`) — a race that
+  // reassigns UI focus to a different session in the meantime cannot
+  // relabel/overwrite THIS read, because the returned view is always
+  // built and returned for `target.session.id`, never for whatever
+  // session happens to be focused by the time the read resolves. A
+  // response whose own `sessionId` disagrees with the resolved target is
+  // treated as an invariant breach, never trusted.
+  if (read.sessionId !== target.session.id) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  const view = toTranscriptView(target.session.id, read.messages);
+
+  return {
+    ok: true,
+    data: {
+      sessionId: view.sessionId,
+      messages: view.messages,
+      truncated: view.truncated,
+    },
+    meta: { bytes: view.bytes, truncated: view.truncated },
+  };
+}
+
 let discoveryContextToolsRegistered = false;
 
 /**
@@ -1987,4 +2103,42 @@ export function registerDispatchTool(): void {
  * `ide_dispatch_prompt` afresh. */
 export function __resetDispatchToolRegistrationForTests(): void {
   dispatchToolRegistered = false;
+}
+
+let transcriptToolRegistered = false;
+
+/**
+ * Registers `ide_get_transcript` via `registerSessionTool`. Idempotent
+ * and safe to call more than once — no implicit module-import side
+ * effect registers it; a caller (the bridge/UI integration point) must
+ * call this explicitly, separately from `registerDiscoveryContextTools`/
+ * `registerDispatchTool`.
+ */
+export function registerTranscriptTool(): void {
+  if (transcriptToolRegistered) return;
+  transcriptToolRegistered = true;
+
+  registerSessionTool("ide_get_transcript", {
+    argsSchema: getTranscriptArgsSchema,
+    resultSchema: sessionResultSchema({
+      sessionId: z.string(),
+      messages: z.array(
+        z.object({
+          role: z.enum(["user", "assistant"]),
+          text: z.string(),
+          truncated: z.boolean(),
+        }),
+      ),
+      truncated: z.boolean(),
+    }),
+    target: "session",
+    handler: getTranscriptHandler,
+  });
+}
+
+/** Test/dev helper — resets the module-level idempotency latch so a test
+ * that calls `__resetSessionToolsForTests()` can re-register
+ * `ide_get_transcript` afresh. */
+export function __resetTranscriptToolRegistrationForTests(): void {
+  transcriptToolRegistered = false;
 }

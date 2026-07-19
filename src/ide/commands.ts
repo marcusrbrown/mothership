@@ -137,6 +137,34 @@ export const selectSessionArgsSchema = z.object({
 });
 export type SelectSessionArgs = z.infer<typeof selectSessionArgsSchema>;
 
+/** Default/hard bounds for `ide_get_transcript`'s `limit` argument — frozen
+ * per the plan's deferred-implementation decision (default 20, hard max
+ * 50). Shared between this schema and the sidecar-facing MCP input schema
+ * so the two can never drift apart. */
+export const TRANSCRIPT_DEFAULT_LIMIT = 20;
+export const TRANSCRIPT_MAX_LIMIT = 50;
+
+/** `ide_get_transcript`'s args: the session to read, plus an optional
+ * bounded message-count `limit`. Zero, negative, fractional, and
+ * over-maximum values are all rejected here — before any I/O — never
+ * silently clamped. Omitted `limit` defaults to `TRANSCRIPT_DEFAULT_LIMIT`
+ * in the executor, not here (the schema only bounds an EXPLICIT value). */
+export const getTranscriptArgsSchema = z
+  .object({
+    sessionId: sessionIdSchema(),
+    limit: z
+      .number()
+      .int("limit must be an integer")
+      .positive("limit must be a positive integer")
+      .max(
+        TRANSCRIPT_MAX_LIMIT,
+        `limit must not exceed ${TRANSCRIPT_MAX_LIMIT}`,
+      )
+      .optional(),
+  })
+  .strict();
+export type GetTranscriptArgs = z.infer<typeof getTranscriptArgsSchema>;
+
 /** A target naming exactly one of a unique roster project or a
  * roster-owned session id — never both, never neither. */
 export const projectOrSessionTargetSchema = z

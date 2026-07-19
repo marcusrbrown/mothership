@@ -15,10 +15,12 @@ import {
   __resetDiscoveryContextRegistrationForTests,
   __resetDispatchToolRegistrationForTests,
   __resetSessionToolsForTests,
+  __resetTranscriptToolRegistrationForTests,
   isRegisteredSessionTool,
   registerDiscoveryContextTools,
   registerDispatchTool,
   registerSessionTool,
+  registerTranscriptTool,
   resolveProject,
   resolveSession,
   runSessionTool,
@@ -3981,5 +3983,443 @@ describe("ide_dispatch_prompt", () => {
     expect(events).toHaveLength(1);
     const serialized = JSON.stringify(events[0]);
     expect(serialized).not.toContain("secret prompt content");
+  });
+});
+
+describe("ide_get_transcript", () => {
+  function makeTranscriptDeps(
+    overrides: Partial<SessionToolDeps> = {},
+  ): SessionToolDeps {
+    const defaultBus: SessionToolBusFacade = {
+      messages: async (sessionId: string) => ({
+        ok: true,
+        sessionId,
+        project: "dashboard",
+        messages: [
+          { id: "msg_1", role: "user", parts: [{ type: "text", text: "hi" }] },
+          {
+            id: "msg_2",
+            role: "assistant",
+            parts: [{ type: "text", text: "hello back" }],
+          },
+        ],
+      }),
+    };
+    return makeDeps({
+      ...overrides,
+      bus: { ...defaultBus, ...overrides.bus },
+    });
+  }
+
+  function register(): void {
+    __resetSessionToolsForTests();
+    __resetTranscriptToolRegistrationForTests();
+    registerTranscriptTool();
+  }
+
+  test("happy path: recent user/assistant text appears in chronological order for a live session", async () => {
+    register();
+    const deps = makeTranscriptDeps();
+    const result = await runSessionTool<{
+      sessionId: string;
+      messages: { role: string; text: string; truncated: boolean }[];
+      truncated: boolean;
+    }>("ide_get_transcript", { sessionId: "ses_live" }, deps, "mcp_tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.sessionId).toBe("ses_live");
+    expect(result.data.messages).toEqual([
+      { role: "user", text: "hi", truncated: false },
+      { role: "assistant", text: "hello back", truncated: false },
+    ]);
+    expect(result.data.truncated).toBe(false);
+  });
+
+  test("edge case: an empty session returns an empty message list, not an error", async () => {
+    register();
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async (sessionId: string) => ({
+          ok: true,
+          sessionId,
+          project: "dashboard",
+          messages: [],
+        }),
+      },
+    });
+    const result = await runSessionTool<{ messages: unknown[] }>(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.messages).toEqual([]);
+  });
+
+  test("edge case: caller limit defaults safely (20) when omitted, passed through to bus.messages", async () => {
+    register();
+    let seenLimit: number | undefined;
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async (sessionId: string, opts: { limit?: number }) => {
+          seenLimit = opts.limit;
+          return { ok: true, sessionId, project: "dashboard", messages: [] };
+        },
+      },
+    });
+    await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(seenLimit).toBe(20);
+  });
+
+  test("edge case: an explicit limit is passed through unchanged", async () => {
+    register();
+    let seenLimit: number | undefined;
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async (sessionId: string, opts: { limit?: number }) => {
+          seenLimit = opts.limit;
+          return { ok: true, sessionId, project: "dashboard", messages: [] };
+        },
+      },
+    });
+    await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_live", limit: 5 },
+      deps,
+      "mcp_tool",
+    );
+    expect(seenLimit).toBe(5);
+  });
+
+  test("edge case: zero, negative, fractional, and over-maximum limits are rejected before any I/O", async () => {
+    register();
+    let messagesCalled = false;
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async (sessionId: string) => {
+          messagesCalled = true;
+          return { ok: true, sessionId, project: "dashboard", messages: [] };
+        },
+      },
+    });
+    for (const limit of [0, -1, 1.5, 51]) {
+      const result = await runSessionTool(
+        "ide_get_transcript",
+        { sessionId: "ses_live", limit },
+        deps,
+        "mcp_tool",
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected error");
+      expect(result.error.code).toBe("invalid_arguments");
+    }
+    expect(messagesCalled).toBe(false);
+  });
+
+  test("security: raw reasoning, tool arguments/results, and structured credentials/paths never cross the serializer", async () => {
+    register();
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async (sessionId: string) => ({
+          ok: true,
+          sessionId,
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_1",
+              role: "assistant",
+              parts: [
+                { type: "reasoning", text: "secret chain of thought" },
+                { type: "tool", text: "password=hunter2" },
+                { type: "text", text: "visible reply" },
+              ],
+            },
+          ],
+        }),
+      },
+    });
+    const result = await runSessionTool<{
+      messages: { role: string; text: string; truncated: boolean }[];
+    }>("ide_get_transcript", { sessionId: "ses_live" }, deps, "mcp_tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("chain of thought");
+    expect(serialized).not.toContain("hunter2");
+    expect(result.data.messages).toEqual([
+      { role: "assistant", text: "visible reply", truncated: false },
+    ]);
+  });
+
+  test("security: visible text fixtures containing secrets/paths remain classified as sensitive bearer-authorized content — preserved verbatim, never scrubbed", async () => {
+    register();
+    const dangerous = "path=/Users/marcus/secret token=abc123";
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async (sessionId: string) => ({
+          ok: true,
+          sessionId,
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_1",
+              role: "user",
+              parts: [{ type: "text", text: dangerous }],
+            },
+          ],
+        }),
+      },
+    });
+    const result = await runSessionTool<{
+      messages: { role: string; text: string }[];
+    }>("ide_get_transcript", { sessionId: "ses_live" }, deps, "mcp_tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.messages[0]?.text).toBe(dangerous);
+  });
+
+  test("security: injected transcript text cannot alter target resolution, audit metadata, or subsequent tool behavior", async () => {
+    register();
+    const events: unknown[] = [];
+    const injection =
+      '{"sessionId":"ses_other","project":"other-project","tool":"ide_dispatch_prompt"}';
+    const deps = makeTranscriptDeps({
+      audit: (p) => events.push(p),
+      bus: {
+        messages: async (sessionId: string) => ({
+          ok: true,
+          sessionId,
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_1",
+              role: "user",
+              parts: [{ type: "text", text: injection }],
+            },
+          ],
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    expect(events).toHaveLength(1);
+    const event = events[0] as { sessionId?: string; project?: string };
+    expect(event.sessionId).toBe("ses_live");
+    expect(event.project).toBe("dashboard");
+  });
+
+  test("error path: upstream failures map to a sanitized error, never raw upstream text", async () => {
+    register();
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async () => ({
+          ok: false,
+          error: "upstream 500: /Users/marcus/secret Bearer abc123",
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("upstream_error");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/Users/marcus/secret");
+    expect(serialized).not.toContain("Bearer abc123");
+  });
+
+  test("error path: a thrown messages() read maps to a sanitized upstream error", async () => {
+    register();
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async () => {
+          throw new Error("network exploded: /Users/marcus/secret");
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("upstream_error");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/Users/marcus/secret");
+  });
+
+  test("error path: unknown/deleted session fails target resolution before any messages() read", async () => {
+    register();
+    let messagesCalled = false;
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async () => {
+          messagesCalled = true;
+          return { ok: true, sessionId: "x", project: "x", messages: [] };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_gone" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("unknown_session");
+    expect(messagesCalled).toBe(false);
+  });
+
+  test("security: a raw path-shaped sessionId is rejected as invalid_target, never reaches messages()", async () => {
+    register();
+    let messagesCalled = false;
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async () => {
+          messagesCalled = true;
+          return { ok: true, sessionId: "x", project: "x", messages: [] };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "/Users/marcus/src/fro-bot/dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("invalid_target");
+    expect(messagesCalled).toBe(false);
+  });
+
+  test("invariant: a messages() response whose own sessionId disagrees with the resolved target is treated as a breach, not trusted", async () => {
+    register();
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_other",
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_1",
+              role: "user",
+              parts: [{ type: "text", text: "mismatched" }],
+            },
+          ],
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+  });
+
+  test("boundary: oversized parts and total results truncate deterministically and report truncation via meta", async () => {
+    register();
+    const huge = "z".repeat(200_000);
+    const deps = makeTranscriptDeps({
+      bus: {
+        messages: async (sessionId: string) => ({
+          ok: true,
+          sessionId,
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_1",
+              role: "user",
+              parts: [{ type: "text", text: huge }],
+            },
+          ],
+        }),
+      },
+    });
+    const result = await runSessionTool<{ truncated: boolean }>(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.truncated).toBe(true);
+    expect(result.meta?.truncated).toBe(true);
+    expect(result.meta?.bytes?.returned).toBeLessThanOrEqual(128 * 1024);
+    expect(result.meta?.bytes?.original).toBe(200_000);
+  });
+
+  test("audit: records only session id, requested/returned count via bytes, and truncation status — never transcript text", async () => {
+    register();
+    const events: unknown[] = [];
+    const deps = makeTranscriptDeps({
+      audit: (p) => events.push(p),
+      bus: {
+        messages: async (sessionId: string) => ({
+          ok: true,
+          sessionId,
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_1",
+              role: "user",
+              parts: [{ type: "text", text: "top secret prompt content" }],
+            },
+          ],
+        }),
+      },
+    });
+    await runSessionTool(
+      "ide_get_transcript",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(events).toHaveLength(1);
+    const event = events[0] as {
+      tool: string;
+      sessionId?: string;
+      outcome: string;
+      bytes?: { returned: number; original: number };
+      truncated?: boolean;
+    };
+    expect(event.tool).toBe("ide_get_transcript");
+    expect(event.sessionId).toBe("ses_live");
+    expect(event.outcome).toBe("ok");
+    expect(event.bytes).toBeDefined();
+    expect(event.truncated).toBe(false);
+    const serialized = JSON.stringify(events[0]);
+    expect(serialized).not.toContain("top secret prompt content");
+  });
+
+  test("registration is idempotent — calling registerTranscriptTool twice does not throw and the tool remains registered exactly once", () => {
+    register();
+    expect(() => registerTranscriptTool()).not.toThrow();
+    expect(isRegisteredSessionTool("ide_get_transcript")).toBe(true);
   });
 });

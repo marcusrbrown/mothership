@@ -201,7 +201,7 @@ describe("layout relay paths reject non-layout success shapes (domain narrowing)
 });
 
 describe("session tool registration", () => {
-  test("registers exactly the six session tools by name, alongside the eight existing layout tools", async () => {
+  test("registers exactly the seven session tools by name, alongside the eight existing layout tools", async () => {
     const bridge = stubBridge(async () => ({
       kind: "response",
       domain: "session",
@@ -236,9 +236,10 @@ describe("session tool registration", () => {
         "ide_select_project",
         "ide_select_session",
         "ide_dispatch_prompt",
+        "ide_get_transcript",
       ].sort(),
     );
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
 
     await client.close();
   });
@@ -1419,6 +1420,246 @@ describe("ide_dispatch_prompt relay contract (via ws-bridge stub)", () => {
     expect(description).toContain("filesystem path");
     expect(description).toContain("not idempotent");
     expect(description).toContain("never blindly retry");
+
+    await client.close();
+  });
+});
+
+describe("ide_get_transcript relay contract (via ws-bridge stub)", () => {
+  test("happy path: a valid call relays through and returns the webview data verbatim, never bare success", async () => {
+    const seenParams: unknown[] = [];
+    const bridge = stubBridge(async (tool, params) => {
+      seenParams.push({ tool, params });
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: {
+          sessionId: "ses_live",
+          messages: [{ role: "user", text: "hi", truncated: false }],
+          truncated: false,
+        },
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_get_transcript",
+      arguments: { sessionId: "ses_live" },
+    });
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    expect(JSON.parse(text ?? "{}")).toEqual({
+      sessionId: "ses_live",
+      messages: [{ role: "user", text: "hi", truncated: false }],
+      truncated: false,
+    });
+    expect(seenParams).toEqual([
+      { tool: "ide_get_transcript", params: { sessionId: "ses_live" } },
+    ]);
+
+    await client.close();
+  });
+
+  test("happy path: an explicit limit is relayed through unchanged", async () => {
+    const seenParams: unknown[] = [];
+    const bridge = stubBridge(async (tool, params) => {
+      seenParams.push({ tool, params });
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: { sessionId: "ses_live", messages: [], truncated: false },
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    await client.callTool({
+      name: "ide_get_transcript",
+      arguments: { sessionId: "ses_live", limit: 5 },
+    });
+    expect(seenParams).toEqual([
+      {
+        tool: "ide_get_transcript",
+        params: { sessionId: "ses_live", limit: 5 },
+      },
+    ]);
+
+    await client.close();
+  });
+
+  test("error path: zero, negative, fractional, and over-maximum limits are rejected before the bridge is ever called", async () => {
+    let bridgeCalled = false;
+    const bridge = stubBridge(async () => {
+      bridgeCalled = true;
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: {},
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    for (const limit of [0, -1, 1.5, 51]) {
+      const result = await client.callTool({
+        name: "ide_get_transcript",
+        arguments: { sessionId: "ses_live", limit },
+      });
+      expect(result.isError).toBe(true);
+    }
+    expect(bridgeCalled).toBe(false);
+
+    await client.close();
+  });
+
+  test("error path: a missing/empty sessionId is rejected before the bridge is ever called", async () => {
+    let bridgeCalled = false;
+    const bridge = stubBridge(async () => {
+      bridgeCalled = true;
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: {},
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_get_transcript",
+      arguments: { sessionId: "" },
+    });
+    expect(result.isError).toBe(true);
+    expect(bridgeCalled).toBe(false);
+
+    await client.close();
+  });
+
+  test("error path: an upstream error relays through with a sanitized code/message, no raw upstream text", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: false,
+      error: {
+        code: "upstream_error",
+        message: "upstream 500: /Users/marcus/secret Bearer abc123",
+        delivery: "indeterminate",
+      },
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_get_transcript",
+      arguments: { sessionId: "ses_live" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    expect(text).not.toContain("/Users/marcus/secret");
+    expect(text).not.toContain("Bearer abc123");
+    const parsed = JSON.parse(text ?? "{}") as {
+      error?: { code?: string; message?: string; delivery?: string };
+    };
+    expect(parsed.error?.code).toBe("upstream_error");
+    expect(parsed.error?.message).toBe("The upstream operation failed.");
+    expect(parsed.error?.delivery).toBe("indeterminate");
+
+    await client.close();
+  });
+
+  test("registers with read-only, idempotent, non-destructive, closed-world annotations", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: true,
+      data: {},
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "ide_get_transcript");
+    expect(tool?.annotations).toEqual({
+      readOnlyHint: true,
+      idempotentHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+
+    await client.close();
+  });
+
+  test("description warns that returned text is untrusted/sensitive content and names the default/max bounds", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: true,
+      data: {},
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "ide_get_transcript");
+    const description = (tool?.description ?? "").toLowerCase();
+    expect(description).toContain("untrusted");
+    expect(description).toContain("filesystem path");
+    expect(description).toContain("20");
+    expect(description).toContain("50");
 
     await client.close();
   });

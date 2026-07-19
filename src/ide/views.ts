@@ -315,3 +315,155 @@ export function boundText(text: string, maxBytes: number): BoundedText {
     returnedBytes,
   };
 }
+
+// --- transcript (ide_get_transcript) ---------------------------------------
+
+/** Per-part UTF-8 byte cap applied AFTER role/type allowlisting, before the
+ * total-result cap below — frozen per the plan's deferred-implementation
+ * decision. Chosen well under the 128 KiB total cap so a handful of
+ * oversized parts can never alone exhaust the whole result. */
+export const TRANSCRIPT_PART_BYTE_CAP = 8 * 1024;
+
+/** Total serialized-byte cap across every admitted part's (already
+ * per-part-bounded) text — frozen per the plan's deferred-implementation
+ * decision ("no larger than 128 KiB"). Enforced by `toTranscriptView`
+ * itself (part-by-part accumulation), not by the caller. */
+export const TRANSCRIPT_TOTAL_BYTE_CAP = 128 * 1024;
+
+/** One admitted transcript part — role + free text ONLY. `role` is
+ * restricted to `"user" | "assistant"` (never `"system"`/other future
+ * roles); the free `text` is preserved VERBATIM (once per-part-truncated)
+ * even if it contains paths, secrets, or instructions — it is the
+ * caller's job to treat it as untrusted, bearer-authorized data, never as
+ * a command or as already-scrubbed content. */
+export interface TranscriptPartView {
+  role: "user" | "assistant";
+  text: string;
+  truncated: boolean;
+}
+
+export interface TranscriptView {
+  sessionId: string;
+  messages: TranscriptPartView[];
+  truncated: boolean;
+  bytes: { returned: number; original: number };
+}
+
+/** Raw shape this view accepts — a structural subset of
+ * `@fro.bot/space-bus/core`'s `SessionMessage`, read defensively (every
+ * field typed `unknown`) so a malformed/poisoned upstream message
+ * degrades to an omitted part rather than throwing. */
+interface RawTranscriptMessage {
+  role?: unknown;
+  parts?: unknown;
+}
+
+interface RawTranscriptPart {
+  type?: unknown;
+  text?: unknown;
+}
+
+const ADMITTED_ROLES = new Set(["user", "assistant"]);
+
+/**
+ * Builds the strict, allowlisted transcript view `ide_get_transcript`
+ * returns. This is the ENTIRE MCP-facing disclosure boundary for
+ * transcript content — see `src/ide/commands.ts` KTD5's doc comment and
+ * the module header above.
+ *
+ * Admits ONLY `role: "user" | "assistant"` messages, and within an
+ * admitted message ONLY `type: "text"` parts with a string `text` field
+ * — every other role (`"system"`, any future role), every non-`"text"`
+ * part type (tool calls/results, reasoning, images, files, patches,
+ * anything not on this allowlist), and any part missing a string `text`
+ * field is silently dropped, never partially admitted. Chronological
+ * order is PRESERVED exactly as `rawMessages` arrives (this function
+ * performs no reordering) — the caller (`getTranscriptHandler`) is
+ * responsible for requesting/receiving messages in the UI's
+ * oldest-first chronological order.
+ *
+ * Truncation is two-tier and fully deterministic:
+ * 1. Each admitted part's text is independently bounded to
+ *    `TRANSCRIPT_PART_BYTE_CAP` via `boundText` (UTF-8-safe, never splits
+ *    a code point).
+ * 2. The already-part-bounded parts are then accumulated in order against
+ *    a running `TRANSCRIPT_TOTAL_BYTE_CAP` budget; the first part that
+ *    would exceed the remaining total budget is itself re-bounded to
+ *    exactly the remaining budget (again UTF-8-safe) and marked
+ *    truncated, and every part after it is dropped entirely (never
+ *    partially included out of order).
+ *
+ * `truncated` at the top level is true if ANY part was truncated (at
+ * either tier) OR any part was dropped by the total-byte cutoff — a
+ * caller can rely on the top-level flag alone without inspecting every
+ * part.
+ */
+export function toTranscriptView(
+  sessionId: string,
+  rawMessages: readonly RawTranscriptMessage[],
+): TranscriptView {
+  const admittedParts: { role: "user" | "assistant"; text: string }[] = [];
+
+  for (const raw of rawMessages) {
+    if (raw === null || typeof raw !== "object") continue;
+    const role = str(raw.role);
+    if (role === undefined || !ADMITTED_ROLES.has(role)) continue;
+    const parts = Array.isArray(raw.parts) ? raw.parts : [];
+    for (const rawPart of parts as RawTranscriptPart[]) {
+      if (rawPart === null || typeof rawPart !== "object") continue;
+      if (str(rawPart.type) !== "text") continue;
+      const text = str(rawPart.text);
+      if (text === undefined) continue;
+      admittedParts.push({ role: role as "user" | "assistant", text });
+    }
+  }
+
+  let originalBytes = 0;
+  let returnedBytes = 0;
+  let anyTruncated = false;
+  const encoder = new TextEncoder();
+  const messages: TranscriptPartView[] = [];
+  let budgetExhausted = false;
+
+  for (const part of admittedParts) {
+    originalBytes += encoder.encode(part.text).length;
+    if (budgetExhausted) {
+      anyTruncated = true;
+      continue;
+    }
+
+    const perPart = boundText(part.text, TRANSCRIPT_PART_BYTE_CAP);
+    const remainingTotal = TRANSCRIPT_TOTAL_BYTE_CAP - returnedBytes;
+    if (remainingTotal <= 0) {
+      budgetExhausted = true;
+      anyTruncated = true;
+      continue;
+    }
+
+    let finalText = perPart.text;
+    let finalTruncated = perPart.truncated;
+    let finalBytes = perPart.returnedBytes;
+    if (perPart.returnedBytes > remainingTotal) {
+      const reBounded = boundText(perPart.text, remainingTotal);
+      finalText = reBounded.text;
+      finalTruncated = true;
+      finalBytes = reBounded.returnedBytes;
+      budgetExhausted = true;
+    }
+
+    if (finalTruncated) anyTruncated = true;
+    returnedBytes += finalBytes;
+    messages.push({
+      role: part.role,
+      text: finalText,
+      truncated: finalTruncated,
+    });
+  }
+
+  return {
+    sessionId,
+    messages,
+    truncated: anyTruncated,
+    bytes: { returned: returnedBytes, original: originalBytes },
+  };
+}
