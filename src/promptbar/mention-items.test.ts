@@ -30,6 +30,7 @@ function fakeStore(sessions: { id: string; title?: string }[]): SessionStore {
     getSessions: () => sessions.map((s) => ({ ...s, status: "idle" as const })),
     getSession: () => undefined,
     getPendingQuestions: () => [],
+    getPendingQuestion: () => undefined,
     subscribe: () => () => {},
     applyEvent: () => {},
     reconcile: () => {},

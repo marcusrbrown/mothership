@@ -201,7 +201,7 @@ describe("layout relay paths reject non-layout success shapes (domain narrowing)
 });
 
 describe("session tool registration", () => {
-  test("registers exactly the seven session tools by name, alongside the eight existing layout tools", async () => {
+  test("registers exactly the nine session tools by name, alongside the eight existing layout tools", async () => {
     const bridge = stubBridge(async () => ({
       kind: "response",
       domain: "session",
@@ -237,9 +237,11 @@ describe("session tool registration", () => {
         "ide_select_session",
         "ide_dispatch_prompt",
         "ide_get_transcript",
+        "ide_list_pending_questions",
+        "ide_answer_question",
       ].sort(),
     );
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(17);
 
     await client.close();
   });
@@ -266,6 +268,7 @@ describe("session tool registration", () => {
       "ide_list_projects",
       "ide_list_sessions",
       "ide_get_active_context",
+      "ide_list_pending_questions",
     ]) {
       const tool = tools.find((t) => t.name === name);
       expect(tool?.annotations).toEqual({
@@ -1660,6 +1663,495 @@ describe("ide_get_transcript relay contract (via ws-bridge stub)", () => {
     expect(description).toContain("filesystem path");
     expect(description).toContain("20");
     expect(description).toContain("50");
+
+    await client.close();
+  });
+});
+
+describe("ide_list_pending_questions relay contract (via ws-bridge stub)", () => {
+  test("happy path: a project-target call relays through and returns the webview data verbatim", async () => {
+    const seenParams: unknown[] = [];
+    const bridge = stubBridge(async (tool, params) => {
+      seenParams.push({ tool, params });
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: {
+          questions: [
+            {
+              requestId: "que_1",
+              sessionId: "ses_live",
+              questions: [
+                {
+                  header: "Confirm",
+                  question: "Proceed?",
+                  multiple: false,
+                  custom: false,
+                  options: [{ label: "Yes" }, { label: "No" }],
+                },
+              ],
+            },
+          ],
+        },
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_list_pending_questions",
+      arguments: { project: "dashboard" },
+    });
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    const parsed = JSON.parse(text ?? "{}") as {
+      questions: { requestId: string }[];
+    };
+    expect(parsed.questions[0]?.requestId).toBe("que_1");
+    expect(seenParams).toEqual([
+      {
+        tool: "ide_list_pending_questions",
+        params: { project: "dashboard" },
+      },
+    ]);
+
+    await client.close();
+  });
+
+  test("happy path: a session-target call relays through", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: true,
+      data: { questions: [] },
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_list_pending_questions",
+      arguments: { sessionId: "ses_live" },
+    });
+    expect(result.isError).toBeFalsy();
+
+    await client.close();
+  });
+
+  test("error path: both project and sessionId is rejected before the bridge is ever called, no key/value echo", async () => {
+    let bridgeCalled = false;
+    const bridge = stubBridge(async () => {
+      bridgeCalled = true;
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: { questions: [] },
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_list_pending_questions",
+      arguments: { project: "dashboard", sessionId: "ses_live" },
+    });
+    expect(result.isError).toBe(true);
+    expect(bridgeCalled).toBe(false);
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    const parsed = JSON.parse(text ?? "{}") as {
+      error?: { code?: string; delivery?: string };
+    };
+    expect(parsed.error?.code).toBe("invalid_arguments");
+    expect(parsed.error?.delivery).toBe("not_sent");
+
+    await client.close();
+  });
+
+  test("error path: neither project nor sessionId is rejected before the bridge is ever called — no unscoped global list", async () => {
+    let bridgeCalled = false;
+    const bridge = stubBridge(async () => {
+      bridgeCalled = true;
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: { questions: [] },
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_list_pending_questions",
+      arguments: {},
+    });
+    expect(result.isError).toBe(true);
+    expect(bridgeCalled).toBe(false);
+
+    await client.close();
+  });
+
+  test("registers with read-only, idempotent, non-destructive, closed-world annotations", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: true,
+      data: { questions: [] },
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "ide_list_pending_questions");
+    expect(tool?.annotations).toEqual({
+      readOnlyHint: true,
+      idempotentHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+
+    await client.close();
+  });
+
+  test("description warns question/option text is untrusted content and names logical targeting", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: true,
+      data: { questions: [] },
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "ide_list_pending_questions");
+    const description = (tool?.description ?? "").toLowerCase();
+    expect(description).toContain("untrusted");
+    expect(description).toContain("logical");
+    expect(description).toContain("filesystem path");
+    expect(description).toContain("no unscoped global list");
+
+    await client.close();
+  });
+});
+
+describe("ide_answer_question relay contract (via ws-bridge stub)", () => {
+  test("happy path: a valid single-select answer relays through and returns the webview data verbatim", async () => {
+    const seenParams: unknown[] = [];
+    const bridge = stubBridge(async (tool, params) => {
+      seenParams.push({ tool, params });
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: { sessionId: "ses_live", requestId: "que_1" },
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_answer_question",
+      arguments: {
+        sessionId: "ses_live",
+        requestId: "que_1",
+        answers: [["Yes"]],
+      },
+    });
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    expect(JSON.parse(text ?? "{}")).toEqual({
+      sessionId: "ses_live",
+      requestId: "que_1",
+    });
+    expect(seenParams).toEqual([
+      {
+        tool: "ide_answer_question",
+        params: {
+          sessionId: "ses_live",
+          requestId: "que_1",
+          answers: [["Yes"]],
+        },
+      },
+    ]);
+
+    await client.close();
+  });
+
+  test("happy path: a multi-select answers body relays through unchanged", async () => {
+    const seenParams: unknown[] = [];
+    const bridge = stubBridge(async (tool, params) => {
+      seenParams.push({ tool, params });
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: { sessionId: "ses_live", requestId: "que_1" },
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    await client.callTool({
+      name: "ide_answer_question",
+      arguments: {
+        sessionId: "ses_live",
+        requestId: "que_1",
+        answers: [["A", "B"]],
+      },
+    });
+    expect(seenParams).toEqual([
+      {
+        tool: "ide_answer_question",
+        params: {
+          sessionId: "ses_live",
+          requestId: "que_1",
+          answers: [["A", "B"]],
+        },
+      },
+    ]);
+
+    await client.close();
+  });
+
+  test("error path: a missing/empty sessionId or requestId is rejected before the bridge is ever called", async () => {
+    let bridgeCalled = false;
+    const bridge = stubBridge(async () => {
+      bridgeCalled = true;
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: {},
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    for (const bad of [
+      { sessionId: "", requestId: "que_1", answers: [["Yes"]] },
+      { sessionId: "ses_live", requestId: "", answers: [["Yes"]] },
+    ]) {
+      const result = await client.callTool({
+        name: "ide_answer_question",
+        arguments: bad,
+      });
+      expect(result.isError).toBe(true);
+    }
+    expect(bridgeCalled).toBe(false);
+
+    await client.close();
+  });
+
+  test("error path: an empty/malformed answers body is rejected before the bridge is ever called", async () => {
+    let bridgeCalled = false;
+    const bridge = stubBridge(async () => {
+      bridgeCalled = true;
+      return {
+        kind: "response",
+        domain: "session",
+        seq: 1,
+        ok: true,
+        data: {},
+      };
+    });
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_answer_question",
+      arguments: { sessionId: "ses_live", requestId: "que_1", answers: [] },
+    });
+    expect(result.isError).toBe(true);
+    expect(bridgeCalled).toBe(false);
+
+    await client.close();
+  });
+
+  test("error path: an indeterminate upstream error relays through with safe bridge-schema-validated attempt metadata, no raw upstream/answer content", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: false,
+      error: {
+        code: "upstream_error",
+        message: "upstream 500: /Users/marcus/secret Bearer abc123",
+        delivery: "indeterminate",
+        attempt: {
+          operation: "answer",
+          sessionId: "ses_live",
+          requestId: "que_1",
+          resolution: "still_pending",
+        },
+      },
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const result = await client.callTool({
+      name: "ide_answer_question",
+      arguments: {
+        sessionId: "ses_live",
+        requestId: "que_1",
+        answers: [["confidential answer"]],
+      },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    expect(text).not.toContain("/Users/marcus/secret");
+    expect(text).not.toContain("Bearer abc123");
+    expect(text).not.toContain("confidential answer");
+    const parsed = JSON.parse(text ?? "{}") as {
+      error?: {
+        code?: string;
+        message?: string;
+        delivery?: string;
+        attempt?: unknown;
+      };
+    };
+    expect(parsed.error?.code).toBe("upstream_error");
+    expect(parsed.error?.message).toBe("The upstream operation failed.");
+    expect(parsed.error?.delivery).toBe("indeterminate");
+    expect(parsed.error?.attempt).toEqual({
+      operation: "answer",
+      sessionId: "ses_live",
+      requestId: "que_1",
+      resolution: "still_pending",
+    });
+
+    await client.close();
+  });
+
+  test("registers with mutation-shaped annotations: not read-only, not idempotent, not destructive, not open-world", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: true,
+      data: {},
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "ide_answer_question");
+    expect(tool?.annotations).toEqual({
+      readOnlyHint: false,
+      idempotentHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+
+    await client.close();
+  });
+
+  test("description warns about que_-prefixed request id, non-idempotent/no-blind-retry semantics, and cardinality/ownership rejection", async () => {
+    const bridge = stubBridge(async () => ({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: true,
+      data: {},
+    }));
+    const server = createIdeMcpServer(bridge);
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === "ide_answer_question");
+    const description = (tool?.description ?? "").toLowerCase();
+    expect(description).toContain("que_");
+    expect(description).toContain("not idempotent");
+    expect(description).toContain("never blindly retry");
+    expect(description).toContain("filesystem path");
 
     await client.close();
   });

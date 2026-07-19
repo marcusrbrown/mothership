@@ -13,12 +13,17 @@
  */
 import { z } from "zod";
 import type {
+  SessionToolAnswerAttemptMeta,
   SessionToolDispatchAttemptMeta,
   SessionToolError,
   SessionToolErrorCode,
   SessionToolErrorDelivery,
 } from "./commands";
-import { isValidMessageId } from "./commands";
+import {
+  isValidMessageId,
+  isValidRequestId,
+  isValidSessionId,
+} from "./commands";
 
 /** Every closed `SessionToolErrorCode` value, kept as a literal list (not
  * a runtime-introspectable value-level import of the type) so a handler-
@@ -33,6 +38,10 @@ const KNOWN_ERROR_CODES = [
   "ambiguous_project",
   "unknown_session",
   "session_project_mismatch",
+  "unknown_question",
+  "question_session_mismatch",
+  "question_already_resolved",
+  "invalid_answer_cardinality",
   "upstream_error",
   "internal_error",
 ] as const;
@@ -51,6 +60,13 @@ const ERROR_CODE_MESSAGES: Record<SessionToolErrorCode, string> = {
   unknown_session: "No session matches the given id.",
   session_project_mismatch:
     "The given session belongs to a different project than the one specified.",
+  unknown_question: "No pending question matches the given request id.",
+  question_session_mismatch:
+    "The given request id does not belong to the specified session.",
+  question_already_resolved:
+    "The given question has already been answered or is no longer pending.",
+  invalid_answer_cardinality:
+    "The given answers do not match the pending question's structure.",
   upstream_error: "The upstream operation failed.",
   internal_error: "An internal error occurred.",
 };
@@ -83,16 +99,35 @@ const dispatchAttemptMetaSchema = z
       "sessionId must be present iff target is 'session', and absent iff target is 'project'",
   });
 
+/** Closed schema for an answer attempt's safe metadata — see
+ * `SessionToolAnswerAttemptMeta` in `./commands.ts`. `.strict()` rejects
+ * any field beyond the named ones (answer text/labels, a timestamp, raw
+ * upstream text). */
+const answerAttemptMetaSchema = z
+  .object({
+    operation: z.literal("answer"),
+    sessionId: z.string().refine(isValidSessionId, {
+      message: "sessionId must be a valid opaque identifier",
+    }),
+    requestId: z.string().refine(isValidRequestId, {
+      message: "requestId must be a valid que_-prefixed identifier",
+    }),
+    resolution: z.enum(["resolved", "still_pending", "unavailable"]),
+  })
+  .strict();
+
 /** The closed shape a HANDLER-RETURNED error envelope must match: a
  * known code, an optional but well-typed delivery, and — for a dispatch
- * attempt only — optional safe attempt metadata. `message` is
+ * or answer attempt only — optional safe attempt metadata. `message` is
  * deliberately NOT part of this schema — a handler cannot choose its own
  * message at all (see `normalizeHandlerError`), so there is nothing to
  * validate there. */
 const handlerErrorEnvelopeSchema = z.object({
   code: z.enum(KNOWN_ERROR_CODES),
   delivery: bridgeErrorDeliverySchema.optional(),
-  attempt: dispatchAttemptMetaSchema.optional(),
+  attempt: z
+    .union([dispatchAttemptMetaSchema, answerAttemptMetaSchema])
+    .optional(),
 });
 
 /** Builds a typed error from an already-known-safe code/message. Prefer
@@ -184,6 +219,21 @@ export function normalizeHandlerError(error: unknown): SessionToolError {
  * message or upstream text parameter. */
 export function DISPATCH_INDETERMINATE(
   attempt: SessionToolDispatchAttemptMeta,
+): SessionToolError {
+  return {
+    code: "upstream_error",
+    message: "The upstream operation failed.",
+    delivery: "indeterminate",
+    attempt,
+  };
+}
+
+/** Builds an `upstream_error`/`indeterminate` result carrying safe
+ * answer-attempt metadata — the one representable "an answer mutation
+ * could not be confirmed" outcome. Same no-raw-text posture as
+ * `UPSTREAM_ERROR`/`DISPATCH_INDETERMINATE`. */
+export function ANSWER_INDETERMINATE(
+  attempt: SessionToolAnswerAttemptMeta,
 ): SessionToolError {
   return {
     code: "upstream_error",

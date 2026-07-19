@@ -9,6 +9,7 @@
  */
 import type { IDockviewPanelProps } from "dockview-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { answerQuestionOperation } from "../../ide/questions";
 import type { OpencodeClient } from "../../server/client";
 import type { Demux } from "../../server/demux";
 import type { SessionStore } from "../../server/session-store";
@@ -186,20 +187,65 @@ export function TranscriptPanel(
 
   const submitAnswer = useCallback(
     async (question: PendingQuestionView, label: string) => {
-      if (!client || !directory) return;
+      if (!client || !directory || !sessionID) return;
       setState((prev) => setAnswerSending(prev, question.requestID, label));
-      const result = await client.replyQuestion(directory, question.requestID, [
-        [label],
-      ]);
+      // Routed through the SAME shared question-domain operation
+      // `ide_answer_question` uses (`src/ide/questions.ts`) — this panel
+      // is one UI adapter over that operation, not a second independent
+      // validation/I-O path. `store` (when present) supplies the
+      // read-only pending-request lookup the operation validates
+      // request-ownership/cardinality against before ever calling
+      // `client.replyQuestion`; a missing `store` degrades to trusting
+      // the panel's own already-rendered `question` (best-effort — the
+      // existing SSE/reconcile flow is still the source of truth for
+      // clearing the card on confirmed success).
+      const result = await answerQuestionOperation(
+        {
+          sessionId: sessionID,
+          requestId: question.requestID,
+          answers: [[label]],
+        },
+        {
+          getPendingQuestion: (requestId) => {
+            const stored = store?.getPendingQuestion(requestId);
+            if (stored) {
+              return {
+                sessionID: stored.sessionID,
+                questions: stored.questions,
+              };
+            }
+            if (requestId !== question.requestID) return undefined;
+            return {
+              sessionID: sessionID,
+              questions: [
+                {
+                  multiple: false,
+                  custom: false,
+                  options: question.options.map((o) => ({ label: o })),
+                },
+              ],
+            };
+          },
+          answer: async (sid, requestId, answers) => {
+            const res = await client.replyQuestion(
+              directory,
+              requestId,
+              answers,
+            );
+            if (!res.ok) return { ok: false };
+            return { ok: true, sessionId: sid, requestId };
+          },
+        },
+      );
       if (!result.ok) {
         setState((prev) =>
-          setAnswerError(prev, question.requestID, result.error.message),
+          setAnswerError(prev, question.requestID, "Failed to send answer."),
         );
         return;
       }
       // Optimistic lock clears on the confirming question.replied event above.
     },
-    [client, directory],
+    [client, directory, sessionID, store],
   );
 
   return (

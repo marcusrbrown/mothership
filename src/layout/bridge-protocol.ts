@@ -76,6 +76,24 @@ export type BridgeDispatchAttemptMeta = z.infer<
   typeof bridgeDispatchAttemptMetaSchema
 >;
 
+/** Safe answer-attempt metadata carried on an `ide_answer_question` error
+ * only, mirrored verbatim (not imported) from `src/ide/commands.ts`'s
+ * `SessionToolAnswerAttemptMeta` for the same reason
+ * `bridgeDispatchAttemptMetaSchema` is duplicated rather than imported.
+ * `.strict()` closes the shape: no answer text/labels, no timestamp, no
+ * raw upstream text. */
+export const bridgeAnswerAttemptMetaSchema = z
+  .object({
+    operation: z.literal("answer"),
+    sessionId: z.string(),
+    requestId: z.string(),
+    resolution: z.enum(["resolved", "still_pending", "unavailable"]),
+  })
+  .strict();
+export type BridgeAnswerAttemptMeta = z.infer<
+  typeof bridgeAnswerAttemptMetaSchema
+>;
+
 /** A typed failure, shared verbatim by both domains. `code` is left as a
  * bare string (not a literal enum) at the wire-protocol layer — layout
  * and session error codes are two different closed sets owned by their
@@ -84,13 +102,15 @@ export type BridgeDispatchAttemptMeta = z.infer<
  * it. `message` is always a stable, sanitized, program-owned string on
  * both sides (see `src/ide/errors.ts`, `src/layout/executor.ts`) — never
  * raw path/payload/exception text. `attempt` is present only on a
- * dispatch error; every non-dispatch error omits it entirely, keeping
+ * dispatch or answer error; every other error omits it entirely, keeping
  * the wire shape byte-compatible with every existing error response. */
 export const bridgeErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
   delivery: bridgeErrorDeliverySchema.optional(),
-  attempt: bridgeDispatchAttemptMetaSchema.optional(),
+  attempt: z
+    .union([bridgeDispatchAttemptMetaSchema, bridgeAnswerAttemptMetaSchema])
+    .optional(),
 });
 export type BridgeError = z.infer<typeof bridgeErrorSchema>;
 

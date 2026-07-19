@@ -29,17 +29,21 @@
  */
 import { z } from "zod";
 import type {
+  answerQuestion,
   createDispatchMessageId,
   dispatch,
   messages,
+  questions,
   roster,
   snapshot,
   toDispatchArgs,
 } from "../server/bus";
 import type { BusContext } from "../server/types";
 import {
+  type AnswerQuestionArgs,
   type DispatchPromptArgs,
   type GetTranscriptArgs,
+  type ListPendingQuestionsArgs,
   type ListSessionsArgs,
   type SelectSessionArgs,
   type SessionResultSchema,
@@ -48,12 +52,14 @@ import {
   type SessionToolResult,
   type SessionToolSource,
   TRANSCRIPT_DEFAULT_LIMIT,
+  answerQuestionArgsSchema,
   dispatchPromptArgsSchema,
   getTranscriptArgsSchema,
   isBrandedResultSchema,
   isValidProjectName,
   isValidRequestId,
   isValidSessionId,
+  listPendingQuestionsArgsSchema,
   listSessionsArgsSchema,
   noArgsSchema,
   parseSessionToolArgs,
@@ -62,6 +68,7 @@ import {
   sessionResultSchema,
 } from "./commands";
 import {
+  ANSWER_INDETERMINATE,
   DISPATCH_INDETERMINATE,
   INTERNAL_ERROR,
   UPSTREAM_ERROR,
@@ -69,7 +76,13 @@ import {
   toolError,
 } from "./errors";
 import {
+  type AnswerQuestionIo,
+  type PendingQuestionLookup,
+  answerQuestionOperation,
+} from "./questions";
+import {
   activeContextView,
+  pendingQuestionView,
   projectView,
   toSessionRowViews,
   toTranscriptView,
@@ -154,14 +167,31 @@ export interface SessionToolStoredSession {
   parentID?: string;
 }
 
+/** Structural subset of a stored pending question (`StoredQuestion` in
+ * `src/server/session-store.ts`) — `ide_answer_question` reads this via
+ * `getPendingQuestion` to validate request ownership/cardinality before
+ * any answer I/O. */
+export interface SessionToolStoredQuestion {
+  sessionID: string;
+  questions?: readonly {
+    multiple?: boolean;
+    custom?: boolean;
+    options?: readonly { label?: string }[];
+  }[];
+}
+
 /** Structural subset of `SessionStore` (see `src/server/session-store.ts`)
- * — every session-tool operation needs at most these four read methods
- * plus the two mutators for completeness; kept structural so test fixtures
+ * — every session-tool operation needs at most these read methods plus
+ * the two mutators for completeness; kept structural so test fixtures
  * don't need to construct a full store. */
 export interface SessionToolStore {
   getSessions(directory?: string): readonly SessionToolStoredSession[];
   getSession(id: string): SessionToolStoredSession | undefined;
   getPendingQuestions(sessionID?: string): readonly unknown[];
+  /** Read-only single-request lookup by `requestID` (the `que_...` id,
+   * never an SSE envelope id) — see `SessionStore.getPendingQuestion` in
+   * `src/server/session-store.ts`. */
+  getPendingQuestion(requestID: string): SessionToolStoredQuestion | undefined;
   subscribe(listener: (snapshot: unknown) => void): () => void;
   applyEvent(event: unknown): void;
   reconcile(input: unknown): void;
@@ -281,13 +311,35 @@ export interface SessionToolBusFacade {
       messages: readonly SessionToolMessage[];
     }>
   >;
+  /** Full project- or session-scoped pending-question read, used by
+   * `ide_list_pending_questions`. Exactly one of `project`/`sessionId`
+   * — never both, never neither (mirrors space-bus's own `QuestionTarget`
+   * discriminated union, collapsed to both-optional here for the same
+   * reason `SessionToolDispatchArgs` does: the executor always constructs
+   * the call with exactly one set, proven by target resolution before
+   * this is ever invoked). */
+  questions?: (
+    target: { project?: string; sessionId?: string },
+    opts: { context: SessionToolBusContext },
+  ) => Promise<
+    SessionToolBusResult<{
+      questions: readonly SessionToolRawProject[];
+    }>
+  >;
+  /** Explicit-answer primitive, used by `ide_answer_question` — invoked
+   * EXACTLY ONCE per call, through `src/ide/questions.ts`'s shared
+   * `answerQuestionOperation`, never retried. */
+  answerQuestion?: (
+    args: { sessionId: string; requestId: string; answers: string[][] },
+    opts: { context: SessionToolBusContext },
+  ) => Promise<SessionToolBusResult<{ sessionId: string; requestId: string }>>;
   [key: string]: unknown;
 }
 
 /** Compile-time-only (never called) proof that the real, imported
- * `roster`/`snapshot`/`toDispatchArgs`/`dispatch`/`messages` facade
- * functions are assignable to `SessionToolBusFacade`'s fields with no
- * cast. */
+ * `roster`/`snapshot`/`toDispatchArgs`/`dispatch`/`messages`/`questions`/
+ * `answerQuestion` facade functions are assignable to
+ * `SessionToolBusFacade`'s fields with no cast. */
 function _assertBusFacadeAssignable(
   realRoster: typeof roster,
   realSnapshot: typeof snapshot,
@@ -295,6 +347,8 @@ function _assertBusFacadeAssignable(
   realDispatch: typeof dispatch,
   realCreateDispatchMessageId: typeof createDispatchMessageId,
   realMessages: typeof messages,
+  realQuestions: typeof questions,
+  realAnswerQuestion: typeof answerQuestion,
 ): void {
   const _typed: SessionToolBusFacade = {
     roster: realRoster,
@@ -314,6 +368,14 @@ function _assertBusFacadeAssignable(
       realDispatch(args as Parameters<typeof realDispatch>[0], opts),
     createDispatchMessageId: realCreateDispatchMessageId,
     messages: realMessages,
+    // Same discriminated-union-to-both-optional bridge as `dispatch`
+    // above — `questions()`'s real parameter is `project`-XOR-`sessionId`;
+    // this executor always constructs it with exactly one set, proven by
+    // target resolution before `listPendingQuestionsHandler` ever calls
+    // through this facade field.
+    questions: (target, opts) =>
+      realQuestions(target as Parameters<typeof realQuestions>[0], opts),
+    answerQuestion: realAnswerQuestion,
   };
   void _typed;
 }
@@ -2141,4 +2203,302 @@ export function registerTranscriptTool(): void {
  * `ide_get_transcript` afresh. */
 export function __resetTranscriptToolRegistrationForTests(): void {
   transcriptToolRegistered = false;
+}
+
+// --- pending questions --------------------------------------------------
+
+const pendingQuestionOptionResultSchema = z
+  .object({
+    label: z.string(),
+    description: z.string().optional(),
+  })
+  .strict();
+
+const pendingSubquestionResultSchema = z
+  .object({
+    header: z.string().optional(),
+    question: z.string(),
+    multiple: z.boolean(),
+    custom: z.boolean(),
+    options: z.array(pendingQuestionOptionResultSchema),
+  })
+  .strict();
+
+const pendingQuestionResultSchema = z
+  .object({
+    requestId: z.string(),
+    sessionId: z.string(),
+    questions: z.array(pendingSubquestionResultSchema),
+  })
+  .strict();
+
+const listPendingQuestionsResultSchema = z
+  .object({
+    questions: z.array(pendingQuestionResultSchema),
+  })
+  .strict();
+
+/**
+ * `ide_list_pending_questions`: reads FULL structured pending-question
+ * metadata (request id, owning session id, header/question text,
+ * selection rules, option labels/descriptions) for a unique roster
+ * project or a current roster-owned session — never an unscoped global
+ * list — through the shared space-bus `questions()` /core facade.
+ *
+ * Target resolution (`target: "project_or_session"`) has already proven
+ * the project exists in the roster, or the session exists and is owned
+ * by a current roster project, before this handler ever runs — so the
+ * `project`/`sessionId` value passed to `bus.questions()` is always
+ * already-validated, never a raw caller string.
+ *
+ * A missing `deps.bus.questions`, a thrown read, or an `ok:false` result
+ * is `upstream_error`/`indeterminate` (a read-only operation, same
+ * uniform-indeterminate posture as `ide_get_transcript`). Every returned
+ * entry passes through `pendingQuestionView` (`./views.ts`) — the
+ * allowlist disclosure boundary for this surface — so no raw/path/
+ * credential field from the upstream response can leak through, and
+ * question/option free text is preserved verbatim (untrusted, never
+ * scrubbed) per the plan's disclosure decision.
+ */
+async function listPendingQuestionsHandler(
+  _args: ListPendingQuestionsArgs,
+  target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<
+  SessionToolResult<z.infer<typeof listPendingQuestionsResultSchema>>
+> {
+  if (target.kind !== "project" && target.kind !== "session") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!deps.bus.questions) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  const busTarget =
+    target.kind === "project"
+      ? { project: target.project.name }
+      : { sessionId: target.session.id };
+
+  let read: Awaited<ReturnType<NonNullable<typeof deps.bus.questions>>>;
+  try {
+    read = await deps.bus.questions(busTarget, { context: deps.context });
+  } catch {
+    return { ok: false, error: UPSTREAM_ERROR("indeterminate") };
+  }
+  if (!read.ok) {
+    return { ok: false, error: UPSTREAM_ERROR("indeterminate") };
+  }
+
+  const questionsList = read.questions.map((raw) => pendingQuestionView(raw));
+
+  return { ok: true, data: { questions: questionsList } };
+}
+
+// --- answer question --------------------------------------------------
+
+const answerQuestionResultSchema = z
+  .object({
+    sessionId: z.string(),
+    requestId: z.string(),
+  })
+  .strict();
+
+/**
+ * `ide_answer_question`: answers ONE pending request proven to belong to
+ * the already-resolved (roster-owned) session, through the shared
+ * question-domain operation (`src/ide/questions.ts`'s
+ * `answerQuestionOperation`) — the SAME operation `TranscriptPanel`'s
+ * answer box calls, so MCP and UI answers share one validation/I-O
+ * contract rather than two independently-maintained ones.
+ *
+ * `deps.store.getPendingQuestion` supplies the read-only pending-request
+ * lookup this operation validates the request id/session ownership/
+ * cardinality against, BEFORE `deps.bus.answerQuestion` (the one I/O
+ * call) ever runs — a missing/already-resolved request, an event-ID or
+ * mismatched-session request id, or a wrong-cardinality/selection/custom
+ * answer body all fail closed as `not_sent`, never reaching I/O.
+ *
+ * A missing `deps.bus.answerQuestion` is `internal_error`/`indeterminate`
+ * (a program-wiring gap). `answerQuestionOperation`'s own
+ * `upstream_error`/`indeterminate` and `internal_error`/`indeterminate`
+ * outcomes are passed through as-is; on an indeterminate failure, this
+ * handler performs exactly ONE bounded re-list of pending questions
+ * (`deps.bus.questions`, scoped to the resolved session) to classify
+ * whether the request is now `resolved` (absent — proves the answer, or
+ * an independent resolution, went through) or `still_pending` (still
+ * visible — an explicit operator retry is permitted, never automatic)
+ * before returning the final `ANSWER_INDETERMINATE` error with that
+ * `resolution` value attached. A re-list read that itself fails/throws
+ * (or a missing `deps.bus.questions`) reports `resolution: "unavailable"`
+ * rather than guessing.
+ */
+async function answerQuestionHandler(
+  args: AnswerQuestionArgs,
+  target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<SessionToolResult<z.infer<typeof answerQuestionResultSchema>>> {
+  if (target.kind !== "session") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!deps.bus.answerQuestion) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  const io: AnswerQuestionIo = async (sessionId, requestId, answers) => {
+    // biome-ignore lint/style/noNonNullAssertion: guarded above — deps.bus.answerQuestion is proven present before io is ever constructed/invoked.
+    const res = await deps.bus.answerQuestion!(
+      { sessionId, requestId, answers },
+      { context: deps.context },
+    );
+    if (!res.ok) return { ok: false };
+    return { ok: true, sessionId: res.sessionId, requestId: res.requestId };
+  };
+
+  const getPendingQuestion = (
+    requestId: string,
+  ): PendingQuestionLookup | undefined => {
+    const stored = deps.store.getPendingQuestion(requestId);
+    if (!stored) return undefined;
+    return { sessionID: stored.sessionID, questions: stored.questions };
+  };
+
+  const result = await answerQuestionOperation(
+    {
+      sessionId: target.session.id,
+      requestId: args.requestId,
+      answers: args.answers,
+    },
+    { getPendingQuestion, answer: io },
+  );
+
+  if (result.ok) {
+    return { ok: true, data: result.data };
+  }
+
+  if (result.code !== "upstream_error" && result.code !== "internal_error") {
+    return {
+      ok: false,
+      error: toolError(
+        result.code,
+        ERROR_MESSAGE_FOR_QUESTION_CODE[result.code],
+        result.delivery,
+      ),
+    };
+  }
+
+  if (result.delivery === "not_sent") {
+    return {
+      ok: false,
+      error: toolError(
+        result.code,
+        "The upstream operation failed.",
+        "not_sent",
+      ),
+    };
+  }
+
+  // Indeterminate answer/internal failure: attempt exactly ONE bounded
+  // re-list of pending questions for the resolved session to classify
+  // resolution before reporting the final indeterminate error.
+  const resolution = await reconcileAnswerFailure(deps, target.session);
+
+  return {
+    ok: false,
+    error: ANSWER_INDETERMINATE({
+      operation: "answer",
+      sessionId: target.session.id,
+      requestId: args.requestId,
+      resolution,
+    }),
+  };
+}
+
+/** Program-owned messages for the two `not_sent` question-domain codes
+ * `answerQuestionOperation` can return (`unknown_question`/
+ * `question_session_mismatch`/`invalid_answer_cardinality`) — kept local
+ * to this handler since `answerQuestionOperation` itself is IO-agnostic
+ * and returns only a code, never a message. */
+const ERROR_MESSAGE_FOR_QUESTION_CODE: Record<
+  | "unknown_question"
+  | "question_session_mismatch"
+  | "invalid_answer_cardinality",
+  string
+> = {
+  unknown_question: "No pending question matches the given request id.",
+  question_session_mismatch:
+    "The given request id does not belong to the specified session.",
+  invalid_answer_cardinality:
+    "The given answers do not match the pending question's structure.",
+};
+
+/** Bounded, read-only, single-pass re-list of pending questions for
+ * `session` after an indeterminate answer failure — never retries
+ * `answerQuestion` itself. Absence of `requestId` from the fresh list
+ * proves resolution (`"resolved"`); continued presence permits an
+ * explicit operator retry (`"still_pending"`); a missing
+ * `deps.bus.questions`, a throw, or an `ok:false` read all report
+ * `"unavailable"` rather than guessing. This function is intentionally
+ * NOT parameterized by `requestId` here — the caller checks presence in
+ * the returned list itself, since the goal is "is this exact one still
+ * pending", not a general question read. */
+async function reconcileAnswerFailure(
+  deps: SessionToolDeps,
+  session: ResolvedSession,
+): Promise<"resolved" | "still_pending" | "unavailable"> {
+  if (!deps.bus.questions) return "unavailable";
+  let read: Awaited<ReturnType<NonNullable<typeof deps.bus.questions>>>;
+  try {
+    read = await deps.bus.questions(
+      { sessionId: session.id },
+      { context: deps.context },
+    );
+  } catch {
+    return "unavailable";
+  }
+  if (!read.ok) return "unavailable";
+  const stillPending = read.questions.some((raw) => {
+    const view = pendingQuestionView(raw);
+    return view.sessionId === session.id;
+  });
+  return stillPending ? "still_pending" : "resolved";
+}
+
+let questionToolsRegistered = false;
+
+/**
+ * Registers `ide_list_pending_questions`/`ide_answer_question` via
+ * `registerSessionTool`. Idempotent and safe to call more than once — no
+ * implicit module-import side effect registers these; a caller (the
+ * bridge/UI integration point) must call this explicitly, separately
+ * from every other `register*` function in this module.
+ */
+export function registerQuestionTools(): void {
+  if (questionToolsRegistered) return;
+  questionToolsRegistered = true;
+
+  registerSessionTool("ide_list_pending_questions", {
+    argsSchema: listPendingQuestionsArgsSchema,
+    resultSchema: sessionResultSchema({
+      questions: z.array(pendingQuestionResultSchema),
+    }),
+    target: "project_or_session",
+    handler: listPendingQuestionsHandler,
+  });
+
+  registerSessionTool("ide_answer_question", {
+    argsSchema: answerQuestionArgsSchema,
+    resultSchema: sessionResultSchema({
+      sessionId: z.string(),
+      requestId: z.string(),
+    }),
+    target: "session",
+    handler: answerQuestionHandler,
+  });
+}
+
+/** Test/dev helper — resets the module-level idempotency latch so a test
+ * that calls `__resetSessionToolsForTests()` can re-register the
+ * pending-question tools afresh. */
+export function __resetQuestionToolsRegistrationForTests(): void {
+  questionToolsRegistered = false;
 }

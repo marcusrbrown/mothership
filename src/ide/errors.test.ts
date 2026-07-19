@@ -264,7 +264,10 @@ describe("DISPATCH_INDETERMINATE", () => {
     });
     expect(err.code).toBe("upstream_error");
     expect(err.delivery).toBe("indeterminate");
-    expect(err.attempt?.reconciliation).toBe("unavailable");
+    if (err.attempt?.operation !== "dispatch") {
+      throw new Error("expected a dispatch attempt");
+    }
+    expect(err.attempt.reconciliation).toBe("unavailable");
     expect(err.message).toBe("The upstream operation failed.");
   });
 });

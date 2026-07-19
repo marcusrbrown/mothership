@@ -467,3 +467,108 @@ export function toTranscriptView(
     bytes: { returned: returnedBytes, original: originalBytes },
   };
 }
+
+// --- pending questions (ide_list_pending_questions) ------------------------
+
+/** Raw shape this view accepts — a structural subset of
+ * `@fro.bot/space-bus/core`'s `PendingQuestionView`, read defensively (all
+ * fields optional/typed `unknown` where a malformed upstream entry could
+ * poison the shape) so a poisoned/malformed request degrades to omitted
+ * fields rather than throwing. */
+interface RawPendingQuestionOption {
+  label?: unknown;
+  description?: unknown;
+  [key: string]: unknown;
+}
+
+interface RawPendingSubquestion {
+  header?: unknown;
+  question?: unknown;
+  multiple?: unknown;
+  custom?: unknown;
+  options?: unknown;
+  [key: string]: unknown;
+}
+
+interface RawPendingQuestionView {
+  requestId?: unknown;
+  sessionId?: unknown;
+  questions?: unknown;
+  [key: string]: unknown;
+}
+
+export interface PendingQuestionOptionView {
+  label: string;
+  description?: string;
+}
+
+export interface PendingSubquestionView {
+  header?: string;
+  question: string;
+  multiple: boolean;
+  custom: boolean;
+  options: PendingQuestionOptionView[];
+}
+
+export interface PendingQuestionView {
+  requestId: string;
+  sessionId: string;
+  questions: PendingSubquestionView[];
+}
+
+function toOptionView(raw: unknown): PendingQuestionOptionView | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const o = raw as RawPendingQuestionOption;
+  const label = str(o.label);
+  if (label === undefined) return undefined;
+  const description = str(o.description);
+  return {
+    label,
+    ...(description !== undefined && { description }),
+  };
+}
+
+function toSubquestionView(raw: unknown): PendingSubquestionView | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const q = raw as RawPendingSubquestion;
+  const header = str(q.header);
+  const rawOptions = Array.isArray(q.options) ? q.options : [];
+  const options = rawOptions
+    .map(toOptionView)
+    .filter((o): o is PendingQuestionOptionView => o !== undefined);
+  return {
+    ...(header !== undefined && { header }),
+    question: str(q.question) ?? "",
+    multiple: bool(q.multiple) ?? false,
+    custom: bool(q.custom) ?? false,
+    options,
+  };
+}
+
+/**
+ * `ide_list_pending_questions` view: request id, owning session id, and
+ * FULL multi-question metadata (header/question text, `multiple`/
+ * `custom` selection rules, and option labels/descriptions) — the
+ * allowlist boundary for the pending-question disclosure surface. Every
+ * field is read defensively field-by-field from `raw`; no raw upstream
+ * object is ever spread or forwarded verbatim, so an unexpected field
+ * (a path, a credential, a future structural field) added upstream can
+ * never silently leak through this view. A malformed/poisoned request
+ * missing a `requestId`/`sessionId` still returns a (degraded, empty-
+ * string-id) view rather than throwing — the executor is responsible for
+ * discarding entries that don't resolve to a real target.
+ */
+export function pendingQuestionView(raw: unknown): PendingQuestionView {
+  if (raw === null || typeof raw !== "object") {
+    return { requestId: "", sessionId: "", questions: [] };
+  }
+  const r = raw as RawPendingQuestionView;
+  const rawQuestions = Array.isArray(r.questions) ? r.questions : [];
+  return {
+    requestId: str(r.requestId) ?? "",
+    sessionId: str(r.sessionId) ?? "",
+    questions: rawQuestions
+      .map(toSubquestionView)
+      .filter((q): q is PendingSubquestionView => q !== undefined),
+  };
+}

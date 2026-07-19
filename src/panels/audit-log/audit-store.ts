@@ -49,6 +49,10 @@ const KNOWN_ERROR_CODES = [
   "ambiguous_project",
   "unknown_session",
   "session_project_mismatch",
+  "unknown_question",
+  "question_session_mismatch",
+  "question_already_resolved",
+  "invalid_answer_cardinality",
   "upstream_error",
   "internal_error",
 ] as const;

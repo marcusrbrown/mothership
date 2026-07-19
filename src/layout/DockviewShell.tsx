@@ -24,15 +24,18 @@ import {
   type SessionToolDeps,
   registerDiscoveryContextTools,
   registerDispatchTool,
+  registerQuestionTools,
   registerTranscriptTool,
 } from "../ide/executor";
 import { type FocusController, createFocusController } from "../ide/focus";
 import { auditStore } from "../panels/audit-log";
 import { PromptBar } from "../promptbar";
 import {
+  answerQuestion,
   createDispatchMessageId,
   dispatch,
   messages,
+  questions,
   roster,
   snapshot,
   toDispatchArgs,
@@ -266,6 +269,14 @@ export function buildSessionToolDeps(
       dispatch: (args, opts) =>
         dispatch(args as Parameters<typeof dispatch>[0], opts),
       messages,
+      // Same discriminated-union-to-both-optional bridge as `dispatch`
+      // above — `questions()`'s real parameter is `project`-XOR-`sessionId`;
+      // the executor always constructs it with exactly one set, proven by
+      // target resolution before `ide_list_pending_questions` ever calls
+      // through this facade field.
+      questions: (target, opts) =>
+        questions(target as Parameters<typeof questions>[0], opts),
+      answerQuestion,
     },
     refreshProject: (project: ResolvedProject) =>
       reconcileProject(live.client, live.store, project.expandedPath),
@@ -612,6 +623,7 @@ export function DockviewShell({
     registerDiscoveryContextTools();
     registerDispatchTool();
     registerTranscriptTool();
+    registerQuestionTools();
     const bridge = connectLayoutBridge(
       {
         get panels() {

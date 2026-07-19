@@ -66,6 +66,13 @@ export interface SessionStore {
   getSessions(directory?: string): StoredSession[];
   getSession(id: string): StoredSession | undefined;
   getPendingQuestions(sessionID?: string): StoredQuestion[];
+  /** Read-only single-request lookup by `requestID` (the `que_...` id,
+   * never an SSE envelope id) — the domain-answer boundary (`src/ide/
+   * questions.ts`, `ide_answer_question`) uses this to prove a requestID
+   * both EXISTS and is CURRENT (per the last reconcile/event) before ever
+   * validating cardinality or calling `answerQuestion`, without scanning
+   * `getPendingQuestions()`'s full array by hand at every call site. */
+  getPendingQuestion(requestID: string): StoredQuestion | undefined;
   subscribe(listener: SessionStoreListener): () => void;
   applyEvent(event: SseEvent): void;
   reconcile(input: ReconcileInput): void;
@@ -202,6 +209,10 @@ export function createSessionStore(): SessionStore {
       const all = [...pendingQuestions.values()];
       if (sessionID === undefined) return all;
       return all.filter((q) => q.sessionID === sessionID);
+    },
+
+    getPendingQuestion(requestID) {
+      return pendingQuestions.get(requestID);
     },
 
     subscribe(listener) {

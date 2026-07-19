@@ -76,6 +76,36 @@ describe("createSessionStore applyEvent", () => {
     expect(store.getPendingQuestions()).toHaveLength(0);
   });
 
+  test("getPendingQuestion returns the exact request by requestID, undefined once resolved", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("question.asked", {
+        id: "que_1",
+        sessionID: "ses_1",
+        questions: [{ question: "Proceed?", options: [{ label: "Yes" }] }],
+      }),
+    );
+    expect(store.getPendingQuestion("que_1")).toEqual({
+      requestID: "que_1",
+      sessionID: "ses_1",
+      questions: [{ question: "Proceed?", options: [{ label: "Yes" }] }],
+    });
+    expect(store.getPendingQuestion("que_unknown")).toBeUndefined();
+
+    store.applyEvent(
+      evt("question.replied", { sessionID: "ses_1", requestID: "que_1" }),
+    );
+    expect(store.getPendingQuestion("que_1")).toBeUndefined();
+  });
+
+  test("getPendingQuestion never matches an SSE envelope id (evt_...) even if one happens to collide with a stored key shape", () => {
+    const store = createSessionStore();
+    store.applyEvent(
+      evt("question.asked", { id: "que_1", sessionID: "ses_1" }),
+    );
+    expect(store.getPendingQuestion("evt_1")).toBeUndefined();
+  });
+
   test("question.rejected also clears the pending question", () => {
     const store = createSessionStore();
     store.applyEvent(

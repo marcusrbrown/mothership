@@ -93,6 +93,8 @@ describe("real end-to-end MCP session over /mcp (regression: stateless transport
           "ide_select_session",
           "ide_dispatch_prompt",
           "ide_get_transcript",
+          "ide_list_pending_questions",
+          "ide_answer_question",
         ].sort(),
       );
 

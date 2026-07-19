@@ -61,6 +61,7 @@ function makeSessionToolDeps(
             }
           : undefined,
       getPendingQuestions: () => [],
+      getPendingQuestion: () => undefined,
       subscribe: () => () => {},
       applyEvent: () => {},
       reconcile: () => {},
@@ -499,6 +500,7 @@ describe("handleBridgeRequest", () => {
           throw new Error("store exploded: /Users/marcus/secret leaked");
         },
         getPendingQuestions: () => [],
+        getPendingQuestion: () => undefined,
         subscribe: () => () => {},
         applyEvent: () => {},
         reconcile: () => {},
@@ -966,6 +968,7 @@ describe("connectLayoutBridge", () => {
             throw new Error("store exploded: /Users/marcus/secret");
           },
           getPendingQuestions: () => [],
+          getPendingQuestion: () => undefined,
           subscribe: () => () => {},
           applyEvent: () => {},
           reconcile: () => {},

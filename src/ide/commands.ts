@@ -66,6 +66,16 @@ export function isValidRequestId(value: string): boolean {
   return /^que_[A-Za-z0-9]+$/.test(value);
 }
 
+function requestIdSchema() {
+  return z
+    .string()
+    .min(1, "requestId must be a non-empty string")
+    .refine(isValidRequestId, {
+      message:
+        "requestId must be a valid opaque que_-prefixed identifier, never an SSE envelope id",
+    });
+}
+
 function projectNameSchema() {
   return z
     .string()
@@ -204,6 +214,43 @@ export const dispatchPromptArgsSchema = z
  * no schema field through which a caller could set or override either. */
 export type DispatchPromptArgs = z.infer<typeof dispatchPromptArgsSchema>;
 
+/** `ide_list_pending_questions`'s args: exactly one of a validated logical
+ * `project`/`sessionId` target — never both, never neither, never a
+ * global/unscoped list. `.strict()` closes the object: no other field is
+ * representable. */
+export const listPendingQuestionsArgsSchema = z
+  .object({
+    project: projectNameSchema().optional(),
+    sessionId: sessionIdSchema().optional(),
+  })
+  .strict()
+  .refine((v) => (v.project === undefined) !== (v.sessionId === undefined), {
+    message: "exactly one of project or sessionId is required",
+  });
+export type ListPendingQuestionsArgs = z.infer<
+  typeof listPendingQuestionsArgsSchema
+>;
+
+/** `ide_answer_question`'s args: the owning session, the `que_...`
+ * request id (never an SSE envelope id), and the `string[][]` answer body
+ * — one array of selected/custom answer strings per subquestion, in the
+ * same order as the pending request's own `questions` array. `.strict()`
+ * closes the object. Cardinality (row count matching subquestion count)
+ * and per-row single/multi/custom semantics are validated in the
+ * executor against the ACTUAL pending request — not derivable from this
+ * schema alone, since the schema has no visibility into which request
+ * `requestId` names until target/request resolution runs. */
+export const answerQuestionArgsSchema = z
+  .object({
+    sessionId: sessionIdSchema(),
+    requestId: requestIdSchema(),
+    answers: z
+      .array(z.array(z.string()))
+      .min(1, "answers must be a non-empty array of string arrays"),
+  })
+  .strict();
+export type AnswerQuestionArgs = z.infer<typeof answerQuestionArgsSchema>;
+
 /** Mirrors `src/layout/commands.ts`'s `CommandSource` — kept as a distinct
  * type (not re-exported) so the session-tool domain never structurally
  * couples to the layout command layer. */
@@ -217,6 +264,10 @@ export type SessionToolErrorCode =
   | "ambiguous_project"
   | "unknown_session"
   | "session_project_mismatch"
+  | "unknown_question"
+  | "question_session_mismatch"
+  | "question_already_resolved"
+  | "invalid_answer_cardinality"
   | "upstream_error"
   | "internal_error";
 
@@ -245,13 +296,35 @@ export interface SessionToolDispatchAttemptMeta {
   reconciliation: "unconfirmed" | "ambiguous" | "unavailable";
 }
 
+/** Safe, closed metadata describing an INDETERMINATE answer attempt —
+ * attached only to an `ide_answer_question` error whose delivery is
+ * `"indeterminate"` (the reply may or may not have been recorded upstream
+ * and could not be confirmed by the bounded post-failure re-list pass).
+ * `resolution` reflects the ONE bounded re-list this executor performs
+ * after the failed `answerQuestion` call: `"resolved"` — the request is
+ * no longer pending (absence proves the answer went through, or the
+ * request was independently resolved another way); `"still_pending"` —
+ * the request is still visible in a fresh pending-question read, so an
+ * explicit operator retry is permitted (never automatic); `"unavailable"`
+ * — the re-list read itself failed, so resolution could not be checked.
+ * Deliberately excludes the answer text/labels, a timestamp, or raw
+ * upstream error text — `sessionId`/`requestId` here are always the
+ * RESOLVED logical identifiers, never raw caller-supplied strings that
+ * failed validation. */
+export interface SessionToolAnswerAttemptMeta {
+  operation: "answer";
+  sessionId: string;
+  requestId: string;
+  resolution: "resolved" | "still_pending" | "unavailable";
+}
+
 export interface SessionToolError {
   code: SessionToolErrorCode;
   message: string;
   delivery?: SessionToolErrorDelivery;
-  /** Only ever present on a dispatch error; see
-   * `SessionToolDispatchAttemptMeta`. */
-  attempt?: SessionToolDispatchAttemptMeta;
+  /** Present only on a dispatch or answer error; see
+   * `SessionToolDispatchAttemptMeta`/`SessionToolAnswerAttemptMeta`. */
+  attempt?: SessionToolDispatchAttemptMeta | SessionToolAnswerAttemptMeta;
 }
 
 /**
