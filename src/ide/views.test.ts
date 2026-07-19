@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { boundText, projectView, sessionView } from "./views";
+import {
+  activeContextView,
+  boundText,
+  projectView,
+  sessionView,
+  toSessionRowViews,
+} from "./views";
 
 describe("projectView", () => {
   test("happy path: allowlists name/status fields only, no path", () => {
@@ -13,12 +19,79 @@ describe("projectView", () => {
     });
     expect(view).toEqual({
       name: "dashboard",
-      description: "Operator dashboard",
       exists: true,
       busyCount: 1,
       sessionCount: 3,
+      sessionCountCapped: undefined,
       hasStatusError: false,
+      snapshotUnknown: true,
+      hasSnapshotError: false,
     });
+  });
+
+  test("security: never includes a description field even though the raw upstream object carries one", () => {
+    const view = projectView({
+      name: "dashboard",
+      description: "Operator dashboard for the whole org — internal use only",
+      pathExists: true,
+    }) as unknown as Record<string, unknown>;
+    expect(view.description).toBeUndefined();
+    expect(JSON.stringify(view)).not.toContain("Operator dashboard");
+  });
+
+  test("happy path: a matched snapshot entry's exists/busyCount/sessionCount take priority over the roster read", () => {
+    const view = projectView(
+      { name: "dashboard", pathExists: true, busyCount: 1, sessionCount: 3 },
+      {
+        exists: false,
+        busyCount: 5,
+        sessionCount: 9,
+        sessionCountCapped: true,
+      },
+    );
+    expect(view.exists).toBe(false);
+    expect(view.busyCount).toBe(5);
+    expect(view.sessionCount).toBe(9);
+    expect(view.sessionCountCapped).toBe(true);
+    expect(view.snapshotUnknown).toBe(false);
+  });
+
+  test("happy path: no matching snapshot entry -> snapshotUnknown:true, falls back to roster fields", () => {
+    const view = projectView({
+      name: "dashboard",
+      pathExists: true,
+      busyCount: 1,
+    });
+    expect(view.snapshotUnknown).toBe(true);
+    expect(view.exists).toBe(true);
+    expect(view.busyCount).toBe(1);
+  });
+
+  test("security: a snapshot entry's error surfaces only as hasSnapshotError:true, never the raw string", () => {
+    const view = projectView(
+      { name: "dashboard", pathExists: true },
+      { error: "ECONNREFUSED 10.0.0.5:4096 (Bearer abc123)" },
+    );
+    expect(view.hasSnapshotError).toBe(true);
+    const serialized = JSON.stringify(view);
+    expect(serialized).not.toContain("ECONNREFUSED");
+    expect(serialized).not.toContain("Bearer abc123");
+    expect(serialized).not.toContain("10.0.0.5");
+  });
+
+  test("security: never includes a path/expandedPath/directory field from the snapshot entry either", () => {
+    const view = projectView(
+      { name: "dashboard", pathExists: true },
+      {
+        path: "/Users/marcus/src/fro-bot/dashboard",
+        expandedPath: "/Users/marcus/src/fro-bot/dashboard",
+        directory: "/Users/marcus/src/fro-bot/dashboard",
+      },
+    ) as unknown as Record<string, unknown>;
+    expect(view.path).toBeUndefined();
+    expect(view.expandedPath).toBeUndefined();
+    expect(view.directory).toBeUndefined();
+    expect(JSON.stringify(view)).not.toContain("/Users/marcus");
   });
 
   test("happy path: a present statusError surfaces only as hasStatusError:true, never the raw string", () => {
@@ -108,6 +181,188 @@ describe("sessionView", () => {
       id: "ses_1",
       directory: "/Users/marcus/src/fro-bot/dashboard",
       status: "idle",
+    }) as unknown as Record<string, unknown>;
+    expect(view.directory).toBeUndefined();
+    expect(JSON.stringify(view)).not.toContain("/Users/marcus");
+  });
+});
+
+describe("toSessionRowViews", () => {
+  function session(
+    overrides: Partial<{
+      id: string;
+      title: string;
+      status: string;
+      updatedAt: number;
+      parentID: string;
+    }> = {},
+  ) {
+    return { id: "ses_x", ...overrides };
+  }
+
+  test("happy path: default excludes subagent sessions (parentID present), preserving order", () => {
+    const rows = toSessionRowViews(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "Fix (@fixer subagent)" }),
+        session({ id: "s3", title: "Another top", parentID: "s1" }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1"]);
+  });
+
+  test("happy path: includeSubagents:true keeps all sessions", () => {
+    const rows = toSessionRowViews(
+      [
+        session({ id: "s1", title: "Top level" }),
+        session({ id: "s2", title: "Fix (@fixer subagent)" }),
+      ],
+      new Set(),
+      { includeSubagents: true },
+    );
+    expect(rows.map((r) => r.id)).toEqual(["s1", "s2"]);
+  });
+
+  test("happy path: title-suffix fallback filters a subagent session lacking parentID", () => {
+    const rows = toSessionRowViews(
+      [session({ id: "s1", title: "Fix the tests (@fixer subagent)" })],
+      new Set(),
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test("happy path: parentID takes priority as the subagent signal regardless of title text", () => {
+    const rows = toSessionRowViews(
+      [session({ id: "s1", title: "No subagent marker", parentID: "parent" })],
+      new Set(),
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test("happy path: updatedAt-descending ordering, most recent first", () => {
+    const rows = toSessionRowViews(
+      [
+        session({ id: "old", updatedAt: 100 }),
+        session({ id: "new", updatedAt: 300 }),
+        session({ id: "mid", updatedAt: 200 }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["new", "mid", "old"]);
+  });
+
+  test("edge case: equal timestamps preserve stable (insertion) order", () => {
+    const rows = toSessionRowViews(
+      [
+        session({ id: "a", updatedAt: 100 }),
+        session({ id: "b", updatedAt: 100 }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["a", "b"]);
+  });
+
+  test("edge case: sessions with no updatedAt sink below timestamped sessions, stable among themselves", () => {
+    const rows = toSessionRowViews(
+      [
+        session({ id: "no-ts-1" }),
+        session({ id: "timestamped", updatedAt: 50 }),
+        session({ id: "no-ts-2" }),
+      ],
+      new Set(),
+    );
+    expect(rows.map((r) => r.id)).toEqual([
+      "timestamped",
+      "no-ts-1",
+      "no-ts-2",
+    ]);
+  });
+
+  test("happy path: title falls back to id when absent", () => {
+    const rows = toSessionRowViews([session({ id: "ses_notitle" })], new Set());
+    expect(rows[0]?.title).toBe("ses_notitle");
+  });
+
+  test("happy path: busy is true only when status === 'busy'", () => {
+    const rows = toSessionRowViews(
+      [
+        session({ id: "s1", status: "busy" }),
+        session({ id: "s2", status: "idle" }),
+        session({ id: "s3" }),
+      ],
+      new Set(),
+    );
+    expect(rows.find((r) => r.id === "s1")?.busy).toBe(true);
+    expect(rows.find((r) => r.id === "s2")?.busy).toBe(false);
+    expect(rows.find((r) => r.id === "s3")?.busy).toBe(false);
+  });
+
+  test("happy path: needsAttention reflects pendingSessionIds membership", () => {
+    const rows = toSessionRowViews(
+      [session({ id: "s1" }), session({ id: "s2" })],
+      new Set(["s1"]),
+    );
+    expect(rows.find((r) => r.id === "s1")?.needsAttention).toBe(true);
+    expect(rows.find((r) => r.id === "s2")?.needsAttention).toBe(false);
+  });
+
+  test("security: needsAttention on a hidden subagent session never leaks once filtered", () => {
+    const rows = toSessionRowViews(
+      [session({ id: "s2", title: "Fix (@fixer subagent)" })],
+      new Set(["s2"]),
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test("security: rows never carry directory, parentID, or updatedAt fields", () => {
+    const rows = toSessionRowViews(
+      [
+        {
+          id: "s1",
+          title: "t",
+          status: "idle",
+          updatedAt: 1,
+          parentID: undefined,
+          directory: "/Users/marcus/src/dashboard",
+        } as unknown as { id: string },
+      ],
+      new Set(),
+    );
+    const serialized = JSON.stringify(rows);
+    expect(serialized).not.toContain("/Users/marcus");
+    expect(serialized).not.toContain("parentID");
+    expect(serialized).not.toContain("updatedAt");
+    expect(serialized).not.toContain("directory");
+  });
+});
+
+describe("activeContextView", () => {
+  test("happy path: both project and sessionId present", () => {
+    const view = activeContextView({
+      project: "dashboard",
+      sessionId: "ses_1",
+    });
+    expect(view).toEqual({ project: "dashboard", sessionId: "ses_1" });
+  });
+
+  test("happy path: neither focused yet -> empty object, not null/undefined fields", () => {
+    const view = activeContextView({});
+    expect(view).toEqual({});
+    expect("project" in view).toBe(false);
+    expect("sessionId" in view).toBe(false);
+  });
+
+  test("happy path: only project focused", () => {
+    const view = activeContextView({ project: "dashboard" });
+    expect(view).toEqual({ project: "dashboard" });
+  });
+
+  test("security: never includes a directory field even if present on the raw input", () => {
+    const view = activeContextView({
+      project: "dashboard",
+      // biome-ignore lint/suspicious/noExplicitAny: intentionally malformed/poisoned fixture
+      directory: "/Users/marcus/secret" as any,
     }) as unknown as Record<string, unknown>;
     expect(view.directory).toBeUndefined();
     expect(JSON.stringify(view)).not.toContain("/Users/marcus");

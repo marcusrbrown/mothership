@@ -1,6 +1,24 @@
 import { describe, expect, test } from "bun:test";
+import type {
+  BridgeError,
+  BridgeResponse,
+} from "../../src/layout/bridge-protocol";
 import type { BridgeSocket } from "./ws-bridge";
 import { createWsBridge } from "./ws-bridge";
+
+/** Narrows a `BridgeResponse` to its `ok:false` branch and returns its
+ * `error`, throwing (failing the test with a clear message) if the
+ * response was actually `ok:true` — a genuine type-narrowing assertion,
+ * not merely an `expect(...).toBe(false)` runtime check that leaves
+ * `error` unnarrowed for the type checker. */
+function expectError(res: BridgeResponse): BridgeError {
+  if (res.ok) {
+    throw new Error(
+      `expected an ok:false response, got ok:true domain:"${res.domain}"`,
+    );
+  }
+  return res.error;
+}
 
 class FakeSocket implements BridgeSocket {
   sent: string[] = [];
@@ -109,9 +127,10 @@ describe("ws-bridge dispatch", () => {
       panelId: "x",
     });
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("unavailable");
+    const error = expectError(res);
+    expect(error.code).toBe("unavailable");
     expect(res.domain).toBe("transport");
-    expect(res.error?.delivery).toBe("not_sent");
+    expect(error.delivery).toBe("not_sent");
   });
 
   test("dispatch after auth relays request and resolves on matching response, passing through the webview's own domain/delivery unchanged", async () => {
@@ -172,8 +191,9 @@ describe("ws-bridge dispatch", () => {
     const res = await promise;
     expect(res.ok).toBe(false);
     expect(res.domain).toBe("session");
-    expect(res.error?.code).toBe("not_found");
-    expect(res.error?.delivery).toBe("indeterminate");
+    const error = expectError(res);
+    expect(error.code).toBe("not_found");
+    expect(error.delivery).toBe("indeterminate");
   });
 
   test("WS drop after dispatch rejects pending request with disconnected, no orphans; domain:transport delivery:indeterminate (accepted send, outcome unknown)", async () => {
@@ -189,9 +209,10 @@ describe("ws-bridge dispatch", () => {
     bridge.onClose(sock);
     const res = await promise;
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("disconnected");
+    const error = expectError(res);
+    expect(error.code).toBe("disconnected");
     expect(res.domain).toBe("transport");
-    expect(res.error?.delivery).toBe("indeterminate");
+    expect(error.delivery).toBe("indeterminate");
   });
 
   test("dispatch times out if no response arrives; domain:transport delivery:indeterminate (accepted send, outcome unknown)", async () => {
@@ -205,9 +226,10 @@ describe("ws-bridge dispatch", () => {
       panelId: "x",
     });
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("timeout");
+    const error = expectError(res);
+    expect(error.code).toBe("timeout");
     expect(res.domain).toBe("transport");
-    expect(res.error?.delivery).toBe("indeterminate");
+    expect(error.delivery).toBe("indeterminate");
   });
 
   test("send throw classifies as not-sent, never registers pending; domain:transport delivery:not_sent", async () => {
@@ -224,9 +246,10 @@ describe("ws-bridge dispatch", () => {
       panelId: "x",
     });
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("send_failed");
+    const error = expectError(res);
+    expect(error.code).toBe("send_failed");
     expect(res.domain).toBe("transport");
-    expect(res.error?.delivery).toBe("not_sent");
+    expect(error.delivery).toBe("not_sent");
     // No leaked raw error text (tokens/paths/payload) in the classified result.
     expect(JSON.stringify(res)).not.toContain("secret token");
     expect(bridge.pendingCount?.()).toBe(0);
@@ -244,9 +267,10 @@ describe("ws-bridge dispatch", () => {
       panelId: "x",
     });
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("send_failed");
+    const error = expectError(res);
+    expect(error.code).toBe("send_failed");
     expect(res.domain).toBe("transport");
-    expect(res.error?.delivery).toBe("not_sent");
+    expect(error.delivery).toBe("not_sent");
     expect(bridge.pendingCount?.()).toBe(0);
   });
 
@@ -326,9 +350,10 @@ describe("ws-bridge socket generation / replacement", () => {
 
     const res = await promise;
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("replaced");
+    const error = expectError(res);
+    expect(error.code).toBe("replaced");
     expect(res.domain).toBe("transport");
-    expect(res.error?.delivery).toBe("indeterminate");
+    expect(error.delivery).toBe("indeterminate");
     expect(bridge.pendingCount?.()).toBe(0);
     expect(bridge.isReady()).toBe(true);
   });
@@ -484,9 +509,10 @@ describe("ws-bridge socket generation / replacement", () => {
     bridge.onClose(sock);
     const res = await promise;
     expect(res.ok).toBe(false);
-    expect(res.error?.code).toBe("disconnected");
+    const error = expectError(res);
+    expect(error.code).toBe("disconnected");
     expect(res.domain).toBe("transport");
-    expect(res.error?.delivery).toBe("indeterminate");
+    expect(error.delivery).toBe("indeterminate");
     expect(bridge.pendingCount?.()).toBe(0);
     expect(bridge.isReady()).toBe(false);
   });

@@ -67,13 +67,32 @@ export interface BridgeDeps {
   /** Reconnect delay in ms — defaults to 1000, overridable for tests. */
   reconnectDelayMs?: number;
   /**
-   * Optional session-tool execution deps. Absent by default — every
-   * existing `connectLayoutBridge` call site compiles and behaves
-   * exactly as before without it. When present, a request naming a
-   * registered session tool is routed to `runSessionTool` against these
-   * deps instead of the layout path.
+   * Optional session-tool execution deps, evaluated ONCE at
+   * `connectLayoutBridge` call time. Absent by default — every existing
+   * `connectLayoutBridge` call site compiles and behaves exactly as
+   * before without it. When present, a request naming a registered
+   * session tool is routed to `runSessionTool` against these deps
+   * instead of the layout path.
+   *
+   * Prefer `getSessionTools` (below) for any caller whose deps can
+   * change after connecting (e.g. DockviewShell, where `context`/`live`/
+   * the focus controller may not exist yet at bridge-mount time, or a
+   * workspace reconnect replaces them) — a fixed `sessionTools` value
+   * captured once at construction can never reflect that change. Both
+   * may be supplied; when both are present, `getSessionTools` wins per
+   * request (see `connectLayoutBridge`'s resolution below).
    */
   sessionTools?: SessionToolDeps;
+  /**
+   * Resolves session-tool execution deps FRESH for every relayed
+   * request, called from inside the request handler (never once at
+   * construction) — the fix for a stale-closure bridge that captured
+   * `sessionTools` before a workspace/context/focus controller existed,
+   * or before a reconnect swapped them out. Returning `undefined` is
+   * treated exactly like `sessionTools` being absent
+   * (`unavailable`/`not_sent`), never a crash.
+   */
+  getSessionTools?: () => SessionToolDeps | undefined;
 }
 
 const defaultDeps: Omit<BridgeDeps, "sessionTools"> = {
@@ -265,7 +284,9 @@ const KNOWN_LAYOUT_TOOL_NAMES: readonly string[] = [
 export async function handleBridgeRequest(
   req: BridgeRequest,
   adapter: DockviewAdapter,
-  sessionTools?: SessionToolDeps,
+  sessionToolsOrResolver?:
+    | SessionToolDeps
+    | (() => SessionToolDeps | undefined),
 ): Promise<BridgeResponse> {
   try {
     if (KNOWN_LAYOUT_TOOL_NAMES.includes(req.tool)) {
@@ -273,6 +294,15 @@ export async function handleBridgeRequest(
     }
 
     if (isRegisteredSessionTool(req.tool)) {
+      // Resolved HERE, per request — never destructured/evaluated once
+      // outside this function — so a resolver function reflects whatever
+      // context/live/focus-controller state is current at the moment
+      // THIS request is handled, not whatever existed when the caller
+      // first wired the bridge.
+      const sessionTools =
+        typeof sessionToolsOrResolver === "function"
+          ? sessionToolsOrResolver()
+          : sessionToolsOrResolver;
       if (!sessionTools) return sessionToolsUnavailable(req);
       // Awaited INSIDE this try, not merely returned — a bare `return
       // handleSessionRequest(...)` returns a pending promise without
@@ -321,10 +351,15 @@ export function connectLayoutBridge(
     createSocket,
     reconnectDelayMs = 1000,
     sessionTools,
+    getSessionTools,
   } = {
     ...defaultDeps,
     ...deps,
   };
+  // `getSessionTools` wins when both are supplied — it's the ONLY option
+  // that stays request-current; a fixed `sessionTools` is preserved for
+  // backward compatibility with existing callers/tests.
+  const resolveSessionTools = getSessionTools ?? (() => sessionTools);
 
   let closed = false;
   let socket: WsLike | undefined;
@@ -452,7 +487,7 @@ export function connectLayoutBridge(
       if (validated.data.kind !== "request") return;
 
       const req: BridgeRequest = validated.data;
-      void handleBridgeRequest(req, adapter, sessionTools)
+      void handleBridgeRequest(req, adapter, resolveSessionTools)
         .then((response) => {
           sendIfCurrent(ws, ownGeneration, response);
         })

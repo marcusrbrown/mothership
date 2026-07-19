@@ -12,6 +12,10 @@
  * Tests stub `readTextFile` directly.
  */
 import { z } from "zod";
+import {
+  FALLBACK_VIRTUAL_PROJECT_NAME,
+  isValidProjectName,
+} from "./project-name";
 
 export const manifestSchema = z.object({
   server: z
@@ -38,7 +42,10 @@ export const manifestSchema = z.object({
     }),
   projects: z.array(
     z.object({
-      name: z.string(),
+      name: z.string().refine(isValidProjectName, {
+        message:
+          "spacebus.json project name is not a valid roster project name (path/credential-shaped or malformed names are rejected)",
+      }),
       path: z.string(),
       description: z.string(),
     }),
@@ -88,6 +95,18 @@ function validateLocalhost(baseUrl: string): string | undefined {
   return undefined;
 }
 
+/** Returns the first project name that appears more than once (exact string equality,
+ * no case-folding or normalization — mirrors the existing name contract's leniency on
+ * spaces/punctuation/Unicode/slash), or `undefined` if all names are unique. */
+function findDuplicateProjectName(manifest: Manifest): string | undefined {
+  const seen = new Set<string>();
+  for (const p of manifest.projects) {
+    if (seen.has(p.name)) return p.name;
+    seen.add(p.name);
+  }
+  return undefined;
+}
+
 function toProjects(manifest: Manifest, homeDir?: string): Project[] {
   return manifest.projects.map((p) => ({
     ...p,
@@ -100,7 +119,43 @@ export type LoadWorkspaceOptions = {
   readTextFile?: (path: string) => Promise<string>;
   /** Home directory for `~` expansion; when omitted, `~` paths are left un-expanded. */
   homeDir?: string;
+  /** Injected existence check, used to distinguish "confirmed missing" (→
+   * virtual workspace) from "present but unreadable" (→ error) BEFORE
+   * attempting the read. When omitted, `loadWorkspace` falls back to its
+   * pre-existing behavior: any `readTextFile` throw is treated as
+   * "missing", since there is no independent signal to tell the two
+   * apart. Production callers (`StartupHandshake`) should inject the
+   * real Tauri-backed `pathExists`. */
+  pathExists?: (path: string) => Promise<boolean>;
 };
+
+/** Builds the virtual (no spacebus.json) single-project workspace result
+ * for `directory`. The derived project name (directory basename) is
+ * validated against the shared `isValidProjectName` invariant — a
+ * basename that fails (e.g. degenerate after trailing-slash stripping,
+ * or otherwise malformed) falls back to `FALLBACK_VIRTUAL_PROJECT_NAME`
+ * rather than being used as-is, and the rejected basename itself is
+ * never echoed anywhere (the fallback name is a fixed constant, not
+ * derived from the rejected value). */
+function virtualWorkspaceResult(
+  directory: string,
+  homeDir?: string,
+): WorkspaceResult {
+  const basename =
+    directory.replace(/\/+$/, "").split("/").filter(Boolean).pop() ?? directory;
+  const name = isValidProjectName(basename)
+    ? basename
+    : FALLBACK_VIRTUAL_PROJECT_NAME;
+  return {
+    kind: "virtual",
+    project: {
+      name,
+      path: directory,
+      description: "",
+      expandedPath: expandHome(directory, homeDir),
+    },
+  };
+}
 
 /**
  * Loads the workspace for `directory` by reading `<directory>/spacebus.json`.
@@ -118,22 +173,53 @@ export async function loadWorkspace(
   const readTextFile = options.readTextFile ?? defaultReadTextFile;
   const manifestPath = `${directory.replace(/\/+$/, "")}/spacebus.json`;
 
+  const pathExists = options.pathExists;
+  let readable: boolean;
+  if (pathExists) {
+    let exists: boolean;
+    try {
+      exists = await pathExists(manifestPath);
+    } catch {
+      // A `pathExists` seam that itself fails cannot distinguish
+      // "confirmed missing" from "confirmed present but unreadable" —
+      // fail closed as a stable, non-secret error rather than guessing
+      // virtual (which would silently discard a possibly-real manifest).
+      return {
+        kind: "error",
+        message: "spacebus.json existence check failed",
+      };
+    }
+    readable = exists;
+  } else {
+    // No injected `pathExists` seam — this is the pre-existing behavior:
+    // any `readTextFile` throw (missing OR unreadable-for-any-reason) is
+    // treated as "missing", since there is no independent existence
+    // signal to distinguish the two. Callers that need the distinction
+    // (e.g. `StartupHandshake`) must inject `pathExists`.
+    readable = true;
+  }
+
   let raw: string;
+  if (!readable) {
+    return virtualWorkspaceResult(directory, options.homeDir);
+  }
   try {
     raw = await readTextFile(manifestPath);
   } catch {
-    // Missing file (or unreadable for any reason) → virtual single-project workspace.
-    const name =
-      directory.replace(/\/+$/, "").split("/").filter(Boolean).pop() ??
-      directory;
+    if (!pathExists) {
+      // No independent existence signal — preserve the pre-existing
+      // "any throw means missing" fallback.
+      return virtualWorkspaceResult(directory, options.homeDir);
+    }
+    // `pathExists` confirmed the file IS present, yet the read still
+    // failed (permission denied, I/O error, race where it was deleted
+    // between the check and the read, etc) — this is a REAL error, not
+    // "no manifest". Falling back to virtual here would silently ignore
+    // a manifest the user actually has, potentially connecting to the
+    // wrong server/roster. The raw exception/path is never echoed.
     return {
-      kind: "virtual",
-      project: {
-        name,
-        path: directory,
-        description: "",
-        expandedPath: expandHome(directory, options.homeDir),
-      },
+      kind: "error",
+      message: "spacebus.json exists but could not be read",
     };
   }
 
@@ -157,6 +243,16 @@ export async function loadWorkspace(
     if (localhostError) {
       return { kind: "error", message: localhostError };
     }
+  }
+
+  if (findDuplicateProjectName(parsed.data) !== undefined) {
+    // Generic, stable message — the duplicate name itself is never echoed since
+    // project names may be path-shaped or credential-shaped (e.g. embedded tokens
+    // or secrets pasted into a name field) and must not leak into error output.
+    return {
+      kind: "error",
+      message: "spacebus.json project names must be unique",
+    };
   }
 
   return {

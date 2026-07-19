@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
+import { roster, snapshot } from "../server/bus";
+import type { BusContext } from "../server/types";
 import {
   projectOrSessionTargetSchema,
   projectTargetSchema,
@@ -7,9 +9,13 @@ import {
   sessionTargetSchema,
 } from "./commands";
 import {
+  type SessionToolBusContext,
+  type SessionToolBusFacade,
   type SessionToolDeps,
+  __resetDiscoveryContextRegistrationForTests,
   __resetSessionToolsForTests,
   isRegisteredSessionTool,
+  registerDiscoveryContextTools,
   registerSessionTool,
   resolveProject,
   resolveSession,
@@ -24,7 +30,10 @@ function makeDeps(overrides: Partial<SessionToolDeps> = {}): SessionToolDeps {
         projects: [
           {
             name: "dashboard",
+            path: "~/src/fro-bot/dashboard",
+            description: "",
             expandedPath: "/Users/marcus/src/fro-bot/dashboard",
+            exists: true,
           },
         ],
       },
@@ -111,8 +120,20 @@ describe("resolveProject", () => {
         roster: {
           server: { baseUrl: "http://127.0.0.1:4096" },
           projects: [
-            { name: "dashboard", expandedPath: "/a" },
-            { name: "dashboard", expandedPath: "/b" },
+            {
+              name: "dashboard",
+              path: "~/a",
+              description: "",
+              expandedPath: "/a",
+              exists: true,
+            },
+            {
+              name: "dashboard",
+              path: "~/b",
+              description: "",
+              expandedPath: "/b",
+              exists: true,
+            },
           ],
         },
       },
@@ -260,7 +281,15 @@ describe("session-tool registry + runSessionTool: structural target resolution",
       context: {
         roster: {
           server: { baseUrl: "http://127.0.0.1:4096" },
-          projects: [{ name: "fro-bot/dashboard", expandedPath: "/a" }],
+          projects: [
+            {
+              name: "fro-bot/dashboard",
+              path: "~/a",
+              description: "",
+              expandedPath: "/a",
+              exists: true,
+            },
+          ],
         },
       },
     });
@@ -745,8 +774,20 @@ describe("session-tool registry + runSessionTool: structural target resolution",
         roster: {
           server: { baseUrl: "http://127.0.0.1:4096" },
           projects: [
-            { name: "dup", expandedPath: "/a" },
-            { name: "dup", expandedPath: "/b" },
+            {
+              name: "dup",
+              path: "~/a",
+              description: "",
+              expandedPath: "/a",
+              exists: true,
+            },
+            {
+              name: "dup",
+              path: "~/b",
+              description: "",
+              expandedPath: "/b",
+              exists: true,
+            },
           ],
         },
       },
@@ -1948,5 +1989,1123 @@ describe("runSessionTool: exactly-one-terminal-audit-event guarantee", () => {
     );
     expect(result.ok).toBe(true);
     expect(handlerCallCount).toBe(1);
+  });
+});
+
+describe("bus facade/context type compatibility with real @fro.bot/space-bus 0.14.0 exports", () => {
+  test("compile/runtime smoke: the real roster/snapshot exports assign to SessionToolBusFacade with no cast", () => {
+    const facade: SessionToolBusFacade = { roster, snapshot };
+    expect(typeof facade.roster).toBe("function");
+    expect(typeof facade.snapshot).toBe("function");
+  });
+
+  test("compile/runtime smoke: a real BusContext value assigns to SessionToolBusContext with no cast", () => {
+    const realContext: BusContext = {
+      roster: {
+        server: { baseUrl: "http://127.0.0.1:4096" },
+        projects: [
+          {
+            name: "dashboard",
+            path: "~/src/dashboard",
+            description: "",
+            expandedPath: "/Users/marcus/src/dashboard",
+            exists: true,
+          },
+        ],
+      },
+    };
+    const typed: SessionToolBusContext = realContext;
+    expect(typed.roster.projects[0]?.name).toBe("dashboard");
+  });
+});
+
+// --- discovery/context/focus tools ------------------------------------
+
+describe("registerDiscoveryContextTools", () => {
+  test("happy path: idempotent — calling it twice registers each tool exactly once, no throw", () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    expect(() => {
+      registerDiscoveryContextTools();
+      registerDiscoveryContextTools();
+    }).not.toThrow();
+    expect(isRegisteredSessionTool("ide_list_projects")).toBe(true);
+    expect(isRegisteredSessionTool("ide_list_sessions")).toBe(true);
+    expect(isRegisteredSessionTool("ide_get_active_context")).toBe(true);
+    expect(isRegisteredSessionTool("ide_select_project")).toBe(true);
+    expect(isRegisteredSessionTool("ide_select_session")).toBe(true);
+  });
+
+  test("happy path: deterministic under __resetSessionToolsForTests + __resetDiscoveryContextRegistrationForTests — re-registers cleanly", () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+    __resetSessionToolsForTests();
+    expect(isRegisteredSessionTool("ide_list_projects")).toBe(false);
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+    expect(isRegisteredSessionTool("ide_list_projects")).toBe(true);
+  });
+});
+
+/** Live-shaped deps fixture for the discovery/context/focus tools —
+ * roster/snapshot facade methods, refreshProject, and the three focus
+ * callbacks, all overridable per test. */
+function makeDiscoveryDeps(
+  overrides: Partial<SessionToolDeps> = {},
+): SessionToolDeps {
+  return makeDeps({
+    bus: {
+      roster: async () => ({
+        ok: true,
+        projects: [
+          { name: "dashboard", path: "/x", pathExists: true, busyCount: 1 },
+        ],
+      }),
+      snapshot: async () => ({
+        ok: true,
+        projects: [{ name: "dashboard", exists: true, busyCount: 1 }],
+      }),
+    },
+    refreshProject: async () => {},
+    focus: {
+      getActiveContext: () => ({}),
+      selectProject: () => {},
+      selectSession: () => {},
+    },
+    ...overrides,
+  });
+}
+
+describe("ide_list_projects", () => {
+  test("happy path: merges roster (identity/order) with snapshot (counts) by exact name", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const result = await runSessionTool(
+      "ide_list_projects",
+      {},
+      makeDiscoveryDeps(),
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      projects: [
+        {
+          name: "dashboard",
+          exists: true,
+          busyCount: 1,
+          hasStatusError: false,
+          snapshotUnknown: false,
+          hasSnapshotError: false,
+        },
+      ],
+    });
+  });
+
+  test("happy path: preserves roster listing order verbatim, even when the snapshot omits or reorders entries", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      bus: {
+        roster: async () => ({
+          ok: true,
+          projects: [
+            { name: "b-project", path: "/b", pathExists: true },
+            { name: "a-project", path: "/a", pathExists: true },
+          ],
+        }),
+        snapshot: async () => ({
+          ok: true,
+          projects: [{ name: "a-project", exists: true }],
+        }),
+      },
+    });
+
+    const result = await runSessionTool<{
+      projects: { name: string }[];
+    }>("ide_list_projects", {}, deps, "mcp_tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.projects.map((p) => p.name)).toEqual([
+      "b-project",
+      "a-project",
+    ]);
+  });
+
+  test("error path: a roster() failure is upstream_error/indeterminate — no partial roster returned", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      bus: {
+        roster: async () => ({ ok: false, error: "connection refused" }),
+        snapshot: async () => ({ ok: true, projects: [] }),
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_list_projects",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("upstream_error");
+    expect(result.error.delivery).toBe("indeterminate");
+    expect(result.error.message).not.toContain("connection refused");
+  });
+
+  test("happy path: a failed/absent snapshot degrades to snapshotUnknown:true per project rather than failing the whole read", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      bus: {
+        roster: async () => ({
+          ok: true,
+          projects: [{ name: "dashboard", path: "/x", pathExists: true }],
+        }),
+        snapshot: async () => ({ ok: false, error: "timeout" }),
+      },
+    });
+
+    const result = await runSessionTool<{
+      projects: { snapshotUnknown: boolean }[];
+    }>("ide_list_projects", {}, deps, "mcp_tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.projects[0]?.snapshotUnknown).toBe(true);
+  });
+
+  test("error path: a roster() that REJECTS (throws) with raw path/credential text is stable upstream_error/indeterminate, never internal_error, no raw echo", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      bus: {
+        roster: async () => {
+          throw new Error(
+            "ECONNREFUSED /Users/marcus/.ssh/id_rsa (Authorization: Bearer sk-live-abc123XYZ)",
+          );
+        },
+        snapshot: async () => ({ ok: true, projects: [] }),
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_list_projects",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("upstream_error");
+    expect(result.error.delivery).toBe("indeterminate");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/Users/marcus/.ssh/id_rsa");
+    expect(serialized).not.toContain("sk-live-abc123XYZ");
+    expect(serialized).not.toContain("ECONNREFUSED");
+  });
+
+  test("happy path: a snapshot() that rejects degrades to snapshotUnknown:true rather than failing the read", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      bus: {
+        roster: async () => ({
+          ok: true,
+          projects: [{ name: "dashboard", path: "/x", pathExists: true }],
+        }),
+        snapshot: async () => {
+          throw new Error("network unreachable");
+        },
+      },
+    });
+
+    const result = await runSessionTool<{
+      projects: { snapshotUnknown: boolean }[];
+    }>("ide_list_projects", {}, deps, "mcp_tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.projects[0]?.snapshotUnknown).toBe(true);
+  });
+
+  test("happy path: a snapshot() that never resolves within the bounded timeout degrades quickly and deterministically, not hanging the whole read", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      __snapshotTimeoutMsForTests: 20,
+      bus: {
+        roster: async () => ({
+          ok: true,
+          projects: [{ name: "dashboard", path: "/x", pathExists: true }],
+        }),
+        snapshot: () => new Promise(() => {}), // never resolves
+      },
+    });
+
+    const start = Date.now();
+    const result = await runSessionTool<{
+      projects: { snapshotUnknown: boolean }[];
+    }>("ide_list_projects", {}, deps, "mcp_tool");
+    const elapsed = Date.now() - start;
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.projects[0]?.snapshotUnknown).toBe(true);
+    // Deterministic bound: well under the real 2500ms default, proving
+    // the injected short timeout — not the real default — governed this.
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  test("happy path: bus.snapshot entirely absent from deps also degrades gracefully, not internal_error", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      bus: {
+        roster: async () => ({
+          ok: true,
+          projects: [{ name: "dashboard", path: "/x", pathExists: true }],
+        }),
+        // snapshot intentionally omitted
+      },
+    });
+
+    const result = await runSessionTool<{
+      projects: { snapshotUnknown: boolean }[];
+    }>("ide_list_projects", {}, deps, "mcp_tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.projects[0]?.snapshotUnknown).toBe(true);
+  });
+
+  test("error path: bus.roster entirely absent is internal_error/indeterminate — a program-wiring gap, not an upstream failure", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({ bus: {} });
+    const result = await runSessionTool(
+      "ide_list_projects",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+  });
+
+  test("error path: strict no-args schema rejects any extra field", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const result = await runSessionTool(
+      "ide_list_projects",
+      { unexpected: "field" },
+      makeDiscoveryDeps(),
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("invalid_arguments");
+    expect(result.error.delivery).toBe("not_sent");
+  });
+
+  test("security: a malicious roster/snapshot entry carrying raw path/credential fields is stripped by the output allowlist boundary", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      bus: {
+        roster: async () => ({
+          ok: true,
+          projects: [
+            {
+              name: "dashboard",
+              path: "/Users/marcus/src/dashboard",
+              expandedPath: "/Users/marcus/src/dashboard",
+              pathExists: true,
+              credentials: { password: "hunter2" },
+              Authorization: "Bearer abc123",
+            },
+          ],
+        }),
+        snapshot: async () => ({ ok: true, projects: [] }),
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_list_projects",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/Users/marcus");
+    expect(serialized).not.toContain("hunter2");
+    expect(serialized).not.toContain("Bearer abc123");
+  });
+});
+
+describe("ide_list_sessions", () => {
+  test("happy path: calls refreshProject before reading the store, returns project + visible rows", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let refreshCalledWith: string | undefined;
+    const deps = makeDiscoveryDeps({
+      refreshProject: async (project) => {
+        refreshCalledWith = project.name;
+      },
+      store: {
+        getSessions: (directory) =>
+          directory === "/Users/marcus/src/fro-bot/dashboard"
+            ? [
+                {
+                  id: "ses_1",
+                  title: "Fix the thing",
+                  status: "idle",
+                  updatedAt: 100,
+                },
+              ]
+            : [],
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_list_sessions",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(refreshCalledWith).toBe("dashboard");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      project: "dashboard",
+      sessions: [
+        {
+          id: "ses_1",
+          title: "Fix the thing",
+          busy: false,
+          needsAttention: false,
+        },
+      ],
+    });
+  });
+
+  test("happy path: default excludes subagent sessions; includeSubagents:true includes them", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      store: {
+        getSessions: () => [
+          { id: "top", title: "Top level" },
+          { id: "sub", title: "Fix (@fixer subagent)", parentID: "top" },
+        ],
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+    });
+
+    const defaultResult = await runSessionTool<{
+      sessions: { id: string }[];
+    }>("ide_list_sessions", { project: "dashboard" }, deps, "mcp_tool");
+    expect(defaultResult.ok).toBe(true);
+    if (!defaultResult.ok) throw new Error("expected ok");
+    expect(defaultResult.data.sessions.map((s) => s.id)).toEqual(["top"]);
+
+    const includeResult = await runSessionTool<{
+      sessions: { id: string }[];
+    }>(
+      "ide_list_sessions",
+      { project: "dashboard", includeSubagents: true },
+      deps,
+      "mcp_tool",
+    );
+    expect(includeResult.ok).toBe(true);
+    if (!includeResult.ok) throw new Error("expected ok");
+    expect(includeResult.data.sessions.map((s) => s.id)).toEqual([
+      "top",
+      "sub",
+    ]);
+  });
+
+  test("error path: a refreshProject failure is upstream_error/indeterminate and does NOT fall back to a stale store read", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let storeReadAttempted = false;
+    const deps = makeDiscoveryDeps({
+      refreshProject: async () => {
+        throw new Error("network unreachable");
+      },
+      store: {
+        getSessions: () => {
+          storeReadAttempted = true;
+          return [];
+        },
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_list_sessions",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("upstream_error");
+    expect(result.error.delivery).toBe("indeterminate");
+    expect(storeReadAttempted).toBe(false);
+    expect(result.error.message).not.toContain("network unreachable");
+  });
+
+  test("error path: refreshProject entirely absent from deps is internal_error/indeterminate", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({ refreshProject: undefined });
+    const result = await runSessionTool(
+      "ide_list_sessions",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+  });
+
+  test("error path: an unknown project target fails BEFORE refreshProject is ever called", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let refreshCalled = false;
+    const deps = makeDiscoveryDeps({
+      refreshProject: async () => {
+        refreshCalled = true;
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_list_sessions",
+      { project: "does-not-exist" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("unknown_project");
+    expect(refreshCalled).toBe(false);
+  });
+
+  test("happy path: includeSubagents defaults to false when omitted", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      store: {
+        getSessions: () => [{ id: "sub", title: "Fix (@fixer subagent)" }],
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+    });
+
+    const result = await runSessionTool<{ sessions: unknown[] }>(
+      "ide_list_sessions",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.sessions).toHaveLength(0);
+  });
+
+  test("security: rows never include directory, parentID, or updatedAt even when the store carries them", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      store: {
+        getSessions: () => [
+          {
+            id: "ses_1",
+            title: "t",
+            status: "idle",
+            updatedAt: 100,
+            directory: "/Users/marcus/src/dashboard",
+          },
+        ],
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_list_sessions",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/Users/marcus");
+    expect(serialized).not.toContain("parentID");
+    expect(serialized).not.toContain("updatedAt");
+  });
+});
+
+describe("ide_get_active_context", () => {
+  test("happy path: returns the focus callback's project/sessionId", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: {
+        getActiveContext: () => ({
+          project: "dashboard",
+          sessionId: "ses_live",
+        }),
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      project: "dashboard",
+      sessionId: "ses_live",
+    });
+  });
+
+  test("happy path: nothing focused yet returns an empty object, a valid nullable/optional shape", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: { getActiveContext: () => ({}) },
+    });
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({});
+  });
+
+  test("error path: focus.getActiveContext entirely absent is internal_error/indeterminate", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({ focus: {} });
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+  });
+
+  test("error path: strict no-args schema rejects extra fields", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      { project: "escape-attempt" },
+      makeDiscoveryDeps(),
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.delivery).toBe("not_sent");
+  });
+
+  test("error path: a poisoned (path-shaped) project from focus.getActiveContext fails closed as internal_error/indeterminate, no raw echo", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: {
+        getActiveContext: () => ({
+          project: "/Users/marcus/.ssh/id_rsa",
+        }),
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+    expect(JSON.stringify(result)).not.toContain("/Users/marcus/.ssh");
+  });
+
+  test("error path: a poisoned (Bearer-token-shaped) sessionId from focus.getActiveContext fails closed, no raw echo", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: {
+        getActiveContext: () => ({
+          sessionId: "Bearer sk-live-abc123XYZ",
+        }),
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(JSON.stringify(result)).not.toContain("sk-live-abc123XYZ");
+  });
+
+  test("error path: a malformed sessionId (dotted, slash-shaped) from focus.getActiveContext fails closed", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: {
+        getActiveContext: () => ({ sessionId: "fro-bot/dashboard" }),
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+  });
+
+  test("security: never returns a directory even if the focus callback (buggy/malicious) supplies one", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: {
+        getActiveContext: () =>
+          ({
+            project: "dashboard",
+            directory: "/Users/marcus/secret",
+            // biome-ignore lint/suspicious/noExplicitAny: intentionally malformed/poisoned fixture
+          }) as any,
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/Users/marcus");
+  });
+});
+
+describe("ide_select_project", () => {
+  test("happy path: calls the focus callback with the resolved project and returns a confirmation", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let calledWith: string | undefined;
+    const deps = makeDiscoveryDeps({
+      focus: {
+        selectProject: (project) => {
+          calledWith = project.name;
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_select_project",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(calledWith).toBe("dashboard");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({ project: "dashboard" });
+  });
+
+  test("error path: an unknown project target fails BEFORE the focus callback is ever called, no mutation", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let focusCalled = false;
+    const deps = makeDiscoveryDeps({
+      focus: {
+        selectProject: () => {
+          focusCalled = true;
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_select_project",
+      { project: "does-not-exist" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("unknown_project");
+    expect(focusCalled).toBe(false);
+  });
+
+  test("error path: focus.selectProject entirely absent is internal_error/indeterminate", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({ focus: {} });
+    const result = await runSessionTool(
+      "ide_select_project",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+  });
+
+  test("error path: a focus callback that throws AFTER being invoked maps to internal_error/indeterminate, never not_sent", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: {
+        selectProject: () => {
+          throw new Error("UI focus mutation failed midway");
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_select_project",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+    expect(result.error.message).not.toContain("UI focus mutation failed");
+  });
+});
+
+describe("ide_select_session", () => {
+  test("happy path: calls the focus callback with the resolved session and returns a confirmation", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let calledWith: { id: string; project: string } | undefined;
+    const deps = makeDiscoveryDeps({
+      focus: {
+        selectSession: (session) => {
+          calledWith = { id: session.id, project: session.project };
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(calledWith).toEqual({ id: "ses_live", project: "dashboard" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      sessionId: "ses_live",
+      project: "dashboard",
+    });
+  });
+
+  test("happy path: an optional expected project matching the resolved session's owner succeeds", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const result = await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_live", project: "dashboard" },
+      makeDiscoveryDeps(),
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  test("error path: an optional expected project that does NOT match the resolved session's owner fails closed as session_project_mismatch, before the focus callback runs", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let focusCalled = false;
+    const deps = makeDiscoveryDeps({
+      context: {
+        roster: {
+          server: { baseUrl: "http://127.0.0.1:4096" },
+          projects: [
+            {
+              name: "dashboard",
+              path: "~/src/fro-bot/dashboard",
+              description: "",
+              expandedPath: "/Users/marcus/src/fro-bot/dashboard",
+              exists: true,
+            },
+            {
+              name: "other-project",
+              path: "~/other",
+              description: "",
+              expandedPath: "/other",
+              exists: true,
+            },
+          ],
+        },
+      },
+      focus: {
+        selectSession: () => {
+          focusCalled = true;
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_live", project: "other-project" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("session_project_mismatch");
+    expect(focusCalled).toBe(false);
+  });
+
+  test("error path: an unknown/stale session target fails BEFORE the focus callback is ever called, no mutation", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    let focusCalled = false;
+    const deps = makeDiscoveryDeps({
+      focus: {
+        selectSession: () => {
+          focusCalled = true;
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_gone" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("unknown_session");
+    expect(focusCalled).toBe(false);
+  });
+
+  test("error path: focus.selectSession entirely absent is internal_error/indeterminate", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({ focus: {} });
+    const result = await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+  });
+
+  test("error path: a focus callback that throws AFTER being invoked maps to internal_error/indeterminate, never not_sent", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const deps = makeDiscoveryDeps({
+      focus: {
+        selectSession: () => {
+          throw new Error("UI session focus mutation failed");
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(result.error.delivery).toBe("indeterminate");
+    expect(result.error.message).not.toContain(
+      "UI session focus mutation failed",
+    );
+  });
+});
+
+describe("discovery/context/focus tools: exactly one audit event, safe identifiers only", () => {
+  test("ide_list_projects: exactly one audit event, no content leaked into the payload", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const events: unknown[] = [];
+    const deps = makeDiscoveryDeps({ audit: (p) => events.push(p) });
+    await runSessionTool("ide_list_projects", {}, deps, "mcp_tool");
+
+    expect(events).toHaveLength(1);
+    const event = events[0] as { tool: string; outcome: string };
+    expect(event.tool).toBe("ide_list_projects");
+    expect(event.outcome).toBe("ok");
+    expect(JSON.stringify(event)).not.toContain("dashboard");
+  });
+
+  test("ide_list_sessions: exactly one audit event carrying the resolved project name", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const events: unknown[] = [];
+    const deps = makeDiscoveryDeps({ audit: (p) => events.push(p) });
+    await runSessionTool(
+      "ide_list_sessions",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(events).toHaveLength(1);
+    const event = events[0] as { project?: string };
+    expect(event.project).toBe("dashboard");
+  });
+
+  test("ide_select_session: exactly one audit event carrying the resolved session/project identifiers, no content", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const events: unknown[] = [];
+    const deps = makeDiscoveryDeps({ audit: (p) => events.push(p) });
+    await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_live" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(events).toHaveLength(1);
+    const event = events[0] as { project?: string; sessionId?: string };
+    expect(event.project).toBe("dashboard");
+    expect(event.sessionId).toBe("ses_live");
   });
 });

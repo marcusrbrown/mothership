@@ -40,7 +40,13 @@ function makeSessionToolDeps(
       roster: {
         server: { baseUrl: "http://127.0.0.1:4096" },
         projects: [
-          { name: "dashboard", expandedPath: "/Users/marcus/src/dashboard" },
+          {
+            name: "dashboard",
+            path: "~/src/dashboard",
+            description: "",
+            expandedPath: "/Users/marcus/src/dashboard",
+            exists: true,
+          },
         ],
       },
     },
@@ -649,6 +655,99 @@ describe("connectLayoutBridge", () => {
     expect(reply.domain).toBe("session");
     expect(reply.ok).toBe(true);
     expect(reply.data).toEqual({ probed: true });
+
+    bridge.close();
+  });
+
+  test("getSessionTools is resolved PER REQUEST — deps that change after connectLayoutBridge are picked up by the next request, not just the first", async () => {
+    const adapter = new StubDockviewAdapter();
+    __resetSessionToolsForTests();
+    registerSessionTool("ide_test_connect_dynamic", {
+      argsSchema: z.object({}),
+      resultSchema: sessionResultSchema({ probed: z.boolean() }),
+      target: "none",
+      handler: async () => ({ ok: true, data: { probed: true } }),
+    });
+
+    const depsHolder: { current: SessionToolDeps | undefined } = {
+      current: undefined,
+    };
+    let created: FakeWs | undefined;
+    const bridgeDeps: Partial<BridgeDeps> = {
+      getBridgeInfo: async () => ({ port: 1234, token: "t" }),
+      createSocket: () => {
+        created = new FakeWs();
+        return created;
+      },
+      getSessionTools: () => depsHolder.current,
+    };
+    const bridge = connectLayoutBridge(adapter, bridgeDeps);
+    await Promise.resolve();
+    await Promise.resolve();
+    created?.onopen?.();
+
+    const req = (seq: number): BridgeRequest => ({
+      kind: "request",
+      seq,
+      tool: "ide_test_connect_dynamic",
+      params: {},
+    });
+
+    // First request: no deps yet -> unavailable.
+    created?.onmessage?.({ data: JSON.stringify(req(1)) });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const firstReply = JSON.parse(created?.sent[1] ?? "{}");
+    expect(firstReply.ok).toBe(false);
+    expect(firstReply.error.code).toBe("unavailable");
+
+    // Deps become available (simulating a workspace connect completing
+    // after the bridge was already mounted) -> the NEXT request must see
+    // them, without reconnecting or reconstructing the bridge.
+    depsHolder.current = makeSessionToolDeps();
+    created?.onmessage?.({ data: JSON.stringify(req(2)) });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const secondReply = JSON.parse(created?.sent[2] ?? "{}");
+    expect(secondReply.ok).toBe(true);
+    expect(secondReply.data).toEqual({ probed: true });
+
+    bridge.close();
+  });
+
+  test("a fixed sessionTools value is still honored when no getSessionTools resolver is supplied (backward compatibility)", async () => {
+    const adapter = new StubDockviewAdapter();
+    __resetSessionToolsForTests();
+    registerSessionTool("ide_test_connect_fixed", {
+      argsSchema: z.object({}),
+      resultSchema: sessionResultSchema({ probed: z.boolean() }),
+      target: "none",
+      handler: async () => ({ ok: true, data: { probed: true } }),
+    });
+
+    let created: FakeWs | undefined;
+    const deps: Partial<BridgeDeps> = {
+      getBridgeInfo: async () => ({ port: 1234, token: "t" }),
+      createSocket: () => {
+        created = new FakeWs();
+        return created;
+      },
+      sessionTools: makeSessionToolDeps(),
+    };
+    const bridge = connectLayoutBridge(adapter, deps);
+    await Promise.resolve();
+    await Promise.resolve();
+    created?.onopen?.();
+
+    created?.onmessage?.({
+      data: JSON.stringify({
+        kind: "request",
+        seq: 1,
+        tool: "ide_test_connect_fixed",
+        params: {},
+      }),
+    });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const reply = JSON.parse(created?.sent[1] ?? "{}");
+    expect(reply.ok).toBe(true);
 
     bridge.close();
   });

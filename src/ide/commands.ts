@@ -11,67 +11,21 @@
  * `./errors.ts` for sanitized error construction.
  */
 import { z } from "zod";
+import { isValidProjectName } from "../workspace/project-name";
 
-const MAX_PROJECT_NAME_LENGTH = 200;
 const MAX_SESSION_ID_LENGTH = 128;
 
 /** Any C0/C1 control character, including NUL, BEL, and newline/CR/tab. */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — detecting control characters IS the point of this validator.
 const CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 
-/** A Windows drive letter prefix (`C:`, `d:`), independent of what
- * follows — real roster names never need a bare `X:` prefix, and this is
- * also what a Windows drive-qualified path looks like. */
-const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:/;
-
-/** Credential/header-shaped values a project name must never be
- * mistakable for: an HTTP-header-style `Name: ...`/`Name=...` prefix for
- * a known credential field name (Authorization, Cookie, password, token,
- * secret, api-key — with `-`/`_` variants), OR a standalone `Bearer
- * <token>` value. Matched anywhere in the string, case-insensitively —
- * a real roster project name has no legitimate reason to contain any of
- * these shapes, so this is a narrow, deliberate carve-out rather than a
- * broad denylist that could reject ordinary names. */
-const CREDENTIAL_SHAPE_PATTERN =
-  /\b(authorization|cookie|password|passwd|token|secret|api[-_]?key)\s*[:=]|\bbearer\s+\S/i;
-
-/**
- * Validates a logical roster project name against the workspace roster's
- * real naming contract: a bounded, non-empty string that MAY contain
- * spaces, punctuation, Unicode characters, and an internal `/`
- * (org/repo-style, e.g. `fro-bot/dashboard`, or a human title like `My
- * Project`) — roster names are not filesystem-path-shaped or
- * ASCII-charset-restricted by convention, so this validator is a
- * DENYLIST of specific unsafe shapes, not a closed positive charset:
- *
- * - Non-empty, at most `MAX_PROJECT_NAME_LENGTH` characters.
- * - No control characters (NUL, BEL, newline/CR/tab, etc).
- * - Never starts with `/` (absolute path) or `~` (home-dir shorthand).
- * - Never contains a backslash (Windows path separator) or starts with a
- *   Windows drive letter (`C:`).
- * - No leading/trailing/doubled `/` (rules out `/foo`, `foo/`, `foo//bar`).
- * - No segment (split on `/`) is exactly `.` or `..` (rules out `.`,
- *   `..`, `./x`, `../x`, `foo/../bar`, `foo/.`).
- * - Never matches `CREDENTIAL_SHAPE_PATTERN` (rules out
- *   `Authorization: ...`, `Bearer abc123`, `Cookie=...`,
- *   `password=hunter2`, `token: value`, `api-key=...`, etc).
- */
-export function isValidProjectName(value: string): boolean {
-  if (value.length === 0 || value.length > MAX_PROJECT_NAME_LENGTH) {
-    return false;
-  }
-  if (CONTROL_CHAR_PATTERN.test(value)) return false;
-  if (value.startsWith("/")) return false;
-  if (value.startsWith("~")) return false;
-  if (value.includes("\\")) return false;
-  if (WINDOWS_DRIVE_PATTERN.test(value)) return false;
-  if (value.endsWith("/")) return false;
-  if (value.includes("//")) return false;
-  if (CREDENTIAL_SHAPE_PATTERN.test(value)) return false;
-
-  const segments = value.split("/");
-  return segments.every((seg) => seg.length > 0 && seg !== "." && seg !== "..");
-}
+/** Re-exported from the neutral `workspace/project-name.ts` module — this
+ * is the SAME invariant `workspace/config.ts` enforces at the manifest
+ * parse boundary, kept as a single shared policy (not two independently
+ * maintained copies) so the spacebus.json read path and the ide session-
+ * tool target schemas can never drift apart on what counts as a safe
+ * roster project name. */
+export { isValidProjectName };
 
 /**
  * Validates an opaque session identifier. Session ids are never
@@ -128,6 +82,37 @@ export const sessionTargetSchema = z.object({
   sessionId: sessionIdSchema(),
 });
 export type SessionTarget = z.infer<typeof sessionTargetSchema>;
+
+/** Strict, closed empty-args schema for tools declared `target: "none"`
+ * that also take no other arguments at all (`ide_list_projects`,
+ * `ide_get_active_context`). `.strict()` rejects ANY key at all — not
+ * just `project`/`sessionId` — with `invalid_arguments`, one layer
+ * beyond the target-bearing-field guard `runSessionTool` already runs on
+ * raw args before parsing. */
+export const noArgsSchema = z.object({}).strict();
+export type NoArgs = z.infer<typeof noArgsSchema>;
+
+/** `ide_list_sessions`'s args: the project to list sessions for, plus an
+ * optional subagent-visibility toggle defaulting to `false` (matching
+ * the sessions panel's own default — see the visible-row semantics this
+ * tool reuses). */
+export const listSessionsArgsSchema = z.object({
+  project: projectNameSchema(),
+  includeSubagents: z.boolean().default(false),
+});
+export type ListSessionsArgs = z.infer<typeof listSessionsArgsSchema>;
+
+/** `ide_select_session`'s args: the session to focus, plus an OPTIONAL
+ * expected owning project — when supplied, `runSessionTool`'s target
+ * resolution (not this schema) verifies the session actually belongs to
+ * that project before the handler ever runs, failing closed as
+ * `session_project_mismatch` otherwise (see `./executor.ts`'s
+ * `resolveTarget`). */
+export const selectSessionArgsSchema = z.object({
+  sessionId: sessionIdSchema(),
+  project: projectNameSchema().optional(),
+});
+export type SelectSessionArgs = z.infer<typeof selectSessionArgsSchema>;
 
 /** A target naming exactly one of a unique roster project or a
  * roster-owned session id — never both, never neither. */

@@ -74,15 +74,15 @@ Combined, total concurrent connections stay at roughly 2–3 regardless of roste
 
 ## Sidecar security boundary
 
-`sidecar/ide-server` is a Bun process exposing 8 `ide_*` MCP tools (6 mutations, 2 reads) over MCP streamable-HTTP, bridged over WebSocket into the webview's `executeCommand`. It runs outside the Tauri sandbox, so its boundary is deliberate and layered:
+`sidecar/ide-server` is a Bun process exposing 8 layout `ide_*` MCP tools (6 mutations, 2 reads) plus 5 project/session discovery/focus tools (`ide_list_projects`, `ide_list_sessions`, `ide_get_active_context`, `ide_select_project`, `ide_select_session`) over MCP streamable-HTTP, bridged over WebSocket into the webview's `executeCommand`/`runSessionTool`. It runs outside the Tauri sandbox, so its boundary is deliberate and layered:
 
 - **Token rendezvous** (`src-tauri/src/ide_sidecar.rs`) — a 64-hex-char bearer token is generated per launch and passed to the child via the `MOTHERSHIP_IDE_TOKEN` env var, never argv (argv is visible to every local user via `ps`). The child reports its bound port on stdout; Rust writes `{port, token}` to a `0600` rendezvous file (`~/Library/Application Support/com.marcusrbrown.mothership/ide-bridge.json`) that external MCP clients (opencode) read to connect.
 - **HTTP bearer auth** (`sidecar/ide-server/http-auth.ts`) — every request without a matching `Bearer` token gets an identical empty 401, regardless of path or method, so there's no oracle for probing which routes exist.
 - **WS first-frame auth** (`sidecar/ide-server/ws-bridge.ts`) — the webview's WS connection to the sidecar is itself authenticated on the first frame before any command relaying begins.
-- **Allowlist read serializers** (`sidecar/ide-server/redact.ts`) — `ide_list_panels` / `ide_get_layout` return only panel type, title, and structural position through explicit `PanelSummary`/`SafePanelEntry` shapes; raw panel state (which may carry filesystem paths) never crosses the boundary.
+- **Allowlist read serializers** (`sidecar/ide-server/redact.ts`, `src/ide/views.ts`) — `ide_list_panels` / `ide_get_layout` return only panel type, title, and structural position through explicit `PanelSummary`/`SafePanelEntry` shapes; the five session tools resolve/authorize their logical `project`/`sessionId` targets IN THE WEBVIEW against the live roster and reconciled session store (`src/ide/executor.ts`'s `resolveProject`/`resolveSession`) and return only allowlisted status/metadata (`ProjectView`/`SessionRowView` — name, exists, busy, session counts; never a directory or raw error text). Raw panel state and raw filesystem paths never cross either boundary.
 - **No subprocess reach** — the terminal panel is registered with `mcpOpenable: false` (`src/layout/bootstrap.ts`), and `executeCommand` enforces it. No `ide_*` call, however constructed, can open a shell.
 
-The result: an external agent that dials `ide_*` can rearrange panels and read layout structure, and nothing else — it cannot read files, spawn processes, or see session content it doesn't already have through its own MCP session with `opencode serve`.
+An external agent that dials `ide_*` can rearrange panels, read layout structure, list/select roster projects and sessions, and read the currently-focused logical context — always through the same allowlisted, path-free views a UI click would see. It cannot read files, spawn processes, or see session content beyond what these allowlisted views expose.
 
 ## Process supervision (Rust)
 
@@ -101,6 +101,10 @@ macOS builds are signed and notarized, the `ide_*` sidecar ships as a packaged `
 ## Boundary with space-bus
 
 Mothership is a pure **attacher**, not a daemon manager. `src/workspace/tauri-fs.ts` calls `resolveManagedServer` from `@fro.bot/space-bus/attach` — the browser-safe half of space-bus's public surface — to find or wait for an already-managed `opencode serve`/control-agent process. space-bus owns discovery, spawning, and supervision of that managed daemon; Mothership never re-implements or second-guesses it. `src/workspace/config.ts` parses `spacebus.json` (localhost-guarded) to learn the project roster, and `src/workspace/context.ts` builds the `BusContext` the rest of the app reads from. Space-bus's own internals — how it supervises `opencode serve`, its control-agent protocol — are out of scope here; see the space-bus repository.
+
+### Project-name contract
+
+Logical roster project names (`spacebus.json`'s `projects[].name`) are the identifiers `ide_*` session tools target and the audit log records — never a filesystem path. `src/workspace/config.ts` enforces two invariants at manifest-parse time, shared with the session-tool layer via `src/workspace/project-name.ts`'s `isValidProjectName`: names must be unique within a roster, and a name must not resemble a filesystem path (absolute, `~`, `.`/`..` segments, Windows-drive/backslash-shaped) or a credential/header value (`Authorization: ...`, `Bearer ...`, `token=...`, etc). Both checks fail the whole manifest closed with a generic, non-echoing error — an unsafe string is never representable as an MCP tool-call target or an audit-log identifier. Ordinary human project names — spaces, Unicode, punctuation, an internal `/` for org/repo-style names (`fro-bot/dashboard`) — remain accepted; the contract is a denylist of unsafe shapes, not a closed ASCII charset.
 
 ## See also
 

@@ -17,9 +17,20 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 // missing spacebus.json (ENOENT) without touching the real filesystem or
 // requiring a live Tauri runtime — same approach as tauri-fs.test.ts.
 mock.module("@tauri-apps/api/core", () => ({
-  invoke: async (cmd: string) => {
+  invoke: async (cmd: string, args?: { path?: string }) => {
     if (cmd === "read_text_file") throw new Error("ENOENT");
-    if (cmd === "path_exists") return true;
+    // `path_exists` is used for TWO distinct checks here:
+    // 1. `loadWorkspace`'s spacebus.json existence check — must return
+    //    `false` (agreeing with `read_text_file`'s ENOENT above) so a
+    //    confirmed-missing manifest classifies as a virtual workspace,
+    //    not a read-error.
+    // 2. `buildBusContext`'s per-project directory existence flag — must
+    //    return `true` so the virtual project is treated as a real,
+    //    existing directory and `roster()` actually probes the (stubbed)
+    //    server instead of skipping the HTTP call entirely.
+    if (cmd === "path_exists") {
+      return !args?.path?.endsWith("spacebus.json");
+    }
     if (cmd === "home_dir") return "/Users/marcus";
     if (cmd === "ensure_server") return { status: "running", adopted: true };
     throw new Error(`unexpected invoke: ${cmd}`);

@@ -209,6 +209,271 @@ describe("loadWorkspace", () => {
     expect(result.message).toContain("exactly one of baseUrl or managed");
   });
 
+  test("two projects with the same name -> error kind, fails closed", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        { name: "dup", path: "~/src/a", description: "A" },
+        { name: "dup", path: "~/src/b", description: "B" },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).toBe("spacebus.json project names must be unique");
+    expect(result.message).not.toContain("~/src/a");
+    expect(result.message).not.toContain("~/src/b");
+  });
+
+  test("three projects, two sharing a name -> error kind", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        { name: "proj-a", path: "~/src/a", description: "A" },
+        { name: "proj-b", path: "~/src/b", description: "B" },
+        { name: "proj-a", path: "~/src/c", description: "C" },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).toBe("spacebus.json project names must be unique");
+  });
+
+  test("non-adjacent duplicate names -> error kind", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        { name: "alpha", path: "~/src/1", description: "1" },
+        { name: "beta", path: "~/src/2", description: "2" },
+        { name: "gamma", path: "~/src/3", description: "3" },
+        { name: "alpha", path: "~/src/4", description: "4" },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).toBe("spacebus.json project names must be unique");
+  });
+
+  test("duplicate path-shaped project names -> generic error, raw name not echoed", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        {
+          name: "/Users/marcus/src/secret-project",
+          path: "~/src/a",
+          description: "A",
+        },
+        {
+          name: "/Users/marcus/src/secret-project",
+          path: "~/src/b",
+          description: "B",
+        },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    // A path-shaped project name now fails the manifest's own name
+    // validator (schema-level, before duplicate detection even runs) —
+    // still a stable, non-echoing error either way.
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).not.toContain("/Users/marcus/src/secret-project");
+  });
+
+  test("duplicate credential-shaped project names -> generic error, raw name not echoed", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        {
+          name: "token=sk-live-abc123XYZ",
+          path: "~/src/a",
+          description: "A",
+        },
+        {
+          name: "token=sk-live-abc123XYZ",
+          path: "~/src/b",
+          description: "B",
+        },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    // Same as above: this name is also credential-shaped and now fails
+    // the manifest's own name validator before duplicate detection runs.
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).not.toContain("token=sk-live-abc123XYZ");
+    expect(result.message).not.toContain("sk-live-abc123XYZ");
+  });
+
+  test("case-distinct names are not treated as duplicates", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        { name: "Proj", path: "~/src/a", description: "A" },
+        { name: "proj", path: "~/src/b", description: "B" },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("workspace");
+    if (result.kind !== "workspace") throw new Error("expected workspace");
+    expect(result.projects).toHaveLength(2);
+  });
+
+  test("valid unique roster with spaces, punctuation, unicode, and slash names -> unchanged", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        { name: "my project", path: "~/src/1", description: "1" },
+        { name: "proj-a/b", path: "~/src/2", description: "2" },
+        { name: "café ☕", path: "~/src/3", description: "3" },
+        { name: "proj.a+b", path: "~/src/4", description: "4" },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("workspace");
+    if (result.kind !== "workspace") throw new Error("expected workspace");
+    expect(result.projects).toHaveLength(4);
+  });
+
+  test("error path: a path/credential-shaped project name in the manifest fails safely, no raw echo", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        {
+          name: "/Users/marcus/.ssh/id_rsa",
+          path: "~/src/a",
+          description: "A",
+        },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).not.toContain("/Users/marcus/.ssh/id_rsa");
+  });
+
+  test("error path: a Bearer-token-shaped project name in the manifest fails safely, no raw echo", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [
+        { name: "Bearer sk-live-abc123XYZ", path: "~/src/a", description: "A" },
+      ],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).not.toContain("sk-live-abc123XYZ");
+  });
+
+  test("happy path: virtual workspace derives a valid name from the directory basename", async () => {
+    const result = await loadWorkspace("/opened/my-project", {
+      readTextFile: stubReader({}),
+    });
+    expect(result.kind).toBe("virtual");
+    if (result.kind !== "virtual") throw new Error("expected virtual");
+    expect(result.project.name).toBe("my-project");
+  });
+
+  test("security: virtual workspace's derived name falls back safely when the basename is itself invalid, never leaking the directory", async () => {
+    const result = await loadWorkspace("/opened/..", {
+      readTextFile: stubReader({}),
+    });
+    expect(result.kind).toBe("virtual");
+    if (result.kind !== "virtual") throw new Error("expected virtual");
+    expect(result.project.name).toBe("workspace");
+  });
+
+  test("read-error classification: pathExists confirms missing -> virtual, never error", async () => {
+    const result = await loadWorkspace("/opened/dir", {
+      readTextFile: stubReader({}),
+      pathExists: async () => false,
+    });
+    expect(result.kind).toBe("virtual");
+  });
+
+  test("read-error classification: pathExists confirms present but read fails -> stable error kind, no raw path/error text", async () => {
+    const result = await loadWorkspace("/opened/dir", {
+      readTextFile: async () => {
+        throw new Error(
+          "EACCES: permission denied, open '/opened/dir/spacebus.json'",
+        );
+      },
+      pathExists: async () => true,
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind !== "error") throw new Error("expected error");
+    expect(result.message).not.toContain("/opened/dir");
+    expect(result.message).not.toContain("EACCES");
+  });
+
+  test("read-error classification: pathExists itself throws -> fails closed as error, never virtual", async () => {
+    const result = await loadWorkspace("/opened/dir", {
+      readTextFile: stubReader({}),
+      pathExists: async () => {
+        throw new Error("stat failed");
+      },
+    });
+    expect(result.kind).toBe("error");
+  });
+
+  test("read-error classification: no pathExists injected (not wired) preserves the pre-existing any-throw-means-missing behavior", async () => {
+    const result = await loadWorkspace("/opened/dir", {
+      readTextFile: stubReader({}),
+    });
+    expect(result.kind).toBe("virtual");
+  });
+
+  test("read-error classification: pathExists confirms present and read succeeds -> normal successful workspace read, unaffected", async () => {
+    const manifest = {
+      server: { baseUrl: "http://127.0.0.1:4096" },
+      projects: [],
+    };
+    const result = await loadWorkspace("/workspace", {
+      readTextFile: stubReader({
+        "/workspace/spacebus.json": JSON.stringify(manifest),
+      }),
+      pathExists: async () => true,
+    });
+    expect(result.kind).toBe("workspace");
+  });
+
   test('default reader throws "not wired" when none injected', async () => {
     // No file at this path with the default reader, so loadWorkspace treats the throw
     // as "missing file" and falls back to a virtual workspace — verifying the default

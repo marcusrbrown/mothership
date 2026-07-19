@@ -28,16 +28,33 @@
  * binding) lives in `src/layout/bridge.ts`, not here.
  */
 import { z } from "zod";
+import type { roster, snapshot } from "../server/bus";
+import type { BusContext } from "../server/types";
 import {
+  type ListSessionsArgs,
+  type SelectSessionArgs,
   type SessionResultSchema,
   type SessionToolAuditPayload,
   type SessionToolAuditRecorder,
   type SessionToolResult,
   type SessionToolSource,
   isBrandedResultSchema,
+  isValidProjectName,
+  isValidSessionId,
+  listSessionsArgsSchema,
+  noArgsSchema,
   parseSessionToolArgs,
+  projectTargetSchema,
+  selectSessionArgsSchema,
+  sessionResultSchema,
 } from "./commands";
-import { INTERNAL_ERROR, normalizeHandlerError, toolError } from "./errors";
+import {
+  INTERNAL_ERROR,
+  UPSTREAM_ERROR,
+  normalizeHandlerError,
+  toolError,
+} from "./errors";
+import { activeContextView, projectView, toSessionRowViews } from "./views";
 
 /** Every registered session tool name must match this shape: `ide_`
  * prefix, lowercase ASCII letters/digits/underscore only. Enforced at
@@ -56,15 +73,66 @@ const UNKNOWN_TOOL_AUDIT_NAME = "ide_unknown_tool";
 
 // --- injected dependencies ------------------------------------------------
 
-/** Structural subset of `@fro.bot/space-bus/contract`'s `BusContext` —
- * kept structural (not imported from `../server/types`) so this module
- * has no compile-time dependency on the space-bus package shape beyond
- * what target resolution actually reads. */
+/** Structural subset of the REAL `@fro.bot/space-bus/contract`
+ * `BusContext` (imported `type`-only below through the browser-safe
+ * `src/server/types.ts` re-export, never `@fro.bot/space-bus` directly)
+ * — kept structural, not a literal type alias, so lightweight test
+ * fixtures don't need to carry every real `RosterProject` field
+ * (`path`/`description`/`exists`) irrelevant to target resolution.
+ * `_assertBusContextAssignable` below is a COMPILE-TIME (never executed)
+ * proof that a real `BusContext` is assignable to this interface without
+ * a cast — if a future space-bus upgrade narrows/renames `roster.server`
+ * or `roster.projects[].name`/`.expandedPath` in a way this interface no
+ * longer structurally accepts, that assignment fails to compile. */
 export interface SessionToolBusContext {
   roster: {
     server: { baseUrl: string };
-    projects: readonly { name: string; expandedPath: string }[];
+    projects: {
+      name: string;
+      path: string;
+      description: string;
+      expandedPath: string;
+      exists: boolean;
+    }[];
   };
+}
+
+/** Compile-time-only (never called) proof that the real `BusContext`
+ * from `@fro.bot/space-bus/contract` is structurally assignable to
+ * `SessionToolBusContext` with no cast. `expandedPath` is real
+ * `BusContext`'s `RosterProject`'s `path`-through-tilde-expansion field. */
+function _assertBusContextAssignable(real: BusContext): void {
+  const _typed: SessionToolBusContext = real;
+  void _typed;
+}
+void _assertBusContextAssignable;
+
+/** A raw project entry as returned by the browser-safe `roster()`/
+ * `snapshot()` `/core` reads — deliberately typed as a fully open
+ * `Record<string, unknown>` (not the real `RosterProject`/
+ * `SnapshotProject` shapes) so `./views.ts`'s `projectView` can read it
+ * defensively field-by-field regardless of which of the two aggregate
+ * shapes it actually is. */
+export type SessionToolRawProject = Record<string, unknown>;
+
+/** Mirrors `@fro.bot/space-bus/core`'s own `Result<T>` shape structurally
+ * (never imported) — `({ok:true} & T) | {ok:false, error:string}`. */
+export type SessionToolBusResult<T> =
+  | ({ ok: true } & T)
+  | { ok: false; error: string };
+
+/** Structural subset of a stored session (`StoredSession` in
+ * `src/server/session-store.ts`) — the fields `ide_list_sessions`'s
+ * visible-row semantics need: `updatedAt` for recency ordering,
+ * `parentID` for the primary subagent-detection signal (title-suffix is
+ * the fallback, applied by the caller). */
+export interface SessionToolStoredSession {
+  id: string;
+  directory?: string;
+  title?: string;
+  status?: string;
+  updatedAt?: number;
+  parentID?: string;
 }
 
 /** Structural subset of `SessionStore` (see `src/server/session-store.ts`)
@@ -72,42 +140,113 @@ export interface SessionToolBusContext {
  * plus the two mutators for completeness; kept structural so test fixtures
  * don't need to construct a full store. */
 export interface SessionToolStore {
-  getSessions(directory?: string): readonly {
-    id: string;
-    directory?: string;
-    title?: string;
-    status?: string;
-  }[];
-  getSession(
-    id: string,
-  ):
-    | { id: string; directory?: string; title?: string; status?: string }
-    | undefined;
+  getSessions(directory?: string): readonly SessionToolStoredSession[];
+  getSession(id: string): SessionToolStoredSession | undefined;
   getPendingQuestions(sessionID?: string): readonly unknown[];
   subscribe(listener: (snapshot: unknown) => void): () => void;
   applyEvent(event: unknown): void;
   reconcile(input: unknown): void;
 }
 
-/** The `src/server/bus.ts` facade surface an operation may call. Each
- * operation narrows this to the exact facade functions it calls, injected
- * by the caller — this executor never imports `../server/bus` directly. */
-export type SessionToolBusFacade = Record<string, unknown>;
+/** The `src/server/bus.ts` facade surface an operation may call —
+ * structural, not `typeof roster`/`typeof snapshot` directly, so
+ * lightweight test fixtures can return a minimal `{projects: [...]}}`
+ * shape without every real `RosterProject`/`SnapshotProject` field.
+ * `roster?`/`snapshot?` are OPTIONAL so existing fixtures/callers that
+ * predate this field compile unchanged. `_assertBusFacadeAssignable`
+ * below is a COMPILE-TIME-ONLY proof that the real, imported
+ * `roster`/`snapshot` functions (type-only import — no runtime
+ * dependency, no `fetch`, no Node-only import) are assignable to this
+ * interface's fields without a cast. */
+export interface SessionToolBusFacade {
+  roster?: (opts: {
+    context: SessionToolBusContext;
+  }) => Promise<
+    SessionToolBusResult<{ projects: readonly SessionToolRawProject[] }>
+  >;
+  snapshot?: (opts: {
+    context: SessionToolBusContext;
+  }) => Promise<
+    SessionToolBusResult<{ projects: readonly SessionToolRawProject[] }>
+  >;
+  [key: string]: unknown;
+}
+
+/** Compile-time-only (never called) proof that the real, imported
+ * `roster`/`snapshot` facade functions are assignable to
+ * `SessionToolBusFacade`'s fields with no cast. */
+function _assertBusFacadeAssignable(
+  realRoster: typeof roster,
+  realSnapshot: typeof snapshot,
+): void {
+  const _typed: SessionToolBusFacade = {
+    roster: realRoster,
+    snapshot: realSnapshot,
+  };
+  void _typed;
+}
+void _assertBusFacadeAssignable;
 
 /** UI focus/session-switch callbacks an operation may invoke to keep the
- * human-visible UI synchronized. */
-export type SessionToolFocusCallbacks = Record<string, unknown>;
+ * human-visible UI synchronized. `getActiveContext`/`selectProject`/
+ * `selectSession` are the three real callbacks the discovery/context/
+ * focus session tools call; each is OPTIONAL so every existing
+ * fixture/caller that predates this
+ * field still compiles. `selectProject`/`selectSession` may return a
+ * `Promise` (a real UI focus change may be asynchronous) or `void`
+ * (synchronous) — the executor `await`s either uniformly. */
+export interface SessionToolFocusCallbacks {
+  /** Returns the currently-focused logical project name and/or session
+   * id — either may be absent (nothing focused yet). Never a directory.
+   * Synchronous: reading "what's currently focused" from in-memory UI
+   * state performs no I/O. */
+  getActiveContext?: () => {
+    project?: string;
+    sessionId?: string;
+  };
+  /** Focuses the given resolved project in the UI (roster selection,
+   * panel scoping). May reject/throw — the executor never lets that
+   * escape uncaught (see `runSessionTool`'s handler try/catch). */
+  selectProject?: (project: ResolvedProject) => void | Promise<void>;
+  /** Focuses the given resolved session in the UI (active-session state,
+   * transcript/sessions panel scoping). Same throw/reject handling as
+   * `selectProject`. */
+  selectSession?: (session: ResolvedSession) => void | Promise<void>;
+  [key: string]: unknown;
+}
+
+/** Refreshes ONE resolved project's session state from the live server
+ * before a session-listing read — the authoritative full-state
+ * reconciliation (`listSessions` + `getSessionStatus` + `listQuestions`
+ * → `store.reconcile`) `src/layout/DockviewShell.tsx`'s
+ * `reconcileProject` already performs, injected here so this executor
+ * never imports the opencode HTTP client directly. Optional so every
+ * pre-existing fixture/caller compiles unchanged; a tool that needs
+ * fresh session data (`ide_list_sessions`) treats a missing
+ * `refreshProject` as an `internal_error`, never silently reading a
+ * possibly-stale store. */
+export type SessionToolRefreshProject = (
+  project: ResolvedProject,
+) => Promise<void>;
 
 export interface SessionToolDeps {
   context: SessionToolBusContext;
   store: SessionToolStore;
   bus: SessionToolBusFacade;
   focus: SessionToolFocusCallbacks;
+  /** Optional — see `SessionToolRefreshProject` above. */
+  refreshProject?: SessionToolRefreshProject;
   /** Optional audit sink — see `SessionToolAuditRecorder` in
    * `./commands.ts`. `runSessionTool` treats a missing recorder as a
    * no-op, never an error. Typically wired to
    * `auditStore.recordSessionToolEvent`. */
   audit?: SessionToolAuditRecorder;
+  /** Test-only override for `listProjectsHandler`'s bounded `snapshot()`
+   * timeout (see `DEFAULT_SNAPSHOT_TIMEOUT_MS`/`withSnapshotTimeout`) —
+   * never set by production wiring; lets tests exercise the timeout
+   * path deterministically and quickly instead of waiting out the real
+   * default. */
+  __snapshotTimeoutMsForTests?: number;
 }
 
 // --- target resolution ----------------------------------------------------
@@ -336,8 +475,17 @@ function resolveTarget(
   }
 
   if (kind === "session") {
-    const { sessionId } = args as { sessionId: string };
-    const resolved = resolveSession(deps, sessionId);
+    // A `target: "session"` tool's argsSchema MAY also carry an optional
+    // `project` field (see `selectSessionArgsSchema`) naming the
+    // CALLER'S expected owning project — when present, resolution fails
+    // closed as `session_project_mismatch` if the session actually
+    // belongs to a different project, rather than silently succeeding
+    // against whichever project the session happens to resolve to.
+    const { sessionId, project } = args as {
+      sessionId: string;
+      project?: string;
+    };
+    const resolved = resolveSession(deps, sessionId, project);
     if (!resolved.ok) return resolved;
     return { ok: true, data: { kind: "session", session: resolved.data } };
   }
@@ -791,4 +939,373 @@ export async function runSessionTool<TData = unknown>(
     });
     return { ok: false, error: INTERNAL_ERROR("indeterminate") };
   }
+}
+
+// --- discovery/context/focus tools ------------------------------------
+
+/** Strict, closed nested schema for one `projectView` entry in
+ * `ide_list_projects`'s result array — this factory only closes the
+ * TOP-LEVEL `sessionResultSchema` object, so a nested array element
+ * needs its own `.strict()` to get the same undeclared-field rejection
+ * one level down (see `sessionResultSchema`'s own doc comment in
+ * `./commands.ts`). */
+const projectViewResultSchema = z
+  .object({
+    name: z.string(),
+    exists: z.boolean().optional(),
+    busyCount: z.number().optional(),
+    sessionCount: z.number().optional(),
+    sessionCountCapped: z.boolean().optional(),
+    hasStatusError: z.boolean(),
+    snapshotUnknown: z.boolean(),
+    hasSnapshotError: z.boolean(),
+  })
+  .strict();
+
+const sessionRowResultSchema = z
+  .object({
+    id: z.string(),
+    title: z.string(),
+    busy: z.boolean(),
+    needsAttention: z.boolean(),
+  })
+  .strict();
+
+/** Default bound for the optional `snapshot()` call in
+ * `listProjectsHandler` — chosen to sit near the existing reconcile-poll
+ * cadence (`src/server/reconcile-poller.ts`'s per-project interval) so a
+ * slow/hanging snapshot read degrades within roughly one poll tick
+ * rather than blocking the whole `ide_list_projects` call indefinitely.
+ * Test-only override via `SessionToolDeps.__snapshotTimeoutMsForTests`
+ * (never a public/production-facing option) lets tests exercise the
+ * timeout path deterministically and quickly instead of waiting out the
+ * real 2500ms. */
+const DEFAULT_SNAPSHOT_TIMEOUT_MS = 2500;
+
+/** Races `promise` against a timer of `timeoutMs`; resolves to the
+ * settled `SessionToolBusResult` on success, or `undefined` on timeout OR
+ * rejection — both are DEGRADE-not-fail outcomes for the optional
+ * snapshot read (see `listProjectsHandler`'s doc comment), so this
+ * helper deliberately collapses "rejected" and "timed out" into the same
+ * `undefined` signal rather than distinguishing them. The timer is
+ * always cleared (both on settle and on timeout) so a resolved-late
+ * snapshot promise can never leak a dangling timer or fire a
+ * use-after-return callback. */
+function withSnapshotTimeout<T>(
+  promise: Promise<SessionToolBusResult<T>> | undefined,
+  timeoutMs: number,
+): Promise<SessionToolBusResult<T> | undefined> {
+  if (!promise) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(undefined);
+    }, timeoutMs);
+    promise.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(undefined);
+      },
+    );
+  });
+}
+
+/**
+ * Calls both the browser-safe `roster()` and `snapshot()` `/core` reads
+ * and merges them by EXACT project name — roster is AUTHORITATIVE for
+ * project IDENTITY/ORDER (its listing order is preserved verbatim in the
+ * result; a roster failure is fatal, `upstream_error`/`indeterminate`,
+ * since there is no project list to return at all without it) and
+ * `bus.roster` being entirely absent is `internal_error`/`indeterminate`
+ * (a program-wiring gap, not an upstream failure). `snapshot()` supplies
+ * the live busy/session-count/error aggregate, but a snapshot failure
+ * (or `bus.snapshot` being absent) DEGRADES rather than fails the whole
+ * read: every project is still returned from the roster, each with
+ * `snapshotUnknown: true` (see `projectView`) rather than the call
+ * failing outright — a live roster listing with stale/missing status
+ * counts is still useful, unlike no listing at all. A project present
+ * in the roster but absent from a SUCCESSFUL snapshot response is
+ * likewise `snapshotUnknown: true`, not an error.
+ */
+async function listProjectsHandler(
+  _args: z.infer<typeof noArgsSchema>,
+  _target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<
+  SessionToolResult<{ projects: z.infer<typeof projectViewResultSchema>[] }>
+> {
+  if (!deps.bus.roster) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  const timeoutMs =
+    deps.__snapshotTimeoutMsForTests ?? DEFAULT_SNAPSHOT_TIMEOUT_MS;
+  // Unlike `snapshot()` (optional, best-effort, isolated by
+  // `withSnapshotTimeout` — a rejection there only degrades the result),
+  // `roster()` is AUTHORITATIVE: this call is REQUIRED to resolve for a
+  // read to exist at all, so its promise is awaited directly, not raced
+  // against a timeout. A REJECTED (not just `ok:false`) roster promise —
+  // e.g. a thrown network error carrying raw connection/credential
+  // text — must still map to the same stable, sanitized
+  // `upstream_error`/`indeterminate` outcome as an `ok:false` result, not
+  // `internal_error`: the failure is upstream, not a program-wiring gap,
+  // and the raw rejection reason must never cross this boundary.
+  let rosterResult: Awaited<ReturnType<NonNullable<typeof deps.bus.roster>>>;
+  let snapshotResult:
+    | Awaited<ReturnType<NonNullable<typeof deps.bus.snapshot>>>
+    | undefined;
+  try {
+    [rosterResult, snapshotResult] = await Promise.all([
+      deps.bus.roster({ context: deps.context }),
+      withSnapshotTimeout(
+        deps.bus.snapshot?.({ context: deps.context }),
+        timeoutMs,
+      ),
+    ]);
+  } catch {
+    return { ok: false, error: UPSTREAM_ERROR("indeterminate") };
+  }
+  if (!rosterResult.ok) {
+    return { ok: false, error: UPSTREAM_ERROR("indeterminate") };
+  }
+
+  const snapshotByName = new Map<string, SessionToolRawProject>();
+  if (snapshotResult?.ok) {
+    for (const p of snapshotResult.projects) {
+      const name = p.name;
+      if (typeof name === "string") snapshotByName.set(name, p);
+    }
+  }
+
+  const projects = rosterResult.projects.map((raw) => {
+    const name = typeof raw.name === "string" ? raw.name : undefined;
+    return projectView(
+      raw,
+      name !== undefined ? snapshotByName.get(name) : undefined,
+    );
+  });
+
+  return { ok: true, data: { projects } };
+}
+
+/**
+ * Refreshes the resolved project's session state (authoritative
+ * full-state reconciliation — see `SessionToolRefreshProject`) before
+ * reading the store, then builds visible rows via `toSessionRowViews`
+ * (same subagent-filter/ordering semantics as the sessions panel).
+ * `refreshProject` being absent, or rejecting, is `upstream_error`/
+ * `indeterminate` — this tool never falls back to a possibly-stale
+ * store read after a failed refresh.
+ */
+async function listSessionsHandler(
+  args: ListSessionsArgs,
+  target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<
+  SessionToolResult<{
+    project: string;
+    sessions: z.infer<typeof sessionRowResultSchema>[];
+  }>
+> {
+  if (target.kind !== "project") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!deps.refreshProject) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  try {
+    await deps.refreshProject(target.project);
+  } catch {
+    return { ok: false, error: UPSTREAM_ERROR("indeterminate") };
+  }
+
+  const stored = deps.store.getSessions(target.project.expandedPath);
+  const pendingIds = new Set(
+    deps.store
+      .getPendingQuestions()
+      .filter(
+        (q): q is { sessionID: string } =>
+          typeof q === "object" &&
+          q !== null &&
+          "sessionID" in q &&
+          typeof (q as { sessionID: unknown }).sessionID === "string",
+      )
+      .map((q) => q.sessionID),
+  );
+  const sessions = toSessionRowViews(stored, pendingIds, {
+    includeSubagents: args.includeSubagents,
+  });
+
+  return { ok: true, data: { project: target.project.name, sessions } };
+}
+
+const activeContextResultSchema = z
+  .object({
+    project: z.string().optional(),
+    sessionId: z.string().optional(),
+  })
+  .strict();
+
+/** Reads the currently-focused logical project/session from the UI focus
+ * callback — synchronous, no I/O, never a directory. A missing
+ * `focus.getActiveContext` is `internal_error`/`indeterminate` (this
+ * tool has no meaningful fallback for "focus state is unavailable").
+ *
+ * The callback's output is itself UNTRUSTED — a buggy or compromised UI
+ * layer could report a poisoned/malformed project name or session id —
+ * so both are validated against the SAME shared invariants target
+ * resolution already enforces (`isValidProjectName`/`isValidSessionId`)
+ * BEFORE the result is constructed. A poisoned value fails closed as
+ * `internal_error`/`indeterminate` (the callback already ran, so this is
+ * a post-call failure, same posture as every other post-handler
+ * validation failure in this module) with no raw echo of the poisoned
+ * value anywhere in the error. */
+async function getActiveContextHandler(
+  _args: z.infer<typeof noArgsSchema>,
+  _target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<SessionToolResult<z.infer<typeof activeContextResultSchema>>> {
+  if (!deps.focus.getActiveContext) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  const raw = deps.focus.getActiveContext();
+  if (raw.project !== undefined && !isValidProjectName(raw.project)) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (raw.sessionId !== undefined && !isValidSessionId(raw.sessionId)) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  return { ok: true, data: activeContextView(raw) };
+}
+
+const selectProjectResultSchema = z.object({ project: z.string() }).strict();
+
+/** Focuses the already-resolved project via the injected UI callback.
+ * Target resolution has already proven the project exists in the live
+ * roster — an unknown/mismatched project fails BEFORE this handler ever
+ * runs (see `resolveTarget`), so this handler itself never needs to
+ * re-validate identity, only confirm the focus call succeeded. A
+ * missing `focus.selectProject` is `internal_error`/`indeterminate`; a
+ * callback that throws AFTER being invoked is also `indeterminate` (the
+ * focus mutation may have partially applied). */
+async function selectProjectHandler(
+  _args: unknown,
+  target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<SessionToolResult<z.infer<typeof selectProjectResultSchema>>> {
+  if (target.kind !== "project") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!deps.focus.selectProject) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  await deps.focus.selectProject(target.project);
+  return { ok: true, data: { project: target.project.name } };
+}
+
+const selectSessionResultSchema = z
+  .object({ sessionId: z.string(), project: z.string() })
+  .strict();
+
+/** Focuses the already-resolved session via the injected UI callback.
+ * Target resolution has already proven the session exists AND (when an
+ * expected project was supplied) belongs to it — an unknown session or
+ * a session/project mismatch fails BEFORE this handler runs. Same
+ * missing-callback/post-invocation-throw handling as
+ * `selectProjectHandler`. */
+async function selectSessionHandler(
+  _args: SelectSessionArgs,
+  target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<SessionToolResult<z.infer<typeof selectSessionResultSchema>>> {
+  if (target.kind !== "session") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!deps.focus.selectSession) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  await deps.focus.selectSession(target.session);
+  return {
+    ok: true,
+    data: { sessionId: target.session.id, project: target.session.project },
+  };
+}
+
+let discoveryContextToolsRegistered = false;
+
+/**
+ * Registers the five discovery/context/focus session tools
+ * (`ide_list_projects`, `ide_list_sessions`, `ide_get_active_context`,
+ * `ide_select_project`, `ide_select_session`) via `registerSessionTool`.
+ * Idempotent and safe to call more than once — no implicit
+ * module-import side effect registers these; a caller (the bridge/UI
+ * integration point) must call this explicitly exactly once per process
+ * (or reset via `__resetSessionToolsForTests` and call again, which
+ * tests do freely).
+ */
+export function registerDiscoveryContextTools(): void {
+  if (discoveryContextToolsRegistered) return;
+  discoveryContextToolsRegistered = true;
+
+  registerSessionTool("ide_list_projects", {
+    argsSchema: noArgsSchema,
+    resultSchema: sessionResultSchema({
+      projects: z.array(projectViewResultSchema),
+    }),
+    target: "none",
+    handler: listProjectsHandler,
+  });
+
+  registerSessionTool("ide_list_sessions", {
+    argsSchema: listSessionsArgsSchema,
+    resultSchema: sessionResultSchema({
+      project: z.string(),
+      sessions: z.array(sessionRowResultSchema),
+    }),
+    target: "project",
+    handler: listSessionsHandler,
+  });
+
+  registerSessionTool("ide_get_active_context", {
+    argsSchema: noArgsSchema,
+    resultSchema: sessionResultSchema({
+      project: z.string().optional(),
+      sessionId: z.string().optional(),
+    }),
+    target: "none",
+    handler: getActiveContextHandler,
+  });
+
+  registerSessionTool("ide_select_project", {
+    argsSchema: projectTargetSchema,
+    resultSchema: sessionResultSchema({ project: z.string() }),
+    target: "project",
+    handler: selectProjectHandler,
+  });
+
+  registerSessionTool("ide_select_session", {
+    argsSchema: selectSessionArgsSchema,
+    resultSchema: sessionResultSchema({
+      sessionId: z.string(),
+      project: z.string(),
+    }),
+    target: "session",
+    handler: selectSessionHandler,
+  });
+}
+
+/** Test/dev helper — resets the module-level idempotency latch so a test
+ * that calls `__resetSessionToolsForTests()` can re-register the five
+ * discovery/context/focus tools afresh. */
+export function __resetDiscoveryContextRegistrationForTests(): void {
+  discoveryContextToolsRegistered = false;
 }
