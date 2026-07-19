@@ -43,6 +43,29 @@ export function isValidSessionId(value: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(value);
 }
 
+/** Validates an OpenCode v1 user-message id (`msg_` + a 12-char
+ * lowercase-hex timestamp/counter prefix + 14 random base62 chars) —
+ * the exact shape `@fro.bot/space-bus/core`'s `createDispatchMessageId()`
+ * produces. A caller never supplies this value; it is only ever a value
+ * this codebase generated itself or read back from a trusted upstream
+ * result, so this validator exists to catch corruption/tampering, not to
+ * accept caller input. */
+export function isValidMessageId(value: string): boolean {
+  return /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/.test(value);
+}
+
+/** Validates an OpenCode v1 pending-question request id (`que_` +
+ * opaque alphanumeric suffix). Used only to validate a `mode:"blocked"`
+ * dispatch result's `requestId` before it is ever surfaced or focused
+ * on. */
+export function isValidRequestId(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_SESSION_ID_LENGTH) {
+    return false;
+  }
+  if (CONTROL_CHAR_PATTERN.test(value)) return false;
+  return /^que_[A-Za-z0-9]+$/.test(value);
+}
+
 function projectNameSchema() {
   return z
     .string()
@@ -128,6 +151,31 @@ export type ProjectOrSessionTarget = z.infer<
   typeof projectOrSessionTargetSchema
 >;
 
+/** `ide_dispatch_prompt`'s args: exactly one of a validated logical
+ * `project`/`sessionId` target, a non-empty `prompt`, and an optional
+ * `title`. `.strict()` closes the object — a caller CANNOT set a
+ * pending-question policy or any other field; the executor hardcodes
+ * `onPendingQuestion: "blocked"` unconditionally, so there is no schema
+ * field through which a caller could even attempt to request the
+ * legacy implicit-reply behavior. */
+export const dispatchPromptArgsSchema = z
+  .object({
+    project: projectNameSchema().optional(),
+    sessionId: sessionIdSchema().optional(),
+    prompt: z.string().min(1, "prompt must be a non-empty string"),
+    title: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine((v) => (v.project === undefined) !== (v.sessionId === undefined), {
+    message: "exactly one of project or sessionId is required",
+  });
+/** `.strict()` above rejects a caller-supplied `onPendingQuestion` OR
+ * `messageId` field outright — the executor hardcodes
+ * `onPendingQuestion: "blocked"` and generates `messageId` itself via
+ * `createDispatchMessageId()`, unconditionally, on every call; there is
+ * no schema field through which a caller could set or override either. */
+export type DispatchPromptArgs = z.infer<typeof dispatchPromptArgsSchema>;
+
 /** Mirrors `src/layout/commands.ts`'s `CommandSource` — kept as a distinct
  * type (not re-exported) so the session-tool domain never structurally
  * couples to the layout command layer. */
@@ -150,10 +198,32 @@ export type SessionToolErrorCode =
  * are always effectively "not_sent". */
 export type SessionToolErrorDelivery = "not_sent" | "indeterminate";
 
+/** Safe, closed metadata describing an INDETERMINATE dispatch attempt —
+ * attached only to a dispatch error whose delivery is `"indeterminate"`
+ * (the mutation may or may not have gone through and could not be
+ * confirmed by the bounded post-failure reconciliation pass). Preserved
+ * internally (never echoed back to a caller as free text) so a future
+ * sidecar-side follow-up can decide whether to re-probe. Deliberately
+ * excludes any timestamp, the prompt/title text, candidate session ids,
+ * candidate counts, filesystem paths, or raw upstream error text —
+ * `project`/`sessionId` here are always the RESOLVED logical identifiers
+ * from target resolution, never a raw caller-supplied string. */
+export interface SessionToolDispatchAttemptMeta {
+  operation: "dispatch";
+  target: "project" | "session";
+  project: string;
+  sessionId?: string;
+  messageId: string;
+  reconciliation: "unconfirmed" | "ambiguous" | "unavailable";
+}
+
 export interface SessionToolError {
   code: SessionToolErrorCode;
   message: string;
   delivery?: SessionToolErrorDelivery;
+  /** Only ever present on a dispatch error; see
+   * `SessionToolDispatchAttemptMeta`. */
+  attempt?: SessionToolDispatchAttemptMeta;
 }
 
 /**
@@ -288,6 +358,15 @@ export function isBrandedResultSchema(schema: unknown): boolean {
  * typed `SessionToolError` before any injected operation runs.
  * Directory-shaped targets get the dedicated `invalid_target` code; any
  * other schema violation is a generic `invalid_arguments`. Never throws.
+ *
+ * The returned message is ALWAYS one of two stable, program-owned
+ * strings — never a joined zod issue message. A raw zod issue can embed
+ * caller-controlled content (an `unrecognized_keys` issue lists the
+ * actual unknown key names verbatim; a `refine` issue on a big union can
+ * echo back parts of the input) — none of that is safe to forward as-is.
+ * `INVALID_TARGET_MARKERS` is still used internally to CLASSIFY which
+ * stable code applies, but the marker text itself is never included in
+ * the returned message.
  */
 export function parseSessionToolArgs<T>(
   schema: z.ZodType<T>,
@@ -305,8 +384,9 @@ export function parseSessionToolArgs<T>(
     ok: false,
     error: {
       code: invalidTarget ? "invalid_target" : "invalid_arguments",
-      message:
-        issues.map((i) => i.message).join("; ") || "Invalid command payload",
+      message: invalidTarget
+        ? "The given target is invalid."
+        : "The given arguments are invalid.",
       delivery: "not_sent",
     },
   };

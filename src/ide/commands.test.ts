@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import {
+  dispatchPromptArgsSchema,
   isBrandedResultSchema,
   isValidProjectName,
   isValidSessionId,
@@ -341,5 +342,72 @@ describe("sessionResultSchema / isBrandedResultSchema", () => {
       expect(() => isBrandedResultSchema(bad)).not.toThrow();
       expect(isBrandedResultSchema(bad)).toBe(false);
     }
+  });
+});
+
+describe("dispatchPromptArgsSchema", () => {
+  test("happy path: a project target with a prompt parses", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({
+      project: "dashboard",
+      prompt: "hello",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  test("happy path: a sessionId target with a prompt and title parses", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({
+      sessionId: "ses_live",
+      prompt: "hello",
+      title: "My title",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  test("error path: both project and sessionId is rejected", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({
+      project: "dashboard",
+      sessionId: "ses_live",
+      prompt: "hello",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("error path: neither project nor sessionId is rejected", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({ prompt: "hello" });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("error path: an empty prompt is rejected", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({
+      project: "dashboard",
+      prompt: "",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("error path: a path-shaped project target is rejected", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({
+      project: "/Users/marcus/src/dashboard",
+      prompt: "hello",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("security: a caller cannot set an onPendingQuestion field at all — .strict() rejects it", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({
+      project: "dashboard",
+      prompt: "hello",
+      onPendingQuestion: "question-reply",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  test("security: .strict() rejects any other undeclared field", () => {
+    const parsed = dispatchPromptArgsSchema.safeParse({
+      project: "dashboard",
+      prompt: "hello",
+      extra: "field",
+    });
+    expect(parsed.success).toBe(false);
   });
 });

@@ -23,11 +23,19 @@ import {
   type ResolvedSession,
   type SessionToolDeps,
   registerDiscoveryContextTools,
+  registerDispatchTool,
 } from "../ide/executor";
 import { type FocusController, createFocusController } from "../ide/focus";
 import { auditStore } from "../panels/audit-log";
 import { PromptBar } from "../promptbar";
-import { roster, snapshot } from "../server/bus";
+import {
+  createDispatchMessageId,
+  dispatch,
+  messages,
+  roster,
+  snapshot,
+  toDispatchArgs,
+} from "../server/bus";
 import { type OpencodeClient, createOpencodeClient } from "../server/client";
 import { type Demux, createDemux } from "../server/demux";
 import { startReconcilePoller } from "../server/reconcile-poller";
@@ -243,7 +251,21 @@ export function buildSessionToolDeps(
   return {
     context,
     store: live.store,
-    bus: { roster, snapshot },
+    bus: {
+      roster,
+      snapshot,
+      toDispatchArgs,
+      createDispatchMessageId,
+      // `dispatch`'s real parameter type is a `project`-XOR-`sessionId`
+      // discriminated union; `SessionToolDispatchArgs` collapses both to
+      // optional since the executor always constructs the value via
+      // `toDispatchArgs` first (which re-imposes the real shape) before
+      // ever calling `dispatch` — this executor never calls `dispatch`
+      // with a raw, unvalidated object.
+      dispatch: (args, opts) =>
+        dispatch(args as Parameters<typeof dispatch>[0], opts),
+      messages,
+    },
     refreshProject: (project: ResolvedProject) =>
       reconcileProject(live.client, live.store, project.expandedPath),
     focus: {
@@ -254,6 +276,17 @@ export function buildSessionToolDeps(
           directory: project.expandedPath,
         }),
       selectSession: (session: ResolvedSession) => {
+        const owner = context.roster.projects.find(
+          (p) => p.name === session.project,
+        );
+        if (!owner) return;
+        focus.selectSession({
+          id: session.id,
+          project: session.project,
+          directory: owner.expandedPath,
+        });
+      },
+      onDispatched: (session: ResolvedSession) => {
         const owner = context.roster.projects.find(
           (p) => p.name === session.project,
         );
@@ -576,6 +609,7 @@ export function DockviewShell({
     // effect. Safe under React StrictMode's double-invoke and repeated
     // mounts/HMR: registering an already-registered tool name is a no-op.
     registerDiscoveryContextTools();
+    registerDispatchTool();
     const bridge = connectLayoutBridge(
       {
         get panels() {

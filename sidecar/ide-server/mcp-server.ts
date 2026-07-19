@@ -10,9 +10,10 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type {
-  BridgeError,
-  BridgeResponse,
+import {
+  type BridgeError,
+  type BridgeResponse,
+  bridgeDispatchAttemptMetaSchema,
 } from "../../src/layout/bridge-protocol";
 import {
   closePanelCommandSchema,
@@ -92,6 +93,9 @@ function normalizedError(error: BridgeError) {
   const code = KNOWN_BRIDGE_ERROR_CODES.has(error.code)
     ? error.code
     : "internal_error";
+  const attemptParsed = bridgeDispatchAttemptMetaSchema.safeParse(
+    error.attempt,
+  );
   return {
     code,
     message: BRIDGE_ERROR_CODE_MESSAGES[code],
@@ -99,6 +103,7 @@ function normalizedError(error: BridgeError) {
       KNOWN_DELIVERY_VALUES.has(error.delivery) && {
         delivery: error.delivery,
       }),
+    ...(attemptParsed.success && { attempt: attemptParsed.data }),
   };
 }
 
@@ -247,6 +252,101 @@ const FOCUS_SESSION_ANNOTATIONS = {
   openWorldHint: false,
 };
 
+/** Applied to `ide_dispatch_prompt` — mutates OpenCode state (creates a
+ * session or sends a prompt/message), so `readOnlyHint` is false;
+ * repeating the SAME call sends a SECOND prompt/creates a SECOND
+ * session, so `idempotentHint` is false (never safe to blindly retry);
+ * never deletes/destroys existing state, so `destructiveHint` is false;
+ * scoped entirely to this codebase's own roster/session state (never an
+ * external open-world effect), so `openWorldHint` is false. */
+const DISPATCH_PROMPT_ANNOTATIONS = {
+  readOnlyHint: false,
+  idempotentHint: false,
+  destructiveHint: false,
+  openWorldHint: false,
+};
+
+/** Base (unrefined) input schema for `ide_dispatch_prompt` — deliberately
+ * `.passthrough()`, mirroring `relayNoArgSession`'s own pattern, so ANY
+ * key the caller supplies (including `onPendingQuestion`, `messageId`,
+ * or an unrelated credential-shaped key) reaches `isValidDispatchPromptArgs`
+ * unfiltered instead of being silently stripped by the SDK's own
+ * (non-strict-by-default) zod parsing — a silently-stripped override
+ * attempt is a policy bypass a caller could never observe; an explicit
+ * rejection is not. The actual exactly-one-of-project-or-sessionId /
+ * no-undeclared-field / non-empty-prompt enforcement happens in
+ * `isValidDispatchPromptArgs` below, which also guarantees a rejection
+ * never echoes the caller's raw key names or values (the SDK's own
+ * schema-rejection path does). */
+const dispatchPromptInputSchema = z
+  .object({
+    project: z.string().min(1).optional(),
+    sessionId: z.string().min(1).optional(),
+    prompt: z.string().min(1),
+    title: z.string().min(1).optional(),
+  })
+  .passthrough();
+
+const DISPATCH_PROMPT_KNOWN_KEYS = new Set([
+  "project",
+  "sessionId",
+  "prompt",
+  "title",
+]);
+
+/** True only for a raw args object carrying only `DISPATCH_PROMPT_KNOWN_KEYS`
+ * with exactly one of `project`/`sessionId` set — no undeclared key
+ * (`onPendingQuestion`, `messageId`, or anything else), never both/neither
+ * target field, and a non-empty `prompt`. Never throws. */
+function isValidDispatchPromptArgs(args: Record<string, unknown>): args is {
+  project?: string;
+  sessionId?: string;
+  prompt: string;
+  title?: string;
+} {
+  for (const key of Object.keys(args)) {
+    if (!DISPATCH_PROMPT_KNOWN_KEYS.has(key)) return false;
+  }
+  const hasProject = typeof args.project === "string" && args.project !== "";
+  const hasSessionId =
+    typeof args.sessionId === "string" && args.sessionId !== "";
+  if (hasProject === hasSessionId) return false;
+  if (typeof args.prompt !== "string" || args.prompt === "") return false;
+  if (args.title !== undefined && typeof args.title !== "string") {
+    return false;
+  }
+  return true;
+}
+
+const DISPATCH_PROMPT_INVALID_ARGS_RESULT = toolTextResult(
+  {
+    error: {
+      code: "invalid_arguments",
+      message: "The given arguments are invalid.",
+      delivery: "not_sent",
+    },
+  },
+  true,
+);
+
+/** Relays `ide_dispatch_prompt` — the one non-idempotent, mutating
+ * session tool. Own-schema validation happens BEFORE the bridge is ever
+ * dispatched (see `isValidDispatchPromptArgs`), for the same
+ * caller-echo-avoidance reason `relayNoArgSession` validates its own
+ * shape instead of relying on the SDK's own `InvalidParams` rejection. A
+ * successful relay's payload is forwarded verbatim — the webview
+ * executor's own strict result schema is the disclosure boundary; this
+ * relay adds no second, divergent serialization step. */
+async function relayDispatchPrompt(
+  bridge: WsBridge,
+  args: Record<string, unknown>,
+) {
+  if (!isValidDispatchPromptArgs(args)) {
+    return DISPATCH_PROMPT_INVALID_ARGS_RESULT;
+  }
+  return relaySession(bridge, "ide_dispatch_prompt", args);
+}
+
 export function createIdeMcpServer(bridge: WsBridge): McpServer {
   const server = new McpServer({ name: "mothership-ide", version: "0.1.0" });
 
@@ -385,10 +485,21 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
     (args) => relaySession(bridge, "ide_select_session", args),
   );
 
+  server.registerTool(
+    "ide_dispatch_prompt",
+    {
+      description:
+        "Create a new session in a project or continue an exact existing session by sending it a prompt, identified only by a logical project name or session id (never a filesystem path). This mutates OpenCode state and is NOT idempotent — sending the same call twice creates two sessions or sends two prompts. Never blindly retry after a timeout or disconnect; on an indeterminate result, list recent sessions and inspect bounded transcripts to confirm what happened before retrying by hand. A follow-up against a session with a pending question is refused (a typed blocked result), never silently sent as that question's answer.",
+      inputSchema: dispatchPromptInputSchema,
+      annotations: DISPATCH_PROMPT_ANNOTATIONS,
+    },
+    (args) => relayDispatchPrompt(bridge, args),
+  );
+
   return server;
 }
 
-/** The five session-tool names registered above — kept alongside the
+/** The six session-tool names registered above — kept alongside the
  * registrations as the sidecar-side name parity constant. */
 export const SESSION_TOOL_NAMES = [
   "ide_list_projects",
@@ -396,4 +507,5 @@ export const SESSION_TOOL_NAMES = [
   "ide_get_active_context",
   "ide_select_project",
   "ide_select_session",
+  "ide_dispatch_prompt",
 ] as const;

@@ -28,9 +28,17 @@
  * binding) lives in `src/layout/bridge.ts`, not here.
  */
 import { z } from "zod";
-import type { roster, snapshot } from "../server/bus";
+import type {
+  createDispatchMessageId,
+  dispatch,
+  messages,
+  roster,
+  snapshot,
+  toDispatchArgs,
+} from "../server/bus";
 import type { BusContext } from "../server/types";
 import {
+  type DispatchPromptArgs,
   type ListSessionsArgs,
   type SelectSessionArgs,
   type SessionResultSchema,
@@ -38,8 +46,10 @@ import {
   type SessionToolAuditRecorder,
   type SessionToolResult,
   type SessionToolSource,
+  dispatchPromptArgsSchema,
   isBrandedResultSchema,
   isValidProjectName,
+  isValidRequestId,
   isValidSessionId,
   listSessionsArgsSchema,
   noArgsSchema,
@@ -49,6 +59,7 @@ import {
   sessionResultSchema,
 } from "./commands";
 import {
+  DISPATCH_INDETERMINATE,
   INTERNAL_ERROR,
   UPSTREAM_ERROR,
   normalizeHandlerError,
@@ -158,6 +169,64 @@ export interface SessionToolStore {
  * `roster`/`snapshot` functions (type-only import — no runtime
  * dependency, no `fetch`, no Node-only import) are assignable to this
  * interface's fields without a cast. */
+/** Structural mirror of `@fro.bot/space-bus/core`'s `DispatchArgs` — the
+ * discriminated `project`-xor-`sessionId` union collapses to both
+ * OPTIONAL here (this executor always constructs args with exactly one
+ * set, proven by target resolution before `toDispatchArgs` is ever
+ * called) plus the mandatory `onPendingQuestion`, which this executor
+ * hardcodes to `"blocked"` on every call — never left to the caller. */
+export interface SessionToolDispatchArgs {
+  prompt: string;
+  title?: string;
+  onPendingQuestion?: "question-reply" | "blocked";
+  project?: string;
+  sessionId?: string;
+  messageId?: string;
+}
+
+/** Structural mirror of `@fro.bot/space-bus/core`'s `DispatchResult`. */
+export interface SessionToolDispatchResult {
+  sessionId: string;
+  project: string;
+  mode: "new" | "follow-up" | "question-reply" | "blocked";
+  directory?: string;
+  requestId?: string;
+  messageId?: string;
+}
+
+/** Structural mirror of `@fro.bot/space-bus/core`'s `DispatchFailure` — a
+ * typed partial-failure handle attached to a failed `dispatch()` call
+ * only. `phase:"not_sent"` means the failure is definitely pre-mutation;
+ * `phase:"indeterminate"` means the failed request may already have
+ * mutated OpenCode state. `sessionId`/`messageId` are safe upstream
+ * handles this executor may use to correlate a reconciliation read —
+ * never trusted blindly (always re-checked against the resolved project/
+ * target before use). */
+export interface SessionToolDispatchFailure {
+  phase: "not_sent" | "indeterminate";
+  project: string;
+  sessionId?: string;
+  messageId?: string;
+}
+
+/** `dispatch()`'s own result shape — distinct from the generic
+ * `SessionToolBusResult<T>` because only `dispatch()`'s `Err` carries an
+ * optional `dispatchFailure` handle. */
+export type SessionToolDispatchBusResult =
+  | ({ ok: true } & SessionToolDispatchResult)
+  | { ok: false; error: string; dispatchFailure?: SessionToolDispatchFailure };
+
+/** Structural mirror of one entry in `@fro.bot/space-bus/core`'s
+ * `SessionMessage[]` — only the fields the bounded reconciliation pass
+ * needs to prove delivery: an id to diff against the baseline, the role
+ * to find the newest USER message, and the text parts to compare against
+ * the (in-memory-only, never logged/stored/returned) attempted prompt. */
+export interface SessionToolMessage {
+  id?: string;
+  role: string;
+  parts: { type: string; text?: string }[];
+}
+
 export interface SessionToolBusFacade {
   roster?: (opts: {
     context: SessionToolBusContext;
@@ -169,19 +238,74 @@ export interface SessionToolBusFacade {
   }) => Promise<
     SessionToolBusResult<{ projects: readonly SessionToolRawProject[] }>
   >;
+  /** Validates/shapes raw dispatch input into `DispatchArgs` — this
+   * executor always supplies `onPendingQuestion: "blocked"` in the input
+   * it passes here, on every call, for every target mode; there is no
+   * branch that omits it. */
+  toDispatchArgs?: (input: {
+    prompt: string;
+    title?: string;
+    project?: string;
+    sessionId?: string;
+    onPendingQuestion?: "question-reply" | "blocked";
+    messageId?: string;
+  }) => SessionToolBusResult<SessionToolDispatchArgs>;
+  /** Generates one OpenCode v1 user-message id. Called EXACTLY ONCE per
+   * `ide_dispatch_prompt` attempt, before `toDispatchArgs` — the
+   * generated id is passed as `messageId` and a caller can never
+   * supply/override it (the schema has no such field). */
+  createDispatchMessageId?: () => string;
+  /** Invoked EXACTLY ONCE per `ide_dispatch_prompt` call — never retried. */
+  dispatch?: (
+    args: SessionToolDispatchArgs,
+    opts: { context: SessionToolBusContext },
+  ) => Promise<SessionToolDispatchBusResult>;
+  /** Bounded transcript read used only by the post-dispatch-failure
+   * reconciliation pass (see `dispatchPromptHandler`) — never for a
+   * general-purpose transcript tool in this unit. */
+  messages?: (
+    sessionId: string,
+    opts: { context: SessionToolBusContext; limit?: number },
+  ) => Promise<
+    SessionToolBusResult<{
+      sessionId: string;
+      project: string;
+      messages: readonly SessionToolMessage[];
+    }>
+  >;
   [key: string]: unknown;
 }
 
 /** Compile-time-only (never called) proof that the real, imported
- * `roster`/`snapshot` facade functions are assignable to
- * `SessionToolBusFacade`'s fields with no cast. */
+ * `roster`/`snapshot`/`toDispatchArgs`/`dispatch`/`messages` facade
+ * functions are assignable to `SessionToolBusFacade`'s fields with no
+ * cast. */
 function _assertBusFacadeAssignable(
   realRoster: typeof roster,
   realSnapshot: typeof snapshot,
+  realToDispatchArgs: typeof toDispatchArgs,
+  realDispatch: typeof dispatch,
+  realCreateDispatchMessageId: typeof createDispatchMessageId,
+  realMessages: typeof messages,
 ): void {
   const _typed: SessionToolBusFacade = {
     roster: realRoster,
     snapshot: realSnapshot,
+    toDispatchArgs: realToDispatchArgs,
+    // `dispatch`'s real parameter type is a `project`-XOR-`sessionId`
+    // DISCRIMINATED union (`DispatchArgs`); `SessionToolDispatchArgs`
+    // collapses both to optional so this executor can build the value
+    // structurally before `toDispatchArgs` re-validates it — the
+    // executor NEVER calls `dispatch` directly with a raw object; it
+    // always goes through `toDispatchArgs` first (see
+    // `dispatchPromptHandler`), which re-imposes the real discriminated
+    // shape. This wrapper is the one place that bridges the two shapes,
+    // proving real `dispatch` is reachable through this facade without
+    // weakening the interface `dispatchPromptHandler` programs against.
+    dispatch: (args, opts) =>
+      realDispatch(args as Parameters<typeof realDispatch>[0], opts),
+    createDispatchMessageId: realCreateDispatchMessageId,
+    messages: realMessages,
   };
   void _typed;
 }
@@ -212,6 +336,13 @@ export interface SessionToolFocusCallbacks {
    * transcript/sessions panel scoping). Same throw/reject handling as
    * `selectProject`. */
   selectSession?: (session: ResolvedSession) => void | Promise<void>;
+  /** Best-effort UI focus after a CONFIRMED dispatch send — invoked with
+   * the resolved session only when `ide_dispatch_prompt` proves a
+   * successful/reconciled outcome (never on `"blocked"`, never on an
+   * unconfirmed/indeterminate result). A throw here must NEVER be
+   * allowed to retroactively change a confirmed dispatch result into an
+   * error — see `dispatchPromptHandler`'s try/catch around this call. */
+  onDispatched?: (session: ResolvedSession) => void | Promise<void>;
   [key: string]: unknown;
 }
 
@@ -1240,6 +1371,520 @@ async function selectSessionHandler(
   };
 }
 
+// --- dispatch prompt --------------------------------------------------
+
+const dispatchResultSchema = z
+  .object({
+    project: z.string(),
+    sessionId: z.string(),
+    mode: z.enum(["new", "follow-up", "blocked"]),
+    reconciled: z.boolean(),
+    requestId: z.string().optional(),
+    messageId: z.string().optional(),
+  })
+  .strict();
+
+/** Bound on how many candidate NEW sessions the project-create
+ * reconciliation pass will read messages for — a hard cap, not a
+ * best-effort limit, so a pathological reconcile state can never turn
+ * one dispatch call into an unbounded number of `messages()` reads. */
+const MAX_NEW_SESSION_CANDIDATES = 10;
+
+/** How many of a session's most recent messages the post-failure
+ * reconciliation reads — generous enough to find a just-sent prompt
+ * even if a few automated replies interleaved, small enough to stay a
+ * single bounded read. */
+const RECONCILE_MESSAGE_LIMIT = 20;
+const RECONCILE_CANDIDATE_MESSAGE_LIMIT = 10;
+
+/** A bounded reconciliation attempt's outcome: either it PROVED delivery
+ * (carries the confirmed result data) or it could not
+ * (`"unconfirmed" | "ambiguous" | "unavailable"`). A normal discriminated
+ * return — never exception-as-success control flow. */
+type ReconciliationOutcome =
+  | { proven: true; data: z.infer<typeof dispatchResultSchema> }
+  | {
+      proven: false;
+      reconciliation: "unconfirmed" | "ambiguous" | "unavailable";
+    };
+
+/** True only for a message that is (a) authored by the user and (b) has
+ * the exact `messageId` this dispatch attempt generated. Correlation is
+ * by id ONLY — prompt/title text is never read, compared, stored,
+ * returned, or audited by this function or its caller. */
+function isMatchingDispatchMessage(
+  message: SessionToolMessage,
+  messageId: string,
+): boolean {
+  return message.role === "user" && message.id === messageId;
+}
+
+/**
+ * `ide_dispatch_prompt`: creates a new session in a project or continues
+ * (follow-up into) an exact existing session, with a hardcoded
+ * `onPendingQuestion: "blocked"` policy on EVERY dispatch — a follow-up
+ * against a session with a pending question is refused (typed
+ * `mode: "blocked"`), never silently reinterpreted as that question's
+ * answer.
+ *
+ * Exactly one `messageId` (via `bus.createDispatchMessageId()`) is
+ * generated per attempt, BEFORE `toDispatchArgs` shapes the call and
+ * before any preflight I/O — a caller can never supply or override it.
+ * `toDispatchArgs` runs immediately after target resolution, so a
+ * malformed shape (which can only happen via an internal bug, since
+ * every input here is already validated/resolved) is caught before any
+ * network I/O at all. `dispatch` receives the bare `DispatchArgs`
+ * `toDispatchArgs` returns — never the `{ok:true}` wrapper.
+ *
+ * `dispatch` is invoked EXACTLY ONCE, never retried. `mode:
+ * "question-reply"` is unreachable given the hardcoded blocked policy —
+ * if space-bus ever returns it anyway, that is treated as an invariant
+ * breach: `internal_error`/`indeterminate`, no reconciliation, no focus.
+ *
+ * A typed `dispatchFailure.phase:"not_sent"` is trusted verbatim — the
+ * mutation definitely never sent, no reconciliation, no focus. A
+ * `phase:"indeterminate"` failure, a throw, or a missing failure handle
+ * all trigger exactly ONE bounded, read-only, id-based reconciliation
+ * pass (see `reconcileDispatchFailure` below) — never a retry of
+ * `dispatch` itself, and never trusting a `dispatchFailure`'s
+ * `project`/`sessionId` handle without first checking it against the
+ * originally resolved target.
+ */
+async function dispatchPromptHandler(
+  args: DispatchPromptArgs,
+  target: SessionToolTarget,
+  deps: SessionToolDeps,
+): Promise<SessionToolResult<z.infer<typeof dispatchResultSchema>>> {
+  if (target.kind !== "project" && target.kind !== "session") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (
+    !deps.bus.toDispatchArgs ||
+    !deps.bus.dispatch ||
+    !deps.bus.createDispatchMessageId
+  ) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!deps.refreshProject) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  const resolvedProject =
+    target.kind === "project"
+      ? target.project
+      : deps.context.roster.projects.find(
+          (p) => p.name === target.session.project,
+        );
+  if (!resolvedProject) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  // One messageId per attempt, generated before any I/O — the caller
+  // schema has no field through which this could ever be overridden.
+  const messageId = deps.bus.createDispatchMessageId();
+
+  const dispatchArgsResult = deps.bus.toDispatchArgs({
+    prompt: args.prompt,
+    ...(args.title !== undefined && { title: args.title }),
+    ...(target.kind === "project"
+      ? { project: resolvedProject.name }
+      : { sessionId: target.session.id }),
+    // Hardcoded on EVERY target mode — no branch above can omit this;
+    // there is no schema field a caller could set to override it.
+    onPendingQuestion: "blocked",
+    messageId,
+  });
+  if (!dispatchArgsResult.ok) {
+    return {
+      ok: false,
+      error: toolError(
+        "invalid_arguments",
+        "The given dispatch arguments are invalid.",
+        "not_sent",
+      ),
+    };
+  }
+  // Assert the shaped args survived exactly as intended before any I/O —
+  // an internal-bug safety net, not a caller-input check (the schema
+  // already forbids a caller from setting any of these).
+  if (
+    dispatchArgsResult.prompt !== args.prompt ||
+    dispatchArgsResult.title !== args.title ||
+    dispatchArgsResult.onPendingQuestion !== "blocked" ||
+    dispatchArgsResult.messageId !== messageId ||
+    (target.kind === "project" &&
+      dispatchArgsResult.project !== resolvedProject.name) ||
+    (target.kind === "session" &&
+      dispatchArgsResult.sessionId !== target.session.id)
+  ) {
+    return { ok: false, error: INTERNAL_ERROR("not_sent") };
+  }
+
+  // Preflight: authoritative refresh BEFORE any mutation. A refresh
+  // failure means this whole reconciliation contract's freshness
+  // guarantee cannot be trusted — fail closed as not_sent, never
+  // dispatch against a possibly-stale/unknown state.
+  try {
+    await deps.refreshProject(resolvedProject);
+  } catch {
+    return {
+      ok: false,
+      error: toolError(
+        "upstream_error",
+        "The upstream operation failed.",
+        "not_sent",
+      ),
+    };
+  }
+
+  if (target.kind === "session") {
+    // Re-prove the exact session still exists/is owned by this project
+    // against the FRESH post-refresh store — a session deleted or
+    // reparented between initial target resolution and this point must
+    // never receive a dispatch.
+    const reResolved = resolveSession(
+      deps,
+      target.session.id,
+      target.session.project,
+    );
+    if (!reResolved.ok) {
+      return {
+        ok: false,
+        error: toolError(
+          reResolved.error.code,
+          reResolved.error.message,
+          "not_sent",
+        ),
+      };
+    }
+  }
+
+  const attemptTarget: "project" | "session" =
+    target.kind === "project" ? "project" : "session";
+  const attemptSessionId =
+    target.kind === "session" ? target.session.id : undefined;
+
+  let dispatchResult: SessionToolDispatchBusResult;
+  try {
+    dispatchResult = await deps.bus.dispatch(dispatchArgsResult, {
+      context: deps.context,
+    });
+  } catch {
+    const outcome = await reconcileDispatchFailure(
+      deps,
+      resolvedProject,
+      target,
+      messageId,
+      undefined,
+    );
+    return outcome.proven
+      ? { ok: true, data: outcome.data }
+      : {
+          ok: false,
+          error: DISPATCH_INDETERMINATE({
+            operation: "dispatch",
+            target: attemptTarget,
+            project: resolvedProject.name,
+            ...(attemptSessionId !== undefined && {
+              sessionId: attemptSessionId,
+            }),
+            messageId,
+            reconciliation: outcome.reconciliation,
+          }),
+        };
+  }
+
+  if (!dispatchResult.ok) {
+    const failure = dispatchResult.dispatchFailure;
+    if (failure?.phase === "not_sent") {
+      // Trusted verbatim: the typed handle says this definitely never
+      // mutated — no reconciliation, no focus.
+      return {
+        ok: false,
+        error: toolError(
+          "upstream_error",
+          "The upstream operation failed.",
+          "not_sent",
+        ),
+      };
+    }
+    const outcome = await reconcileDispatchFailure(
+      deps,
+      resolvedProject,
+      target,
+      messageId,
+      failure,
+    );
+    return outcome.proven
+      ? { ok: true, data: outcome.data }
+      : {
+          ok: false,
+          error: DISPATCH_INDETERMINATE({
+            operation: "dispatch",
+            target: attemptTarget,
+            project: resolvedProject.name,
+            ...(attemptSessionId !== undefined && {
+              sessionId: attemptSessionId,
+            }),
+            messageId,
+            reconciliation: outcome.reconciliation,
+          }),
+        };
+  }
+
+  // Validate the direct success BEFORE any focus/return — an upstream
+  // bug or a mismatched/impossible shape must never be trusted blindly.
+  if (dispatchResult.project !== resolvedProject.name) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (!isValidSessionId(dispatchResult.sessionId)) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  if (dispatchResult.mode === "question-reply") {
+    // Unreachable given the hardcoded "blocked" policy — treated as an
+    // invariant breach, not a normal outcome: no reconciliation, no
+    // focus, generic internal/indeterminate.
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  if (target.kind === "project" && dispatchResult.mode !== "new") {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+  if (
+    target.kind === "session" &&
+    dispatchResult.mode !== "follow-up" &&
+    dispatchResult.mode !== "blocked"
+  ) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  if (dispatchResult.mode === "blocked") {
+    if (
+      !dispatchResult.requestId ||
+      !isValidRequestId(dispatchResult.requestId) ||
+      dispatchResult.messageId !== undefined ||
+      dispatchResult.sessionId !== attemptSessionId
+    ) {
+      return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+    }
+    // ok:true, reconciled:false, no focus — a blocked dispatch performed
+    // no mutation on the target session.
+    return {
+      ok: true,
+      data: {
+        project: dispatchResult.project,
+        sessionId: dispatchResult.sessionId,
+        mode: "blocked",
+        reconciled: false,
+        requestId: dispatchResult.requestId,
+      },
+    };
+  }
+
+  // mode is "new" or "follow-up" — a confirmed successful dispatch.
+  // The returned messageId must match the one this attempt generated.
+  if (dispatchResult.messageId !== messageId) {
+    return { ok: false, error: INTERNAL_ERROR("indeterminate") };
+  }
+
+  // Focus is best-effort and can never retroactively change this
+  // already-confirmed result.
+  try {
+    await deps.focus.onDispatched?.({
+      id: dispatchResult.sessionId,
+      project: dispatchResult.project,
+    });
+  } catch {
+    // Deliberately swallowed — see `SessionToolFocusCallbacks.onDispatched`'s
+    // doc comment.
+  }
+
+  return {
+    ok: true,
+    data: {
+      project: dispatchResult.project,
+      sessionId: dispatchResult.sessionId,
+      mode: dispatchResult.mode,
+      reconciled: true,
+      messageId: dispatchResult.messageId,
+    },
+  };
+}
+
+/**
+ * Runs the bounded, single-pass, read-only, ID-ONLY reconciliation after
+ * a `dispatch` throw, an `ok:false` with no usable `not_sent` handle, or
+ * an `ok:false` with `phase:"indeterminate"`. Never retries `dispatch`
+ * itself. Always refreshes the project once first; a refresh failure
+ * alone is enough to give up and return `"unavailable"`.
+ *
+ * A `dispatchFailure`'s safe `sessionId`/`messageId` handles are used
+ * ONLY when consistent with the originally resolved target — a
+ * mismatched project/session/message id from the failure handle is
+ * never trusted, falling back to the bounded scan below instead.
+ *
+ * - Session (follow-up) target, or a project-target failure that
+ *   supplied a `dispatchFailure.sessionId`: reads that session's most
+ *   recent messages (bounded, `RECONCILE_MESSAGE_LIMIT`) and counts how
+ *   many are a user message with EXACTLY this attempt's `messageId`.
+ *   Exactly one match proves delivery.
+ * - Project (create) target with no usable failure `sessionId`:
+ *   refreshes and scans at most `MAX_NEW_SESSION_CANDIDATES` of the
+ *   project's newest sessions (bounded, `RECONCILE_CANDIDATE_MESSAGE_LIMIT`
+ *   each), counting how many candidates have EXACTLY ONE matching
+ *   message. Exactly one matching candidate proves delivery.
+ *
+ * Returns a `ReconciliationOutcome` — a proven delivery is a normal,
+ * discriminated SUCCESS return (best-effort focus already attempted),
+ * never signaled via throw.
+ */
+async function reconcileDispatchFailure(
+  deps: SessionToolDeps,
+  resolvedProject: ResolvedProject,
+  target: Extract<SessionToolTarget, { kind: "project" | "session" }>,
+  messageId: string,
+  failure: SessionToolDispatchFailure | undefined,
+): Promise<ReconciliationOutcome> {
+  try {
+    // Non-null: `dispatchPromptHandler` already proved `refreshProject`
+    // is present before ever reaching a point that could call this
+    // function.
+    await deps.refreshProject?.(resolvedProject);
+  } catch {
+    return { proven: false, reconciliation: "unavailable" };
+  }
+
+  // A safe sessionId handle from the failure — used only if it's
+  // consistent with the originally resolved target: for a session
+  // target it must match the exact session; for a project target it
+  // must belong to the resolved project (checked via a fresh store
+  // lookup, never trusted blindly).
+  const failureSessionId =
+    failure?.project === resolvedProject.name ? failure.sessionId : undefined;
+  let correlatedSessionId: string | undefined;
+  if (target.kind === "session") {
+    correlatedSessionId =
+      failureSessionId === undefined || failureSessionId === target.session.id
+        ? target.session.id
+        : undefined;
+  } else if (failureSessionId !== undefined) {
+    const owned = deps.store
+      .getSessions(resolvedProject.expandedPath)
+      .some((s) => s.id === failureSessionId);
+    correlatedSessionId = owned ? failureSessionId : undefined;
+  }
+
+  if (correlatedSessionId !== undefined) {
+    if (!deps.bus.messages) {
+      return { proven: false, reconciliation: "unavailable" };
+    }
+    let read: Awaited<ReturnType<NonNullable<typeof deps.bus.messages>>>;
+    try {
+      read = await deps.bus.messages(correlatedSessionId, {
+        context: deps.context,
+        limit: RECONCILE_MESSAGE_LIMIT,
+      });
+    } catch {
+      return { proven: false, reconciliation: "unavailable" };
+    }
+    if (!read.ok) {
+      return { proven: false, reconciliation: "unavailable" };
+    }
+    const matches = read.messages.filter((m) =>
+      isMatchingDispatchMessage(m, messageId),
+    ).length;
+    if (matches === 1) {
+      try {
+        await deps.focus.onDispatched?.({
+          id: correlatedSessionId,
+          project: resolvedProject.name,
+        });
+      } catch {
+        // Best-effort, never changes the already-proven outcome.
+      }
+      return {
+        proven: true,
+        data: {
+          project: resolvedProject.name,
+          sessionId: correlatedSessionId,
+          mode: target.kind === "session" ? "follow-up" : "new",
+          reconciled: true,
+          messageId,
+        },
+      };
+    }
+    return {
+      proven: false,
+      reconciliation: matches > 1 ? "ambiguous" : "unconfirmed",
+    };
+  }
+
+  if (target.kind === "project") {
+    const candidates = deps.store
+      .getSessions(resolvedProject.expandedPath)
+      .slice()
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+      .slice(0, MAX_NEW_SESSION_CANDIDATES)
+      .map((s) => s.id);
+    if (candidates.length === 0) {
+      return { proven: false, reconciliation: "unconfirmed" };
+    }
+    if (!deps.bus.messages) {
+      return { proven: false, reconciliation: "unavailable" };
+    }
+    let matchingCandidateId: string | undefined;
+    let matchCount = 0;
+    for (const candidateId of candidates) {
+      let read: Awaited<ReturnType<NonNullable<typeof deps.bus.messages>>>;
+      try {
+        read = await deps.bus.messages(candidateId, {
+          context: deps.context,
+          limit: RECONCILE_CANDIDATE_MESSAGE_LIMIT,
+        });
+      } catch {
+        return { proven: false, reconciliation: "unavailable" };
+      }
+      if (!read.ok) {
+        return { proven: false, reconciliation: "unavailable" };
+      }
+      const candidateMatches = read.messages.filter((m) =>
+        isMatchingDispatchMessage(m, messageId),
+      ).length;
+      if (candidateMatches === 1) {
+        matchCount++;
+        matchingCandidateId = candidateId;
+      }
+    }
+    if (matchCount === 1 && matchingCandidateId !== undefined) {
+      try {
+        await deps.focus.onDispatched?.({
+          id: matchingCandidateId,
+          project: resolvedProject.name,
+        });
+      } catch {
+        // Best-effort, never changes the already-proven outcome.
+      }
+      return {
+        proven: true,
+        data: {
+          project: resolvedProject.name,
+          sessionId: matchingCandidateId,
+          mode: "new",
+          reconciled: true,
+          messageId,
+        },
+      };
+    }
+    return {
+      proven: false,
+      reconciliation: matchCount > 1 ? "ambiguous" : "unconfirmed",
+    };
+  }
+
+  return { proven: false, reconciliation: "unavailable" };
+}
+
 let discoveryContextToolsRegistered = false;
 
 /**
@@ -1308,4 +1953,38 @@ export function registerDiscoveryContextTools(): void {
  * discovery/context/focus tools afresh. */
 export function __resetDiscoveryContextRegistrationForTests(): void {
   discoveryContextToolsRegistered = false;
+}
+
+let dispatchToolRegistered = false;
+
+/**
+ * Registers `ide_dispatch_prompt` via `registerSessionTool`. Idempotent
+ * and safe to call more than once — no implicit module-import side
+ * effect registers it; a caller (the bridge/UI integration point) must
+ * call this explicitly, separately from `registerDiscoveryContextTools`.
+ */
+export function registerDispatchTool(): void {
+  if (dispatchToolRegistered) return;
+  dispatchToolRegistered = true;
+
+  registerSessionTool("ide_dispatch_prompt", {
+    argsSchema: dispatchPromptArgsSchema,
+    resultSchema: sessionResultSchema({
+      project: z.string(),
+      sessionId: z.string(),
+      mode: z.enum(["new", "follow-up", "blocked"]),
+      reconciled: z.boolean(),
+      requestId: z.string().optional(),
+      messageId: z.string().optional(),
+    }),
+    target: "project_or_session",
+    handler: dispatchPromptHandler,
+  });
+}
+
+/** Test/dev helper — resets the module-level idempotency latch so a test
+ * that calls `__resetSessionToolsForTests()` can re-register
+ * `ide_dispatch_prompt` afresh. */
+export function __resetDispatchToolRegistrationForTests(): void {
+  dispatchToolRegistered = false;
 }

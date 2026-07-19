@@ -13,10 +13,12 @@
  */
 import { z } from "zod";
 import type {
+  SessionToolDispatchAttemptMeta,
   SessionToolError,
   SessionToolErrorCode,
   SessionToolErrorDelivery,
 } from "./commands";
+import { isValidMessageId } from "./commands";
 
 /** Every closed `SessionToolErrorCode` value, kept as a literal list (not
  * a runtime-introspectable value-level import of the type) so a handler-
@@ -55,14 +57,42 @@ const ERROR_CODE_MESSAGES: Record<SessionToolErrorCode, string> = {
 
 const bridgeErrorDeliverySchema = z.enum(["not_sent", "indeterminate"]);
 
+/** Closed schema for a dispatch attempt's safe metadata — see
+ * `SessionToolDispatchAttemptMeta` in `./commands.ts`. `.strict()`
+ * rejects any field beyond the named ones (a timestamp, prompt/title
+ * text, candidate ids/counts, a path, raw upstream text). The
+ * `session`-target/`sessionId` consistency (a `target:"session"` attempt
+ * must carry `sessionId`; a `target:"project"` attempt must not) is
+ * enforced by `.refine()` rather than a discriminated union so a single
+ * shape stays easy to construct while still being unrepresentable in an
+ * inconsistent form. */
+const dispatchAttemptMetaSchema = z
+  .object({
+    operation: z.literal("dispatch"),
+    target: z.enum(["project", "session"]),
+    project: z.string(),
+    sessionId: z.string().optional(),
+    messageId: z.string().refine(isValidMessageId, {
+      message: "messageId must be a valid OpenCode v1 user-message id",
+    }),
+    reconciliation: z.enum(["unconfirmed", "ambiguous", "unavailable"]),
+  })
+  .strict()
+  .refine((v) => (v.target === "session") === (v.sessionId !== undefined), {
+    message:
+      "sessionId must be present iff target is 'session', and absent iff target is 'project'",
+  });
+
 /** The closed shape a HANDLER-RETURNED error envelope must match: a
- * known code, an optional but well-typed delivery — nothing else.
- * `message` is deliberately NOT part of this schema — a handler cannot
- * choose its own message at all (see `normalizeHandlerError`), so there
- * is nothing to validate there. */
+ * known code, an optional but well-typed delivery, and — for a dispatch
+ * attempt only — optional safe attempt metadata. `message` is
+ * deliberately NOT part of this schema — a handler cannot choose its own
+ * message at all (see `normalizeHandlerError`), so there is nothing to
+ * validate there. */
 const handlerErrorEnvelopeSchema = z.object({
   code: z.enum(KNOWN_ERROR_CODES),
   delivery: bridgeErrorDeliverySchema.optional(),
+  attempt: dispatchAttemptMetaSchema.optional(),
 });
 
 /** Builds a typed error from an already-known-safe code/message. Prefer
@@ -141,5 +171,24 @@ export function normalizeHandlerError(error: unknown): SessionToolError {
     ...(parsed.data.delivery !== undefined && {
       delivery: parsed.data.delivery,
     }),
+    ...(parsed.data.attempt !== undefined && {
+      attempt: parsed.data.attempt,
+    }),
+  };
+}
+
+/** Builds an `upstream_error`/`indeterminate` result carrying safe
+ * dispatch-attempt metadata — the one representable "a dispatch mutation
+ * could not be confirmed" outcome. Same no-raw-text posture as
+ * `UPSTREAM_ERROR`: takes only closed, already-safe fields, never a
+ * message or upstream text parameter. */
+export function DISPATCH_INDETERMINATE(
+  attempt: SessionToolDispatchAttemptMeta,
+): SessionToolError {
+  return {
+    code: "upstream_error",
+    message: "The upstream operation failed.",
+    delivery: "indeterminate",
+    attempt,
   };
 }

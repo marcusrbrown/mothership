@@ -216,6 +216,9 @@ async function handleSessionRequest(
       code: result.error.code,
       message: result.error.message,
       delivery: result.error.delivery,
+      ...(result.error.attempt !== undefined && {
+        attempt: result.error.attempt,
+      }),
     },
   };
 }

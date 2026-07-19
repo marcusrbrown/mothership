@@ -15,6 +15,14 @@
  * session with a pending question can refuse the mutation entirely,
  * instead of the default implicit `"question-reply"` behavior, which
  * existing callers keep unless they opt in.
+ *
+ * `@fro.bot/space-bus@0.15.0` adds `createDispatchMessageId()` (a
+ * browser-safe OpenCode v1 user-message-id generator) and a typed
+ * `DispatchFailure` handle attached to a failed `dispatch()`'s `Err`
+ * result — `phase: "not_sent" | "indeterminate"` plus whatever safe
+ * `project`/`sessionId`/`messageId` handles are known, letting a caller
+ * distinguish a definitely-pre-mutation failure from one that may have
+ * already mutated OpenCode state, without parsing the error string.
  */
 export {
   roster,
@@ -22,6 +30,7 @@ export {
   snapshot,
   dispatch,
   toDispatchArgs,
+  createDispatchMessageId,
   result,
   messages,
   questions,
@@ -33,6 +42,7 @@ export type {
   RosterProject,
   DispatchArgs,
   DispatchResult,
+  DispatchFailure,
   SessionStatusResult,
   SessionResultResult,
   SnapshotProject,

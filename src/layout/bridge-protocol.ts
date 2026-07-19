@@ -48,6 +48,34 @@ export type BridgeRequest = z.infer<typeof bridgeRequestSchema>;
 export const bridgeErrorDeliverySchema = z.enum(["not_sent", "indeterminate"]);
 export type BridgeErrorDelivery = z.infer<typeof bridgeErrorDeliverySchema>;
 
+/** Safe dispatch-attempt metadata carried on an `ide_dispatch_prompt`
+ * error only, mirrored verbatim (not imported) from
+ * `src/ide/commands.ts`'s `SessionToolDispatchAttemptMeta` for the same
+ * reason `bridgeErrorDeliverySchema` is duplicated rather than imported
+ * — this wire-protocol module has no compile-time dependency on
+ * `src/ide/*`. `.strict()` closes the shape: no timestamp, no
+ * prompt/title text, no candidate session ids/counts, no path, no raw
+ * upstream text can ever be added to this shape without a matching
+ * change here. Preserved across the wire so a future sidecar-side
+ * follow-up can act on it; never echoed back to a caller as free text. */
+export const bridgeDispatchAttemptMetaSchema = z
+  .object({
+    operation: z.literal("dispatch"),
+    target: z.enum(["project", "session"]),
+    project: z.string(),
+    sessionId: z.string().optional(),
+    messageId: z.string(),
+    reconciliation: z.enum(["unconfirmed", "ambiguous", "unavailable"]),
+  })
+  .strict()
+  .refine((v) => (v.target === "session") === (v.sessionId !== undefined), {
+    message:
+      "sessionId must be present iff target is 'session', and absent iff target is 'project'",
+  });
+export type BridgeDispatchAttemptMeta = z.infer<
+  typeof bridgeDispatchAttemptMetaSchema
+>;
+
 /** A typed failure, shared verbatim by both domains. `code` is left as a
  * bare string (not a literal enum) at the wire-protocol layer — layout
  * and session error codes are two different closed sets owned by their
@@ -55,11 +83,14 @@ export type BridgeErrorDelivery = z.infer<typeof bridgeErrorDeliverySchema>;
  * module only needs to move the value across the wire, never branch on
  * it. `message` is always a stable, sanitized, program-owned string on
  * both sides (see `src/ide/errors.ts`, `src/layout/executor.ts`) — never
- * raw path/payload/exception text. */
+ * raw path/payload/exception text. `attempt` is present only on a
+ * dispatch error; every non-dispatch error omits it entirely, keeping
+ * the wire shape byte-compatible with every existing error response. */
 export const bridgeErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
   delivery: bridgeErrorDeliverySchema.optional(),
+  attempt: bridgeDispatchAttemptMetaSchema.optional(),
 });
 export type BridgeError = z.infer<typeof bridgeErrorSchema>;
 

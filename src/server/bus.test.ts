@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   answerQuestion,
+  createDispatchMessageId,
   dispatch,
   messages,
   questions,
@@ -294,7 +295,7 @@ describe("bus facade (space-bus /core smoke)", () => {
     expect(bad.ok).toBe(false);
   });
 
-  test("installed @fro.bot/space-bus package is pinned to exactly 0.14.0", async () => {
+  test("installed @fro.bot/space-bus package is pinned to exactly 0.15.0", async () => {
     // package.json isn't in the package's `exports` map, so resolve it via
     // the filesystem (through the resolvable `./core` entrypoint) rather
     // than an import assertion, which `tsc`/bundler moduleResolution can't
@@ -307,7 +308,7 @@ describe("bus facade (space-bus /core smoke)", () => {
     const pkg = JSON.parse(await Bun.file(pkgPath).text()) as {
       version: string;
     };
-    expect(pkg.version).toBe("0.14.0");
+    expect(pkg.version).toBe("0.15.0");
   });
 
   test("all required runtime facade exports are functions", async () => {
@@ -318,6 +319,7 @@ describe("bus facade (space-bus /core smoke)", () => {
       "snapshot",
       "dispatch",
       "toDispatchArgs",
+      "createDispatchMessageId",
       "result",
       "messages",
       "questions",
@@ -325,6 +327,11 @@ describe("bus facade (space-bus /core smoke)", () => {
     ]) {
       expect(typeof bus[name]).toBe("function");
     }
+  });
+
+  test("createDispatchMessageId() produces the exact OpenCode v1 user-message id shape", () => {
+    const id = createDispatchMessageId();
+    expect(id).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   });
 
   test("existing prompt-bar dispatch continues importing dispatch/DispatchArgs/DispatchResult through the ../server/bus facade, not the package directly", async () => {

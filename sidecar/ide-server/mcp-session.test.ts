@@ -91,6 +91,7 @@ describe("real end-to-end MCP session over /mcp (regression: stateless transport
           "ide_get_active_context",
           "ide_select_project",
           "ide_select_session",
+          "ide_dispatch_prompt",
         ].sort(),
       );
 
@@ -202,6 +203,78 @@ describe("real end-to-end MCP session over /mcp (regression: stateless transport
       expect(rejectedParsed.error?.message).toBe(
         "This tool takes no arguments.",
       );
+
+      await client.close();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("ide_dispatch_prompt: a valid single-target call reaches the bridge; both/neither target, extra keys, and onPendingQuestion/messageId overrides are rejected before the bridge is ever called, no key/value echo", async () => {
+    const server = bootSidecar();
+    try {
+      const url = new URL(`http://127.0.0.1:${server.port}/mcp`);
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: {
+          headers: { authorization: `Bearer ${TOKEN}` },
+        },
+      });
+      const client = new Client({ name: "test-client", version: "0.0.0" });
+      await client.connect(transport);
+
+      const okResult = await client.callTool({
+        name: "ide_dispatch_prompt",
+        arguments: { project: "dashboard", prompt: "hello" },
+      });
+      // No webview bridge connected, so this is a typed relay error, not a
+      // schema-validation error — proves the args passed own-validation
+      // and actually reached the bridge dispatch.
+      expect(okResult.isError).toBe(true);
+      const okText = (okResult.content as { type: string; text: string }[])[0]
+        ?.text;
+      const okParsed = JSON.parse(okText ?? "{}") as {
+        error?: { code?: string };
+      };
+      expect(okParsed.error?.code).toBe("unavailable");
+
+      for (const bad of [
+        { prompt: "hi" },
+        { project: "a", sessionId: "b", prompt: "hi" },
+        {
+          project: "dashboard",
+          prompt: "hi",
+          onPendingQuestion: "question-reply",
+        },
+        {
+          project: "dashboard",
+          prompt: "hi",
+          messageId: "msg_attacker_controlled",
+        },
+        {
+          project: "dashboard",
+          prompt: "confidential prompt content Bearer sk-secret",
+          "Authorization: Bearer sk-live-secret": "/Users/marcus/.ssh/id_rsa",
+        },
+      ]) {
+        const rejected = await client.callTool({
+          name: "ide_dispatch_prompt",
+          arguments: bad as Record<string, unknown>,
+        });
+        expect(rejected.isError).toBe(true);
+        const text = (rejected.content as { type: string; text: string }[])[0]
+          ?.text;
+        expect(() => JSON.parse(text ?? "")).not.toThrow();
+        const parsed = JSON.parse(text ?? "{}") as {
+          error?: { code?: string; message?: string; delivery?: string };
+        };
+        expect(parsed.error?.code).toBe("invalid_arguments");
+        expect(parsed.error?.message).toBe("The given arguments are invalid.");
+        expect(parsed.error?.delivery).toBe("not_sent");
+        expect(text).not.toContain("Bearer");
+        expect(text).not.toContain("/Users/");
+        expect(text).not.toContain("confidential prompt content");
+        expect(text).not.toContain("attacker_controlled");
+      }
 
       await client.close();
     } finally {

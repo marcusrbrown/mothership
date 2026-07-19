@@ -13,9 +13,11 @@ import {
   type SessionToolBusFacade,
   type SessionToolDeps,
   __resetDiscoveryContextRegistrationForTests,
+  __resetDispatchToolRegistrationForTests,
   __resetSessionToolsForTests,
   isRegisteredSessionTool,
   registerDiscoveryContextTools,
+  registerDispatchTool,
   registerSessionTool,
   resolveProject,
   resolveSession,
@@ -72,9 +74,10 @@ function makeCountingDeps(): {
   const counters = { bus: 0, focus: 0 };
   const deps = makeDeps({
     bus: {
-      dispatch: () => {
+      probe: (() => {
         counters.bus++;
-      },
+        // biome-ignore lint/suspicious/noExplicitAny: counts calls to an arbitrary/unused bus method name, not a real facade field
+      }) as any,
     },
     focus: {
       selectSession: () => {
@@ -715,7 +718,7 @@ describe("session-tool registry + runSessionTool: structural target resolution",
       target: "project",
       handler: async (_args, _target, injectedDeps) => {
         handlerCalled = true;
-        (injectedDeps.bus.dispatch as () => void)();
+        (injectedDeps.bus.probe as () => void)();
         (injectedDeps.focus.selectSession as () => void)();
         return { ok: true, data: {} };
       },
@@ -746,7 +749,7 @@ describe("session-tool registry + runSessionTool: structural target resolution",
       target: "session",
       handler: async (_args, _target, injectedDeps) => {
         handlerCalled = true;
-        (injectedDeps.bus.dispatch as () => void)();
+        (injectedDeps.bus.probe as () => void)();
         (injectedDeps.focus.selectSession as () => void)();
         return { ok: true, data: {} };
       },
@@ -792,9 +795,10 @@ describe("session-tool registry + runSessionTool: structural target resolution",
         },
       },
       bus: {
-        dispatch: () => {
+        probe: (() => {
           counters.bus++;
-        },
+          // biome-ignore lint/suspicious/noExplicitAny: counts calls to an arbitrary/unused bus method name, not a real facade field
+        }) as any,
       },
       focus: {
         selectSession: () => {
@@ -863,9 +867,10 @@ describe("session-tool registry + runSessionTool: structural target resolution",
     const dispatchCalls: number[] = [];
     const deps = makeDeps({
       bus: {
-        dispatch: () => {
+        probe: (() => {
           dispatchCalls.push(Date.now());
-        },
+          // biome-ignore lint/suspicious/noExplicitAny: simulates an arbitrary/unused bus method call, not a real facade field
+        }) as any,
       },
     });
     registerSessionTool("ide_test_dispatch_then_throws", {
@@ -873,7 +878,7 @@ describe("session-tool registry + runSessionTool: structural target resolution",
       resultSchema: sessionResultSchema({}),
       target: "none",
       handler: async (_args, _target, injectedDeps) => {
-        (injectedDeps.bus.dispatch as () => void)();
+        (injectedDeps.bus.probe as () => void)();
         throw new Error(
           "upstream 500 after dispatch: /Users/marcus/secret leaked in a forged trace",
         );
@@ -3107,5 +3112,874 @@ describe("discovery/context/focus tools: exactly one audit event, safe identifie
     const event = events[0] as { project?: string; sessionId?: string };
     expect(event.project).toBe("dashboard");
     expect(event.sessionId).toBe("ses_live");
+  });
+});
+
+describe("ide_dispatch_prompt", () => {
+  const DASHBOARD_DIR = "/Users/marcus/src/fro-bot/dashboard";
+
+  function makeDispatchDeps(
+    overrides: Partial<SessionToolDeps> = {},
+  ): SessionToolDeps {
+    const defaultBus: SessionToolBusFacade = {
+      toDispatchArgs: (input) => {
+        if (input.onPendingQuestion !== "blocked") {
+          return { ok: false, error: "onPendingQuestion must be blocked" };
+        }
+        if (input.messageId === undefined) {
+          return { ok: false, error: "messageId is required" };
+        }
+        return { ok: true, ...input } as never;
+      },
+      createDispatchMessageId: () => "msg_000000000000aaaaaaaaaaaaaa",
+      dispatch: async () => ({
+        ok: true,
+        sessionId: "ses_new",
+        project: "dashboard",
+        mode: "new",
+        directory: DASHBOARD_DIR,
+        messageId: "msg_000000000000aaaaaaaaaaaaaa",
+      }),
+      messages: async () => ({
+        ok: true,
+        sessionId: "ses_live",
+        project: "dashboard",
+        messages: [],
+      }),
+    };
+    return makeDeps({
+      refreshProject: async () => {},
+      focus: {},
+      ...overrides,
+      // Deep-merge bus: most dispatch tests only want to override ONE
+      // facade method (e.g. just `dispatch`) — a shallow spread would
+      // otherwise silently drop the other defaults (toDispatchArgs/
+      // messages) that the handler's preflight also depends on.
+      bus: { ...defaultBus, ...overrides.bus },
+    });
+  }
+
+  function register(): void {
+    __resetSessionToolsForTests();
+    __resetDispatchToolRegistrationForTests();
+    registerDispatchTool();
+  }
+
+  test("happy path: project target creates a new session and focuses it", async () => {
+    register();
+    let focused: unknown;
+    const deps = makeDispatchDeps({
+      focus: {
+        onDispatched: (s) => {
+          focused = s;
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "hello" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      project: "dashboard",
+      sessionId: "ses_new",
+      mode: "new",
+      reconciled: true,
+      messageId: "msg_000000000000aaaaaaaaaaaaaa",
+    });
+    expect(focused).toEqual({ id: "ses_new", project: "dashboard" });
+  });
+
+  test("happy path: exact session target follows up and focuses it", async () => {
+    register();
+    let focused: unknown;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        createDispatchMessageId: () => "msg_000000000000aaaaaaaaaaaaaa",
+        dispatch: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          mode: "follow-up",
+          messageId: "msg_000000000000aaaaaaaaaaaaaa",
+        }),
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          messages: [],
+        }),
+      },
+      focus: {
+        onDispatched: (s) => {
+          focused = s;
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "continue" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      project: "dashboard",
+      sessionId: "ses_live",
+      mode: "follow-up",
+      reconciled: true,
+      messageId: "msg_000000000000aaaaaaaaaaaaaa",
+    });
+    expect(focused).toEqual({ id: "ses_live", project: "dashboard" });
+  });
+
+  test("happy path: a pending-question blocked outcome does not mutate/focus and reports ok with requestId, reconciled:false", async () => {
+    register();
+    let focusCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          mode: "blocked",
+          requestId: "que_1abc",
+        }),
+      },
+      focus: {
+        onDispatched: () => {
+          focusCalled = true;
+        },
+      },
+    });
+
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "reply" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      project: "dashboard",
+      sessionId: "ses_live",
+      mode: "blocked",
+      reconciled: false,
+      requestId: "que_1abc",
+    });
+    expect(focusCalled).toBe(false);
+  });
+
+  test("error path: both project and sessionId supplied fails closed before any dispatch call", async () => {
+    register();
+    let dispatchCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: () => ({ ok: true }) as never,
+        dispatch: async () => {
+          dispatchCalled = true;
+          return { ok: true, sessionId: "x", project: "x", mode: "new" };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", sessionId: "ses_live", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    expect(dispatchCalled).toBe(false);
+  });
+
+  test("error path: neither project nor sessionId supplied fails closed before any dispatch call", async () => {
+    register();
+    let dispatchCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        dispatch: async () => {
+          dispatchCalled = true;
+          return { ok: true, sessionId: "x", project: "x", mode: "new" };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    expect(dispatchCalled).toBe(false);
+  });
+
+  test("error path: a stale/deleted session target fails closed, no dispatch call", async () => {
+    register();
+    let dispatchCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        dispatch: async () => {
+          dispatchCalled = true;
+          return { ok: true, sessionId: "x", project: "x", mode: "new" };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_gone", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("unknown_session");
+    expect(dispatchCalled).toBe(false);
+  });
+
+  test("error path: an unknown project target fails closed, no dispatch call", async () => {
+    register();
+    let dispatchCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        dispatch: async () => {
+          dispatchCalled = true;
+          return { ok: true, sessionId: "x", project: "x", mode: "new" };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "does-not-exist", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("unknown_project");
+    expect(dispatchCalled).toBe(false);
+  });
+
+  test("error path: a refresh/preflight failure returns not_sent and never calls dispatch", async () => {
+    register();
+    let dispatchCalled = false;
+    const deps = makeDispatchDeps({
+      refreshProject: async () => {
+        throw new Error("network down");
+      },
+      bus: {
+        dispatch: async () => {
+          dispatchCalled = true;
+          return { ok: true, sessionId: "x", project: "x", mode: "new" };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.delivery).toBe("not_sent");
+    expect(dispatchCalled).toBe(false);
+  });
+
+  test("a messages() read is never used as a pre-dispatch baseline — a failing messages() does not block a session-target dispatch from being attempted", async () => {
+    register();
+    let dispatchCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        createDispatchMessageId: () => "msg_000000000000aaaaaaaaaaaaaa",
+        messages: async () => ({ ok: false, error: "boom" }),
+        dispatch: async () => {
+          dispatchCalled = true;
+          return {
+            ok: true,
+            sessionId: "ses_live",
+            project: "dashboard",
+            mode: "follow-up",
+            messageId: "msg_000000000000aaaaaaaaaaaaaa",
+          };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(dispatchCalled).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+
+  test("dispatch is invoked exactly once — an ok:false result never retries", async () => {
+    register();
+    let dispatchCalls = 0;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => {
+          dispatchCalls++;
+          return { ok: false, error: "upstream 500" };
+        },
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          messages: [],
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    expect(dispatchCalls).toBe(1);
+  });
+
+  test("reconciliation: follow-up proves delivery by messageId (not text) and never sends the prompt as a comparison baseline", async () => {
+    register();
+    let focused: unknown;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        createDispatchMessageId: () => "msg_000000000000aaaaaaaaaaaaaa",
+        dispatch: async () => ({
+          ok: false,
+          error: "upstream 500",
+          dispatchFailure: {
+            phase: "indeterminate",
+            project: "dashboard",
+            sessionId: "ses_live",
+          },
+        }),
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_000000000000aaaaaaaaaaaaaa",
+              role: "user",
+              parts: [{ type: "text", text: "unrelated text entirely" }],
+            },
+          ],
+        }),
+      },
+      focus: {
+        onDispatched: (s) => {
+          focused = s;
+        },
+      },
+    });
+    const result = await runSessionTool<{ mode: string; reconciled: boolean }>(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "continue please" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.mode).toBe("follow-up");
+    expect(result.data.reconciled).toBe(true);
+    expect(focused).toEqual({ id: "ses_live", project: "dashboard" });
+  });
+
+  test("reconciliation: follow-up with zero matching messages stays indeterminate with unconfirmed reconciliation", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          messages: [],
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "continue please" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.delivery).toBe("indeterminate");
+    expect(result.error.attempt?.reconciliation).toBe("unconfirmed");
+    expect(result.error.attempt?.messageId).toBe(
+      "msg_000000000000aaaaaaaaaaaaaa",
+    );
+  });
+
+  test("reconciliation: follow-up with more than one matching-id message (data corruption) stays indeterminate with ambiguous reconciliation", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_000000000000aaaaaaaaaaaaaa",
+              role: "user",
+              parts: [{ type: "text", text: "a" }],
+            },
+            {
+              id: "msg_000000000000aaaaaaaaaaaaaa",
+              role: "user",
+              parts: [{ type: "text", text: "b" }],
+            },
+          ],
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "continue please" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.attempt?.reconciliation).toBe("ambiguous");
+  });
+
+  test("reconciliation: an assistant message with the matching id never proves delivery (role must be user)", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_000000000000aaaaaaaaaaaaaa",
+              role: "assistant",
+              parts: [{ type: "text", text: "continue please" }],
+            },
+          ],
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "continue please" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.attempt?.reconciliation).toBe("unconfirmed");
+  });
+
+  test("reconciliation: a reconciliation messages() read failure stays indeterminate with unavailable reconciliation", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+        messages: async () => ({ ok: false, error: "boom" }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "continue please" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.attempt?.reconciliation).toBe("unavailable");
+  });
+
+  test("reconciliation: a not_sent dispatchFailure is trusted verbatim — no reconciliation, no focus, not_sent", async () => {
+    register();
+    let messagesCalled = false;
+    let focusCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({
+          ok: false,
+          error: "upstream 500",
+          dispatchFailure: {
+            phase: "not_sent",
+            project: "dashboard",
+            sessionId: "ses_live",
+          },
+        }),
+        messages: async () => {
+          messagesCalled = true;
+          return {
+            ok: true,
+            sessionId: "ses_live",
+            project: "dashboard",
+            messages: [],
+          };
+        },
+      },
+      focus: {
+        onDispatched: () => {
+          focusCalled = true;
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "continue please" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.delivery).toBe("not_sent");
+    expect(result.error.attempt).toBeUndefined();
+    expect(messagesCalled).toBe(false);
+    expect(focusCalled).toBe(false);
+  });
+
+  test("reconciliation: a project-target dispatchFailure with a mismatched project's sessionId is never trusted — falls back to the bounded project scan", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      store: {
+        getSessions: () => [
+          { id: "ses_created", directory: DASHBOARD_DIR, updatedAt: 1 },
+        ],
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({
+          ok: false,
+          error: "upstream 500",
+          dispatchFailure: {
+            phase: "indeterminate",
+            project: "some-other-project",
+            sessionId: "ses_untrusted",
+          },
+        }),
+        messages: async (id: string) => ({
+          ok: true,
+          sessionId: id,
+          project: "dashboard",
+          messages:
+            id === "ses_created"
+              ? [
+                  {
+                    id: "msg_000000000000aaaaaaaaaaaaaa",
+                    role: "user",
+                    parts: [{ type: "text", text: "start" }],
+                  },
+                ]
+              : [],
+        }),
+      },
+    });
+    const result = await runSessionTool<{ mode: string; sessionId: string }>(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "start" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.sessionId).toBe("ses_created");
+  });
+
+  test("reconciliation: project-create with exactly one matching-id session (10 newest by updatedAt) proves delivery, reconciled:true, focuses", async () => {
+    register();
+    let focused: unknown;
+    const deps = makeDispatchDeps({
+      store: {
+        getSessions: () => [
+          { id: "ses_created", directory: DASHBOARD_DIR, updatedAt: 100 },
+        ],
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+        messages: async (id: string) => ({
+          ok: true,
+          sessionId: id,
+          project: "dashboard",
+          messages: [
+            {
+              id: "msg_000000000000aaaaaaaaaaaaaa",
+              role: "user",
+              parts: [{ type: "text", text: "start" }],
+            },
+          ],
+        }),
+      },
+      focus: {
+        onDispatched: (s) => {
+          focused = s;
+        },
+      },
+    });
+    const result = await runSessionTool<{
+      mode: string;
+      sessionId: string;
+      reconciled: boolean;
+    }>(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "start" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.mode).toBe("new");
+    expect(result.data.sessionId).toBe("ses_created");
+    expect(result.data.reconciled).toBe(true);
+    expect(focused).toEqual({ id: "ses_created", project: "dashboard" });
+  });
+
+  test("reconciliation: project-create with zero candidate sessions stays indeterminate/unconfirmed", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "start" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.attempt?.reconciliation).toBe("unconfirmed");
+  });
+
+  test("reconciliation: project-create scans only the 10 newest sessions by updatedAt, bounded, and reads each candidate's messages", async () => {
+    register();
+    let messagesCalls = 0;
+    const manySessions = Array.from({ length: 15 }, (_, i) => ({
+      id: `ses_${i}`,
+      directory: DASHBOARD_DIR,
+      updatedAt: i,
+    }));
+    const deps = makeDispatchDeps({
+      store: {
+        getSessions: () => manySessions,
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+        messages: async () => {
+          messagesCalls++;
+          return { ok: true, sessionId: "x", project: "x", messages: [] };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "start" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.attempt?.reconciliation).toBe("unconfirmed");
+    expect(messagesCalls).toBe(10);
+  });
+
+  test("reconciliation: project-create candidate messages() read failure stays indeterminate/unavailable", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      store: {
+        getSessions: () => [
+          { id: "ses_created", directory: DASHBOARD_DIR, updatedAt: 1 },
+        ],
+        getSession: () => undefined,
+        getPendingQuestions: () => [],
+        subscribe: () => () => {},
+        applyEvent: () => {},
+        reconcile: () => {},
+      },
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({ ok: false, error: "upstream 500" }),
+        messages: async () => ({ ok: false, error: "boom" }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "start" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.attempt?.reconciliation).toBe("unavailable");
+  });
+
+  test("security: raw upstream/prompt/title never cross the output/error", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({
+          ok: false,
+          error: "upstream 500: /Users/marcus/secret Bearer abc123",
+        }),
+        messages: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          messages: [],
+        }),
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "confidential prompt text" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/Users/marcus/secret");
+    expect(serialized).not.toContain("Bearer abc123");
+    expect(serialized).not.toContain("confidential prompt text");
+  });
+
+  test("security: a raw path-target dispatch attempt is rejected as invalid_target, never reaches dispatch", async () => {
+    register();
+    let dispatchCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        dispatch: async () => {
+          dispatchCalled = true;
+          return { ok: true, sessionId: "x", project: "x", mode: "new" };
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "/Users/marcus/src/fro-bot/dashboard", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("invalid_target");
+    expect(dispatchCalled).toBe(false);
+  });
+
+  test("invariant: a mode:'question-reply' result (unreachable given the hardcoded blocked policy) is treated as a breach — internal_error, no reconciliation, no focus", async () => {
+    register();
+    let focusCalled = false;
+    const deps = makeDispatchDeps({
+      bus: {
+        toDispatchArgs: (input) => ({ ok: true, ...input }) as never,
+        dispatch: async () => ({
+          ok: true,
+          sessionId: "ses_live",
+          project: "dashboard",
+          mode: "question-reply",
+        }),
+      },
+      focus: {
+        onDispatched: () => {
+          focusCalled = true;
+        },
+      },
+    });
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { sessionId: "ses_live", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected error");
+    expect(result.error.code).toBe("internal_error");
+    expect(focusCalled).toBe(false);
+  });
+
+  test("a focus callback that throws after a confirmed dispatch never changes the successful result", async () => {
+    register();
+    const deps = makeDispatchDeps({
+      focus: {
+        onDispatched: () => {
+          throw new Error("focus blew up");
+        },
+      },
+    });
+    const result = await runSessionTool<{ mode: string }>(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data.mode).toBe("new");
+  });
+
+  test("registration is idempotent — calling registerDispatchTool twice does not throw and the tool remains registered exactly once", () => {
+    register();
+    expect(() => registerDispatchTool()).not.toThrow();
+    expect(isRegisteredSessionTool("ide_dispatch_prompt")).toBe(true);
+  });
+
+  test("exactly one audit event is emitted for a confirmed dispatch, carrying resolved identifiers only, no prompt content", async () => {
+    register();
+    const events: unknown[] = [];
+    const deps = makeDispatchDeps({ audit: (p) => events.push(p) });
+    await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "secret prompt content" },
+      deps,
+      "mcp_tool",
+    );
+    expect(events).toHaveLength(1);
+    const serialized = JSON.stringify(events[0]);
+    expect(serialized).not.toContain("secret prompt content");
   });
 });

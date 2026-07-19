@@ -244,4 +244,82 @@ describe("bridgeResponseSchema: terminal shape enforcement", () => {
       }).success,
     ).toBe(true);
   });
+
+  test("happy path: a session error response carrying dispatch attempt metadata parses", () => {
+    const result = bridgeResponseSchema.safeParse({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: false,
+      error: {
+        code: "upstream_error",
+        message: "x",
+        delivery: "indeterminate",
+        attempt: {
+          operation: "dispatch",
+          target: "session",
+          project: "dashboard",
+          sessionId: "ses_1",
+          messageId: "msg_000000000000aaaaaaaaaaaaaa",
+          reconciliation: "unconfirmed",
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("happy path: every existing non-dispatch error response omitting attempt entirely still parses unchanged", () => {
+    const result = bridgeResponseSchema.safeParse({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: false,
+      error: { code: "unknown_project", message: "x", delivery: "not_sent" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("error path: an attempt with a target/sessionId mismatch is rejected", () => {
+    const result = bridgeResponseSchema.safeParse({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: false,
+      error: {
+        code: "upstream_error",
+        message: "x",
+        attempt: {
+          operation: "dispatch",
+          target: "project",
+          project: "dashboard",
+          sessionId: "ses_1",
+          messageId: "msg_000000000000aaaaaaaaaaaaaa",
+          reconciliation: "unconfirmed",
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  test("error path: an attempt carrying a stray field (timestamp/prompt/path) is rejected", () => {
+    const result = bridgeResponseSchema.safeParse({
+      kind: "response",
+      domain: "session",
+      seq: 1,
+      ok: false,
+      error: {
+        code: "upstream_error",
+        message: "x",
+        attempt: {
+          operation: "dispatch",
+          target: "project",
+          project: "dashboard",
+          messageId: "msg_000000000000aaaaaaaaaaaaaa",
+          reconciliation: "unconfirmed",
+          prompt: "secret prompt text",
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+  });
 });

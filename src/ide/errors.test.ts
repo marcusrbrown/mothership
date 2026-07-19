@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DISPATCH_INDETERMINATE,
   INTERNAL_ERROR,
   UPSTREAM_ERROR,
   normalizeHandlerError,
@@ -181,5 +182,89 @@ describe("normalizeHandlerError", () => {
     } as unknown);
     expect(JSON.stringify(result)).not.toContain("/Users/marcus");
     expect(JSON.stringify(result)).not.toContain("leaked transcript");
+  });
+
+  test("happy path: a valid dispatch attempt envelope preserves its attempt metadata", () => {
+    const result = normalizeHandlerError({
+      code: "upstream_error",
+      delivery: "indeterminate",
+      attempt: {
+        operation: "dispatch",
+        target: "session",
+        project: "dashboard",
+        sessionId: "ses_1",
+        messageId: "msg_000000000000aaaaaaaaaaaaaa",
+        reconciliation: "unconfirmed",
+      },
+    });
+    expect(result.attempt).toEqual({
+      operation: "dispatch",
+      target: "session",
+      project: "dashboard",
+      sessionId: "ses_1",
+      messageId: "msg_000000000000aaaaaaaaaaaaaa",
+      reconciliation: "unconfirmed",
+    });
+  });
+
+  test("security: an attempt envelope with a target/sessionId mismatch is rejected -> falls back to internal_error/indeterminate", () => {
+    const result = normalizeHandlerError({
+      code: "upstream_error",
+      delivery: "indeterminate",
+      attempt: {
+        operation: "dispatch",
+        target: "project",
+        project: "dashboard",
+        sessionId: "ses_1",
+        messageId: "msg_000000000000aaaaaaaaaaaaaa",
+        reconciliation: "unconfirmed",
+      },
+    });
+    expect(result.code).toBe("internal_error");
+  });
+
+  test("security: an attempt envelope carrying a stray field (timestamp/prompt/path) is rejected wholesale", () => {
+    for (const stray of [
+      { timestamp: Date.now() },
+      { prompt: "secret prompt" },
+      { path: "/Users/marcus/secret" },
+      { candidateIds: ["ses_1", "ses_2"] },
+    ]) {
+      const result = normalizeHandlerError({
+        code: "upstream_error",
+        delivery: "indeterminate",
+        attempt: {
+          operation: "dispatch",
+          target: "project",
+          project: "dashboard",
+          messageId: "msg_000000000000aaaaaaaaaaaaaa",
+          reconciliation: "unconfirmed",
+          ...stray,
+        },
+      });
+      expect(result.code).toBe("internal_error");
+    }
+  });
+
+  test("happy path: a non-dispatch error omits attempt entirely — no shape change for existing errors", () => {
+    const result = normalizeHandlerError({ code: "unknown_project" });
+    expect(result.attempt).toBeUndefined();
+    expect(Object.keys(result)).not.toContain("attempt");
+  });
+});
+
+describe("DISPATCH_INDETERMINATE", () => {
+  test("happy path: builds a stable upstream_error/indeterminate with the given attempt metadata", () => {
+    const err = DISPATCH_INDETERMINATE({
+      operation: "dispatch",
+      target: "project",
+      project: "dashboard",
+      messageId: "msg_000000000000aaaaaaaaaaaaaa",
+      reconciliation: "unavailable",
+    });
+    expect(err.code).toBe("upstream_error");
+    expect(err.delivery).toBe("indeterminate");
+    expect(err.attempt?.reconciliation).toBe("unavailable");
+    expect(err.message).toBe("The upstream operation failed.");
   });
 });

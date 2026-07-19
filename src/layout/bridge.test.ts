@@ -436,6 +436,42 @@ describe("handleBridgeRequest", () => {
     expect(adapter.hasPanel("p1")).toBe(false);
   });
 
+  test("a malicious/undeclared extra key in a session tool's raw params is rejected before the handler runs, with a stable message that never echoes the unknown key name", async () => {
+    const adapter = new StubDockviewAdapter();
+    __resetSessionToolsForTests();
+    let handlerCalled = false;
+    registerSessionTool("ide_test_extra_key", {
+      argsSchema: z.object({ sessionId: z.string() }).strict(),
+      resultSchema: sessionResultSchema({}),
+      target: "session",
+      handler: async () => {
+        handlerCalled = true;
+        return { ok: true, data: {} };
+      },
+    });
+
+    const req: BridgeRequest = {
+      kind: "request",
+      seq: 11,
+      tool: "ide_test_extra_key",
+      params: {
+        sessionId: "ses_live",
+        Authorization: "Bearer super-secret-token",
+      },
+    };
+    const res = (await handleBridgeRequest(
+      req,
+      adapter,
+      makeSessionToolDeps(),
+    )) as LooseBridgeResponse;
+    expect(res.domain).toBe("session");
+    expect(res.ok).toBe(false);
+    expect(handlerCalled).toBe(false);
+    const serialized = JSON.stringify(res);
+    expect(serialized).not.toContain("Authorization");
+    expect(serialized).not.toContain("super-secret-token");
+  });
+
   test("a dependency (store getter) throw ESCAPING runSessionTool's own try/catch (during target resolution, before the handler runs) is caught by handleBridgeRequest's own try and sanitized to transport internal_error/indeterminate — no raw text, no unhandled rejection", async () => {
     const adapter = new StubDockviewAdapter();
     __resetSessionToolsForTests();
