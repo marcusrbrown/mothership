@@ -240,6 +240,63 @@ async function relayGetLayout(bridge: WsBridge, tool: string) {
   return toolTextResult({ layout: layoutStructureView(res.layout) });
 }
 
+/** Applied to `ide_open_panel`/`ide_split` — each call creates a NEW
+ * panel, so calling twice with identical arguments is not a no-op (two
+ * panels, or an id-collision the adapter doesn't dedupe): `idempotentHint`
+ * is false. Never deletes existing state (`destructiveHint` false), never
+ * an external open-world effect (`openWorldHint` false), and mutates the
+ * layout (`readOnlyHint` false). */
+const CREATE_PANEL_ANNOTATIONS = {
+  readOnlyHint: false,
+  idempotentHint: false,
+  destructiveHint: false,
+  openWorldHint: false,
+};
+
+/** Applied to `ide_close_panel` — removes a panel, so it IS destructive;
+ * calling it again against an already-closed id leaves the same
+ * end state (no further effect on the environment), so `idempotentHint`
+ * is true. */
+const CLOSE_PANEL_ANNOTATIONS = {
+  readOnlyHint: false,
+  idempotentHint: true,
+  destructiveHint: true,
+  openWorldHint: false,
+};
+
+/** Applied to `ide_focus`/`ide_move_panel` — activating/repositioning an
+ * existing panel to the same target twice leaves the same end state
+ * (`idempotentHint` true), never destroys a panel (`destructiveHint`
+ * false), mutates layout state (`readOnlyHint` false), never an external
+ * open-world effect (`openWorldHint` false). */
+const REPOSITION_PANEL_ANNOTATIONS = {
+  readOnlyHint: false,
+  idempotentHint: true,
+  destructiveHint: false,
+  openWorldHint: false,
+};
+
+/** Applied to `ide_set_layout` — replaces the entire layout wholesale;
+ * applying the identical layout twice leaves the same end state
+ * (`idempotentHint` true), but a replacement CAN drop panels the prior
+ * layout held (`destructiveHint` true). */
+const SET_LAYOUT_ANNOTATIONS = {
+  readOnlyHint: false,
+  idempotentHint: true,
+  destructiveHint: true,
+  openWorldHint: false,
+};
+
+/** Applied to `ide_list_panels`/`ide_get_layout` — pure reads of this
+ * codebase's own layout state: never mutate, safe to retry, never
+ * destructive, never an open-world/external-effect call. */
+const READ_ONLY_LAYOUT_ANNOTATIONS = {
+  readOnlyHint: true,
+  idempotentHint: true,
+  destructiveHint: false,
+  openWorldHint: false,
+};
+
 /** Applied to `ide_list_projects`/`ide_list_sessions`/`ide_get_active_context`
  * — pure discovery reads: never mutate state, safe to retry, never
  * destructive, and scoped entirely to this codebase's own roster/session
@@ -485,6 +542,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
     {
       description: "Open a new panel in the workspace layout.",
       inputSchema: openPanelCommandSchema.shape,
+      annotations: CREATE_PANEL_ANNOTATIONS,
     },
     (args) => relayMutation(bridge, "ide_open_panel", args),
   );
@@ -494,6 +552,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
     {
       description: "Close an existing panel by id.",
       inputSchema: closePanelCommandSchema.shape,
+      annotations: CLOSE_PANEL_ANNOTATIONS,
     },
     (args) => relayMutation(bridge, "ide_close_panel", args),
   );
@@ -503,6 +562,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
     {
       description: "Open a new panel split relative to an existing panel.",
       inputSchema: splitCommandSchema.shape,
+      annotations: CREATE_PANEL_ANNOTATIONS,
     },
     (args) => relayMutation(bridge, "ide_split", args),
   );
@@ -512,6 +572,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
     {
       description: "Focus (activate) an existing panel by id.",
       inputSchema: focusCommandSchema.shape,
+      annotations: REPOSITION_PANEL_ANNOTATIONS,
     },
     (args) => relayMutation(bridge, "ide_focus", args),
   );
@@ -521,6 +582,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
     {
       description: "Move an existing panel relative to another panel.",
       inputSchema: movePanelCommandSchema.shape,
+      annotations: REPOSITION_PANEL_ANNOTATIONS,
     },
     (args) => relayMutation(bridge, "ide_move_panel", args),
   );
@@ -530,6 +592,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
     {
       description: "Replace the entire workspace layout.",
       inputSchema: setLayoutCommandSchema.shape,
+      annotations: SET_LAYOUT_ANNOTATIONS,
     },
     (args) => relayMutation(bridge, "ide_set_layout", args),
   );
@@ -540,6 +603,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
       description:
         "List panels currently open in the workspace (panel types/titles only).",
       inputSchema: z.object({}).shape,
+      annotations: READ_ONLY_LAYOUT_ANNOTATIONS,
     },
     () => relayListPanels(bridge, "ide_list_panels"),
   );
@@ -550,6 +614,7 @@ export function createIdeMcpServer(bridge: WsBridge): McpServer {
       description:
         "Get the current serialized workspace layout (paths redacted to names).",
       inputSchema: z.object({}).shape,
+      annotations: READ_ONLY_LAYOUT_ANNOTATIONS,
     },
     () => relayGetLayout(bridge, "ide_get_layout"),
   );

@@ -111,6 +111,32 @@ describe("createFetchHandler — 401 uniformity", () => {
     expect(res.status).toBe(401);
   });
 
+  test("only an authorized /mcp request receives an HTTP budget beyond WS but below SDK deadline", async () => {
+    const timeoutCalls: number[] = [];
+    const handler = createFetchHandler(
+      TOKEN,
+      stubBridge(true),
+      stubTransport(new Response(null, { status: 204 })),
+    );
+    const srv = {
+      upgrade: noopUpgrade,
+      timeout: (_req: Request, seconds: number) => timeoutCalls.push(seconds),
+    };
+
+    await handler(new Request("http://127.0.0.1/mcp"), srv);
+    expect(timeoutCalls).toEqual([]);
+
+    await handler(
+      new Request("http://127.0.0.1/mcp", {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      }),
+      srv,
+    );
+    expect(timeoutCalls).toEqual([55]);
+    expect(timeoutCalls[0]).toBeGreaterThan(45);
+    expect(timeoutCalls[0]).toBeLessThan(60);
+  });
+
   test("an unmatched path returns the same empty 401", async () => {
     const handler = createFetchHandler(
       TOKEN,

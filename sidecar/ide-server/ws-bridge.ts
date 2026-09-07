@@ -18,7 +18,10 @@ import {
 } from "../../src/layout/bridge-protocol";
 
 export const AUTH_TIMEOUT_MS = 3000;
-export const REQUEST_TIMEOUT_MS = 10000;
+// Keep the overall webview relay below the MCP SDK's 60s request deadline,
+// while allowing a single inner space-bus operation its verified 30s budget
+// plus transport headroom. This is not a budget for multiple serial calls.
+export const REQUEST_TIMEOUT_MS = 45000;
 
 interface PendingEntry {
   resolve: (res: BridgeResponse) => void;

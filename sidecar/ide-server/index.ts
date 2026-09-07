@@ -53,7 +53,10 @@ export function createFetchHandler(
 ) {
   return async function fetch(
     req: Request,
-    srv: { upgrade: (req: Request, opts: { data: WsData }) => boolean },
+    srv: {
+      upgrade: (req: Request, opts: { data: WsData }) => boolean;
+      timeout?: (req: Request, seconds: number) => void;
+    },
   ): Promise<Response> {
     const url = new URL(req.url);
 
@@ -77,6 +80,10 @@ export function createFetchHandler(
       if (!isAuthorized(req.headers.get("authorization"), token)) {
         return unauthorizedResponse();
       }
+      // Bun's default request idle timeout is shorter than the inner
+      // authenticated webview operation budget. Extend only this already-
+      // authorized MCP request; unauthenticated routes retain the default.
+      srv.timeout?.(req, 55);
       const { handleRequest, dispose } = await makeMcpRequestHandler();
       let response: Response;
       try {

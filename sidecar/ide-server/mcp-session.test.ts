@@ -19,6 +19,7 @@ import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import type { BridgeSocket } from "./ws-bridge";
 
 // index.ts boots a real Bun.serve as an import side effect and exits(1)
 // without this env var set (see index.test.ts for the same pattern).
@@ -31,9 +32,7 @@ const { createWsBridge } = await import("./ws-bridge");
 
 const TOKEN = "session-test-token";
 
-function bootSidecar() {
-  const bridge = createWsBridge(TOKEN);
-
+function bootSidecar(bridge = createWsBridge(TOKEN)) {
   const makeMcpRequestHandler: McpRequestHandlerFactory = async () => {
     const mcpServer = createIdeMcpServer(bridge);
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -58,7 +57,103 @@ function bootSidecar() {
   });
 }
 
+function attachDelayedWebview(
+  bridge: ReturnType<typeof createWsBridge>,
+  responseDelayMs: number,
+) {
+  let requestCount = 0;
+  const socket: BridgeSocket = {
+    send(raw) {
+      const request = JSON.parse(raw) as { kind?: string; seq?: number };
+      if (request.kind === "request" && request.seq !== undefined) {
+        requestCount += 1;
+        setTimeout(() => {
+          bridge.onMessage(
+            socket,
+            JSON.stringify({
+              kind: "response",
+              domain: "session",
+              seq: request.seq,
+              ok: true,
+              data: { context: "slow-response" },
+            }),
+          );
+        }, responseDelayMs);
+      }
+      return 1;
+    },
+    close() {},
+  };
+  bridge.onOpen(socket);
+  bridge.onMessage(socket, JSON.stringify({ kind: "auth", token: TOKEN }));
+  return { socket, getRequestCount: () => requestCount };
+}
+
 describe("real end-to-end MCP session over /mcp (regression: stateless transport reuse)", () => {
+  test("an authenticated HTTP response beyond the inner 30s operation budget reaches the client before the relay deadline", async () => {
+    const bridge = createWsBridge(TOKEN);
+    const server = bootSidecar(bridge);
+    const { getRequestCount } = attachDelayedWebview(bridge, 30_500);
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${server.port}/mcp`),
+      { requestInit: { headers: { authorization: `Bearer ${TOKEN}` } } },
+    );
+    const client = new Client({ name: "slow-request-test", version: "0.0.0" });
+
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: "ide_get_active_context",
+        arguments: {},
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(getRequestCount()).toBe(1);
+      const text = (result.content as { type: string; text: string }[])[0]
+        ?.text;
+      expect(JSON.parse(text ?? "{}")).toEqual({ context: "slow-response" });
+    } finally {
+      await client.close();
+      server.stop(true);
+    }
+  }, 45_000);
+
+  test("an authenticated MCP request beyond the inner budget returns one typed indeterminate timeout", async () => {
+    const bridge = createWsBridge(TOKEN, { requestTimeoutMs: 20 });
+    const server = bootSidecar(bridge);
+    const { getRequestCount } = attachDelayedWebview(bridge, 100);
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${server.port}/mcp`),
+      { requestInit: { headers: { authorization: `Bearer ${TOKEN}` } } },
+    );
+    const client = new Client({
+      name: "timeout-request-test",
+      version: "0.0.0",
+    });
+
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: "ide_get_active_context",
+        arguments: {},
+      });
+
+      expect(result.isError).toBe(true);
+      expect(getRequestCount()).toBe(1);
+      const text = (result.content as { type: string; text: string }[])[0]
+        ?.text;
+      expect(JSON.parse(text ?? "{}")).toMatchObject({
+        error: {
+          code: "timeout",
+          delivery: "indeterminate",
+        },
+      });
+    } finally {
+      await client.close();
+      server.stop(true);
+    }
+  });
+
   test("initialize -> notifications/initialized -> tools/list all succeed on one server", async () => {
     const server = bootSidecar();
     try {
