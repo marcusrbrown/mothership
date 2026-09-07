@@ -65,6 +65,12 @@ export interface DockviewShellProps {
   manifest?: WorkspaceManifest;
 }
 
+interface LiveParamInjectionApi {
+  panels: DockviewApi["panels"];
+  onDidAddPanel: DockviewApi["onDidAddPanel"];
+  onDidLayoutFromJSON: DockviewApi["onDidLayoutFromJSON"];
+}
+
 interface LiveWorkspace {
   client: OpencodeClient;
   demux: Demux;
@@ -376,7 +382,9 @@ interface LiveParamContext {
 function liveParamsForPanel(
   panelType: string,
   ctx: LiveParamContext,
+  existingParams: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  const directory = existingParams.directory ?? ctx.directory;
   switch (panelType) {
     case "roster":
       return {
@@ -388,7 +396,7 @@ function liveParamsForPanel(
     case "sessions":
       return {
         store: ctx.live?.store,
-        directory: ctx.directory,
+        directory,
         onSelectSession: ctx.callbacks.onSelectSession,
       };
     case "transcript":
@@ -401,7 +409,7 @@ function liveParamsForPanel(
         client: ctx.live?.client,
         demux: ctx.live?.demux,
         store: ctx.live?.store,
-        directory: ctx.directory,
+        directory,
         reconnectNonce: ctx.reconnectNonce,
       };
     case "terminal":
@@ -415,25 +423,16 @@ function liveParamsForPanel(
 function seedDefaultLayout(
   adapter: DockviewAdapter,
   context: BusContext | undefined,
-  live: LiveWorkspace | undefined,
   manifest: WorkspaceManifest | undefined,
-  onSelectProject: (name: string) => void,
-  onSelectSession: (sessionId: string) => void,
 ): void {
   const firstProject = context?.roster.projects[0];
-  const liveCtx: LiveParamContext = {
-    context,
-    live,
-    directory: firstProject?.expandedPath,
-    callbacks: { onSelectProject, onSelectSession },
-  };
 
   executeCommand(
     {
       type: "open_panel",
       panelId: "roster",
       panelType: "roster",
-      params: liveParamsForPanel("roster", liveCtx),
+      params: {},
     },
     adapter,
   );
@@ -444,7 +443,7 @@ function seedDefaultLayout(
       panelType: "sessions",
       referencePanelId: "roster",
       direction: "right",
-      params: liveParamsForPanel("sessions", liveCtx),
+      params: {},
     },
     adapter,
   );
@@ -455,7 +454,7 @@ function seedDefaultLayout(
       panelType: "transcript",
       referencePanelId: "sessions",
       direction: "right",
-      params: liveParamsForPanel("transcript", liveCtx),
+      params: {},
     },
     adapter,
   );
@@ -489,27 +488,35 @@ function seedDefaultLayout(
   seedDetectedPanels(adapter, manifest);
 }
 
-/** Re-injects live services into panels restored from a persisted layout.
- * `saveLayout` strips live/sensitive params (see persistence.ts), so a
- * `set_layout`-restored panel mounts with no client/demux/store/context —
- * dockview mounts panels SYNCHRONOUSLY during `set_layout`, before this can
- * run, so there's a brief window where e.g. TranscriptPanel sees no `demux`
- * (or, for pre-fix stale localStorage, a dead `{}`). TranscriptPanel's
- * `typeof demux.subscribe === "function"` guard covers that window; this
- * then triggers a re-render via `updateParameters`, merging live services
- * in WITHOUT clobbering the persisted plain-data params (directory,
- * sessionID, cwd) already present on the panel. */
-function reinjectLiveParams(api: DockviewApi, liveCtx: LiveParamContext): void {
-  for (const panel of api.panels) {
-    // seedDefaultLayout keys the well-known live-service panels by a fixed
-    // id (roster/sessions/transcript/terminal) — that id doubles as the
-    // panel-type signal here, matching liveParamsForPanel's switch. Any
-    // other panel (placeholders, detected-interface tabs) has no live
-    // services to re-inject.
-    const liveParams = liveParamsForPanel(panel.id, liveCtx);
-    if (Object.keys(liveParams).length === 0) continue;
-    panel.api.updateParameters({ ...panel.params, ...liveParams });
-  }
+/** Injects current live services into registered live panel types as panels
+ * are created. Plain serialized params remain authoritative. */
+export function registerLiveParamInjection(
+  api: LiveParamInjectionApi,
+  getLiveCtx: () => LiveParamContext,
+): { dispose(): void } {
+  const inject = (panel: (typeof api.panels)[number]): void => {
+    const existingParams = (panel.params ?? {}) as Record<string, unknown>;
+    const liveParams = liveParamsForPanel(
+      panel.api.component,
+      getLiveCtx(),
+      existingParams,
+    );
+    if (Object.keys(liveParams).length === 0) return;
+    panel.api.updateParameters({ ...existingParams, ...liveParams });
+  };
+
+  const added = api.onDidAddPanel(inject);
+  const restored = api.onDidLayoutFromJSON(() => {
+    for (const panel of api.panels) inject(panel);
+  });
+  for (const panel of api.panels) inject(panel);
+
+  return {
+    dispose() {
+      added.dispose();
+      restored.dispose();
+    },
+  };
 }
 
 export function DockviewShell({
@@ -520,6 +527,11 @@ export function DockviewShell({
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
   const bridgeRef = useRef<LayoutBridge | undefined>(undefined);
   const apiRef = useRef<DockviewApi | undefined>(undefined);
+  const liveParamRegistrationRef = useRef<{ dispose(): void } | undefined>(
+    undefined,
+  );
+  const activeDirectoryRef = useRef<string | undefined>(undefined);
+  const reconnectNonceRef = useRef(0);
   // The single active-directory SSE controller (see
   // `connectActiveDirectorySse`) — populated by the effect below, read by
   // the focus controller's seams to switch the live stream to whichever
@@ -564,6 +576,7 @@ export function DockviewShell({
         apiRef.current?.getPanel("roster")?.api.updateParameters(params);
       },
       setActiveDirectory: (directory) => {
+        activeDirectoryRef.current = directory;
         activeSseRef.current?.setActiveDirectory(directory);
       },
       updateActiveSession: setActiveSession,
@@ -606,6 +619,10 @@ export function DockviewShell({
   contextRef.current = context;
   const liveRef = useRef(live);
   liveRef.current = live;
+  const liveParamCallbacksRef = useRef<LiveParamContext["callbacks"]>({
+    onSelectProject: () => {},
+    onSelectSession: () => {},
+  });
 
   // Mount the ide_* MCP bridge once, torn down on unmount. Any
   // relayed request runs `executeCommand` against whatever adapter is
@@ -654,6 +671,8 @@ export function DockviewShell({
     return () => {
       bridge.close();
       bridgeRef.current = undefined;
+      liveParamRegistrationRef.current?.dispose();
+      liveParamRegistrationRef.current = undefined;
     };
   }, [focus]);
 
@@ -686,6 +705,7 @@ export function DockviewShell({
         // recovering any message-part deltas missed during this
         // teardown/reopen.
         nonce += 1;
+        reconnectNonceRef.current = nonce;
         apiRef.current
           ?.getPanel("transcript")
           ?.api.updateParameters({ reconnectNonce: nonce });
@@ -769,37 +789,39 @@ export function DockviewShell({
     [context, live, focus],
   );
 
+  liveParamCallbacksRef.current = {
+    onSelectProject: handleSelectProject,
+    onSelectSession: handleSelectSession,
+  };
+
   const handleReady = useCallback(
     (event: DockviewReadyEvent) => {
       const adapter = createDockviewAdapter(event.api);
       adapterRef.current = adapter;
 
+      liveParamRegistrationRef.current?.dispose();
+      liveParamRegistrationRef.current = registerLiveParamInjection(
+        event.api,
+        () => {
+          const directory =
+            activeDirectoryRef.current ??
+            contextRef.current?.roster.projects[0]?.expandedPath;
+          return {
+            context: contextRef.current,
+            live: liveRef.current,
+            directory,
+            activeDirectory: directory,
+            reconnectNonce: reconnectNonceRef.current,
+            callbacks: liveParamCallbacksRef.current,
+          };
+        },
+      );
+
       const saved = loadLayout(workspacePath);
       if (saved) {
         executeCommand({ type: "set_layout", layout: saved }, adapter);
-        // Restored panels have no live services (stripped on save, see
-        // persistence.ts) — re-inject them now. dockview already mounted
-        // the panels synchronously above; TranscriptPanel's demux guard
-        // covers the gap between mount and this re-injection.
-        reinjectLiveParams(event.api, {
-          context,
-          live,
-          directory: context?.roster.projects[0]?.expandedPath,
-          activeDirectory: activeSession?.directory,
-          callbacks: {
-            onSelectProject: handleSelectProject,
-            onSelectSession: handleSelectSession,
-          },
-        });
       } else {
-        seedDefaultLayout(
-          adapter,
-          context,
-          live,
-          manifest,
-          handleSelectProject,
-          handleSelectSession,
-        );
+        seedDefaultLayout(adapter, context, manifest);
       }
 
       // Coarse panel-set signature (sorted ids), used to de-dupe/throttle
@@ -827,15 +849,7 @@ export function DockviewShell({
         auditStore.recordNativeLayoutChange(`panels=${panelIds.length}`);
       });
     },
-    [
-      workspacePath,
-      context,
-      manifest,
-      live,
-      handleSelectProject,
-      handleSelectSession,
-      activeSession,
-    ],
+    [workspacePath, context, manifest],
   );
 
   // Transcript auto-select on dispatch. Minimal wiring — no new panel-id

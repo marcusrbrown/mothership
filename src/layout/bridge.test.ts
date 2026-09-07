@@ -7,8 +7,11 @@ import {
 } from "../ide/commands";
 import {
   type SessionToolDeps,
+  __resetQuestionToolsRegistrationForTests,
   __resetSessionToolsForTests,
+  registerQuestionTools,
   registerSessionTool,
+  runSessionTool,
 } from "../ide/executor";
 import type { BridgeDeps, WsLike } from "./bridge";
 import { connectLayoutBridge, handleBridgeRequest } from "./bridge";
@@ -550,6 +553,97 @@ describe("handleBridgeRequest", () => {
     expect(event.project).toBe("dashboard");
     expect(JSON.stringify(event)).not.toContain("secretPayload");
     expect(JSON.stringify(event)).not.toContain("nope");
+  });
+
+  test("ide_answer_question relayed via handleBridgeRequest (MCP path) and a direct runSessionTool call (UI-equivalent path) produce the identical bus.answerQuestion invocation and result shape — parity", async () => {
+    const adapter = new StubDockviewAdapter();
+    __resetSessionToolsForTests();
+    __resetQuestionToolsRegistrationForTests();
+    registerQuestionTools();
+
+    const seenAnswerCalls: unknown[] = [];
+    function makeAnswerDeps(): SessionToolDeps {
+      return makeSessionToolDeps({
+        store: {
+          getSessions: () => [],
+          getSession: (id: string) =>
+            id === "ses_live"
+              ? {
+                  id: "ses_live",
+                  directory: "/Users/marcus/src/dashboard",
+                  status: "idle" as const,
+                }
+              : undefined,
+          getPendingQuestions: () => [],
+          getPendingQuestion: (requestId: string) =>
+            requestId === "que_1"
+              ? {
+                  sessionID: "ses_live",
+                  questions: [
+                    {
+                      multiple: false,
+                      custom: false,
+                      options: [{ label: "Yes" }],
+                    },
+                  ],
+                }
+              : undefined,
+          subscribe: () => () => {},
+          applyEvent: () => {},
+          reconcile: () => {},
+        },
+        bus: {
+          answerQuestion: async (args) => {
+            seenAnswerCalls.push(args);
+            return {
+              ok: true,
+              sessionId: args.sessionId,
+              requestId: args.requestId,
+            };
+          },
+        },
+      });
+    }
+
+    // MCP path: through the bridge relay, exactly as the sidecar drives it.
+    const mcpReq: BridgeRequest = {
+      kind: "request",
+      seq: 20,
+      tool: "ide_answer_question",
+      params: { sessionId: "ses_live", requestId: "que_1", answers: [["Yes"]] },
+    };
+    const mcpRes = (await handleBridgeRequest(
+      mcpReq,
+      adapter,
+      makeAnswerDeps(),
+    )) as LooseBridgeResponse;
+
+    // UI-equivalent path: the SAME shared operation, invoked directly
+    // (e.g. as TranscriptPanel's answer box does), source-tagged "ui".
+    const uiResult = await runSessionTool(
+      "ide_answer_question",
+      { sessionId: "ses_live", requestId: "que_1", answers: [["Yes"]] },
+      makeAnswerDeps(),
+      "ui",
+    );
+
+    expect(mcpRes.domain).toBe("session");
+    expect(mcpRes.ok).toBe(true);
+    expect(mcpRes.data).toEqual({ sessionId: "ses_live", requestId: "que_1" });
+    expect(uiResult.ok).toBe(true);
+    if (uiResult.ok) {
+      expect(uiResult.data).toEqual({
+        sessionId: "ses_live",
+        requestId: "que_1",
+      });
+    }
+    // Both paths reached bus.answerQuestion with the identical resolved
+    // argument shape — the MCP relay and a UI-driven call are the same
+    // operation, not two divergent implementations.
+    expect(seenAnswerCalls).toEqual([
+      { sessionId: "ses_live", requestId: "que_1", answers: [["Yes"]] },
+      { sessionId: "ses_live", requestId: "que_1", answers: [["Yes"]] },
+    ]);
   });
 });
 

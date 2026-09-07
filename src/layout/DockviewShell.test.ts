@@ -20,6 +20,7 @@ import {
   connectActiveDirectorySse,
   pruneStaleActiveSession,
   reconcileProject,
+  registerLiveParamInjection,
 } from "./DockviewShell";
 
 /**
@@ -791,6 +792,194 @@ describe("buildSessionToolDeps + discovery/context/focus tool wiring", () => {
     expect(events).toHaveLength(1);
     const serialized = JSON.stringify(events[0]);
     expect(serialized).not.toContain("/repo/dashboard");
+  });
+});
+
+describe("live-panel injection", () => {
+  function liveCtx(directory = "/repo/current") {
+    return {
+      context: context([{ name: "current", expandedPath: directory }]),
+      live: {
+        client: fakeClient([]),
+        demux: createDemux(),
+        store: createSessionStore(),
+      },
+      directory,
+      callbacks: {
+        onSelectProject: () => {},
+        onSelectSession: () => {},
+      },
+    };
+  }
+
+  function panel(
+    id: string,
+    params: Record<string, unknown> = {},
+    component = id,
+  ) {
+    const updates: Record<string, unknown>[] = [];
+    return {
+      id,
+      params,
+      updates,
+      api: {
+        component,
+        updateParameters(next: Record<string, unknown>) {
+          updates.push(next);
+        },
+      },
+    };
+  }
+
+  function api(initialPanels: ReturnType<typeof panel>[] = []) {
+    let added: ((value: ReturnType<typeof panel>) => void) | undefined;
+    let restored: (() => void) | undefined;
+    let disposed = false;
+    let restoreDisposed = false;
+    return {
+      panels: initialPanels,
+      onDidAddPanel(listener: (value: ReturnType<typeof panel>) => void) {
+        added = listener;
+        return {
+          dispose() {
+            disposed = true;
+            added = undefined;
+          },
+        };
+      },
+      onDidLayoutFromJSON(listener: () => void) {
+        restored = listener;
+        return {
+          dispose() {
+            restoreDisposed = true;
+            restored = undefined;
+          },
+        };
+      },
+      fireAdded(value: ReturnType<typeof panel>) {
+        this.panels.push(value);
+        added?.(value);
+      },
+      fireRestored() {
+        restored?.();
+      },
+      isDisposed() {
+        return { added: disposed, restored: restoreDisposed };
+      },
+    };
+  }
+
+  test("injects live services into a custom-ID roster added after startup", () => {
+    const initial = panel("roster");
+    const dynamic = panel("roster-from-mcp", {}, "roster");
+    const dock = api([initial]);
+
+    registerLiveParamInjection(dock as never, () => liveCtx());
+    dock.fireAdded(dynamic);
+
+    expect(initial.updates).toHaveLength(1);
+    expect(dynamic.updates).toHaveLength(1);
+    expect(dynamic.updates[0]).toMatchObject({
+      context: expect.any(Object),
+      store: expect.any(Object),
+    });
+  });
+
+  test("fresh seed panels receive the current directory through the shared hook", () => {
+    const sessions = panel("sessions", {}, "sessions");
+    const dock = api([sessions]);
+
+    registerLiveParamInjection(dock as never, () => liveCtx());
+
+    expect(sessions.updates[0]).toMatchObject({
+      directory: "/repo/current",
+      store: expect.any(Object),
+    });
+  });
+
+  test("injects restored custom-ID transcript while preserving serialized targets", () => {
+    const saved = panel(
+      "saved-transcript",
+      {
+        directory: "/repo/saved",
+        sessionID: "ses_saved",
+        cwd: "/repo/saved",
+      },
+      "transcript",
+    );
+
+    const dock = api([saved]);
+    registerLiveParamInjection(dock as never, () => liveCtx());
+
+    expect(saved.updates).toHaveLength(1);
+    expect(saved.updates[0]).toMatchObject({
+      client: expect.any(Object),
+      demux: expect.any(Object),
+      store: expect.any(Object),
+      directory: "/repo/saved",
+      sessionID: "ses_saved",
+      cwd: "/repo/saved",
+    });
+  });
+
+  test("injects replacement panels after Dockview restores JSON", () => {
+    const dock = api();
+    registerLiveParamInjection(dock as never, () => liveCtx());
+    const restored = panel(
+      "restored-sessions",
+      { directory: "/repo/saved", activeSessionId: "ses_saved" },
+      "sessions",
+    );
+    dock.panels.push(restored);
+
+    dock.fireRestored();
+
+    expect(restored.updates).toHaveLength(1);
+    expect(restored.updates[0]).toMatchObject({
+      store: expect.any(Object),
+      directory: "/repo/saved",
+      activeSessionId: "ses_saved",
+    });
+  });
+
+  test("uses the current context for late panels and disposes both listeners", () => {
+    const dock = api();
+    let current = liveCtx("/repo/first");
+    const registration = registerLiveParamInjection(
+      dock as never,
+      () => current,
+    );
+    current = liveCtx("/repo/selected");
+
+    const late = panel("late-sessions", {}, "sessions");
+    dock.fireAdded(late);
+
+    expect(late.updates).toHaveLength(1);
+    expect(late.updates[0]).toMatchObject({
+      directory: "/repo/selected",
+      store: current.live.store,
+    });
+
+    registration.dispose();
+    const afterDispose = panel("after-dispose", {}, "transcript");
+    dock.fireAdded(afterDispose);
+    dock.fireRestored();
+
+    expect(afterDispose.updates).toHaveLength(0);
+    expect(dock.isDisposed()).toEqual({ added: true, restored: true });
+  });
+
+  test("leaves unknown panel types untouched", () => {
+    const dock = api();
+    registerLiveParamInjection(dock as never, () => liveCtx());
+    const unknown = panel("storybook-custom", {}, "placeholder");
+    const terminal = panel("terminal", { cwd: "/repo/saved" }, "terminal");
+
+    dock.fireAdded(unknown);
+    dock.fireAdded(terminal);
+
+    expect(unknown.updates).toHaveLength(0);
+    expect(terminal.updates).toHaveLength(0);
   });
 });
 
