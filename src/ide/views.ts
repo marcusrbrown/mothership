@@ -1,0 +1,574 @@
+/**
+ * Allowlist-only structural view builders for the session-tool domain.
+ * Mirrors `sidecar/ide-server/redact.ts`'s posture: every view here names
+ * exactly the fields it admits and constructs a fresh object from them —
+ * it never spreads or forwards a raw upstream/space-bus object, so an
+ * unexpected field (path, directory, credentials, authorization) added
+ * upstream cannot silently leak through. `path`/`directory` fields are
+ * dropped entirely; a project's `exists` flag comes from the raw
+ * object's `pathExists`, never the path itself.
+ */
+
+/** Raw shape this view accepts — a structural subset of space-bus's
+ * `RosterProject`/`SnapshotProject`, read defensively (all fields
+ * optional) so a malformed/poisoned upstream object degrades to omitted
+ * fields rather than throwing. */
+interface RawProject {
+  name?: unknown;
+  pathExists?: unknown;
+  exists?: unknown;
+  busyCount?: unknown;
+  sessionCount?: unknown;
+  sessionCountCapped?: unknown;
+  statusError?: unknown;
+  /** Deliberately typed as an open index signature: callers (and tests)
+   * may pass a raw upstream object carrying `path`/`expandedPath`/
+   * `directory`/`credentials` fields this view must never read — the
+   * point of an allowlist view is that only the named fields above are
+   * ever consulted, regardless of what else is present on the input. */
+  [key: string]: unknown;
+}
+
+export interface ProjectView {
+  name: string;
+  exists?: boolean;
+  busyCount?: number;
+  sessionCount?: number;
+  sessionCountCapped?: boolean;
+  /** Whether the upstream aggregate reported a `statusError` for this
+   * project. Deliberately a boolean, not the raw error string — space-bus's
+   * `statusError` is free-form upstream text (a failed status fetch's
+   * message) and must never cross this allowlist view verbatim; it could
+   * carry a path, host, or other operational detail an agent shouldn't
+   * see through `ide_list_projects`. */
+  hasStatusError: boolean;
+  /** True when no matching entry for this project's name was found in the
+   * live `snapshot()` read (the roster listing is authoritative for
+   * project identity/order; the snapshot read supplies the busy/session
+   * counts and error status merged in below — its absence for a given
+   * roster project is a real, representable outcome, not an error). */
+  snapshotUnknown: boolean;
+  /** Whether the matching `snapshot()` entry (if any) reported its own
+   * `error` field — same boolean-not-raw-text posture as `hasStatusError`,
+   * for the same reason: the snapshot fetch's error text could carry a
+   * path, host, or credential-adjacent detail. */
+  hasSnapshotError: boolean;
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+function bool(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
+function num(v: unknown): number | undefined {
+  return typeof v === "number" ? v : undefined;
+}
+
+/** `ide_list_projects` view element: name/status metadata only. Space-bus
+ * exposes both `RosterProject.pathExists` and `SnapshotProject.exists` for
+ * the same concept across its two aggregate reads — this view normalizes
+ * either into a single `exists` field.
+ *
+ * `snapshotRaw`, when supplied, is the `snapshot()` entry already matched
+ * to this project by EXACT name (matching is the caller's job — see
+ * `src/ide/executor.ts`'s `ide_list_projects` handler); its
+ * `busyCount`/`sessionCount`/`sessionCountCapped`/`exists` take priority
+ * over the roster read's own fields when present, since `snapshot()` is
+ * the live aggregate. `snapshotUnknown`/`hasSnapshotError` are always
+ * derived from `snapshotRaw`'s presence/`error` field, never from `raw`. */
+export function projectView(
+  raw: RawProject,
+  snapshotRaw?: RawProject,
+): ProjectView {
+  const exists =
+    bool(snapshotRaw?.exists) ?? bool(raw.exists) ?? bool(raw.pathExists);
+  return {
+    name: str(raw.name) ?? "",
+    exists,
+    busyCount: num(snapshotRaw?.busyCount) ?? num(raw.busyCount),
+    sessionCount: num(snapshotRaw?.sessionCount) ?? num(raw.sessionCount),
+    sessionCountCapped:
+      bool(snapshotRaw?.sessionCountCapped) ?? bool(raw.sessionCountCapped),
+    hasStatusError: raw.statusError !== undefined && raw.statusError !== null,
+    snapshotUnknown: snapshotRaw === undefined,
+    hasSnapshotError:
+      snapshotRaw !== undefined &&
+      snapshotRaw.error !== undefined &&
+      snapshotRaw.error !== null,
+  };
+}
+
+interface RawSession {
+  id?: unknown;
+  title?: unknown;
+  status?: unknown;
+  updatedAt?: unknown;
+  createdAt?: unknown;
+  parentID?: unknown;
+  /** See `RawProject`'s index signature note — `directory` is deliberately
+   * absent from this interface but must still be accepted as input (and
+   * never read) so callers can pass a raw stored-session object as-is. */
+  [key: string]: unknown;
+}
+
+export interface SessionView {
+  id: string;
+  title?: string;
+  status?: string;
+  updatedAt?: number;
+  createdAt?: number;
+  parentId?: string;
+}
+
+/** `ide_list_sessions`/`ide_get_active_context` view element: id/title/
+ * status/timestamps only — never `directory`. */
+export function sessionView(raw: RawSession): SessionView {
+  return {
+    id: str(raw.id) ?? "",
+    title: str(raw.title),
+    status: str(raw.status),
+    updatedAt: num(raw.updatedAt),
+    createdAt: num(raw.createdAt),
+    parentId: str(raw.parentID),
+  };
+}
+
+// --- session rows (ide_list_sessions visible-row semantics) ---------------
+
+/** Suffix pattern OpenCode uses for subagent session titles, e.g. "Fix the
+ * tests (@fixer subagent)". Mirrors `src/panels/sessions/sessions-view.ts`'s
+ * `SUBAGENT_SUFFIX` — kept as a separate, self-contained copy rather than
+ * an import: importing from `src/panels/*` would couple this MCP-facing
+ * domain to UI panel code (an unrelated module boundary neither side
+ * should depend on), and the pattern itself is tiny and effectively
+ * frozen (it encodes an OpenCode server title-formatting convention, not
+ * app-specific UI logic). Suffix-anchored so titles that merely contain
+ * "@" or "subagent" mid-string are NOT treated as subagent sessions. */
+const SUBAGENT_SUFFIX = /\(@[^()]+ subagent\)$/;
+
+/** True when `session` is a subagent/child session. PRIMARY signal is
+ * `parentID` (a reliable structural marker); falls back to the
+ * `(@<name> subagent)` title-suffix marker when `parentID` is absent —
+ * see `SUBAGENT_SUFFIX`. Mirrors
+ * `src/panels/sessions/sessions-view.ts`'s `isSubagentSession` exactly. */
+function isSubagentSession(session: {
+  parentID?: string;
+  title?: string;
+}): boolean {
+  if (session.parentID != null) return true;
+  if (!session.title) return false;
+  return SUBAGENT_SUFFIX.test(session.title);
+}
+
+export interface SessionRowView {
+  id: string;
+  title: string;
+  busy: boolean;
+  needsAttention: boolean;
+}
+
+interface RawStoredSession {
+  id: string;
+  title?: string;
+  status?: string;
+  updatedAt?: number;
+  parentID?: string;
+}
+
+/**
+ * `ide_list_sessions` view: id/title/busy/needsAttention only — no
+ * `directory`, no `parentID`, no `updatedAt` (recency is consumed here
+ * to ORDER the rows, never exposed in the output; the sessions panel's
+ * own `SessionRow` shape likewise omits it). Mirrors
+ * `src/panels/sessions/sessions-view.ts`'s `toSessionRows` visible-row
+ * semantics exactly (same subagent filter, same most-recent-first
+ * ordering with the same stable-tiebreak/unknown-timestamp-sinks-last
+ * rules) as a self-contained re-implementation — see `isSubagentSession`
+ * above for why this isn't a cross-module import.
+ *
+ * `includeSubagents` defaults to `false` (top-level sessions only),
+ * matching the sessions panel's own default.
+ */
+export function toSessionRowViews(
+  sessions: readonly RawStoredSession[],
+  pendingSessionIds: ReadonlySet<string>,
+  options: { includeSubagents?: boolean } = {},
+): SessionRowView[] {
+  const { includeSubagents = false } = options;
+  return sessions
+    .filter((s) => includeSubagents || !isSubagentSession(s))
+    .map((s, index) => ({ s, index }))
+    .sort((a, b) => {
+      const at = a.s.updatedAt;
+      const bt = b.s.updatedAt;
+      if (at !== undefined && bt !== undefined) {
+        if (at !== bt) return bt - at;
+        return a.index - b.index; // stable
+      }
+      if (at !== undefined) return -1; // timestamped sinks above unknown
+      if (bt !== undefined) return 1;
+      return a.index - b.index; // both unknown -> stable insertion order
+    })
+    .map(({ s }) => ({
+      id: s.id,
+      title: s.title ?? s.id,
+      busy: s.status === "busy",
+      needsAttention: pendingSessionIds.has(s.id),
+    }));
+}
+
+// --- active context (ide_get_active_context) -------------------------------
+
+export interface ActiveContextView {
+  project?: string;
+  sessionId?: string;
+}
+
+interface RawActiveContext {
+  project?: unknown;
+  sessionId?: unknown;
+  /** See `RawProject`'s index signature note — a caller-supplied
+   * `directory` (or any other field) must still be accepted as input
+   * (and never read). */
+  [key: string]: unknown;
+}
+
+/** `ide_get_active_context` view: the currently-focused logical project
+ * name and/or session id, both explicitly optional (nothing focused yet
+ * is a real, representable state) — never a directory. Reads `raw`
+ * defensively field-by-field, same posture as every other view in this
+ * module. */
+export function activeContextView(raw: RawActiveContext): ActiveContextView {
+  const project = str(raw.project);
+  const sessionId = str(raw.sessionId);
+  return {
+    ...(project !== undefined && { project }),
+    ...(sessionId !== undefined && { sessionId }),
+  };
+}
+
+// --- confirmation views (ide_select_project / ide_select_session) ---------
+
+export interface SelectProjectConfirmation {
+  project: string;
+}
+
+export interface SelectSessionConfirmation {
+  sessionId: string;
+  project: string;
+}
+
+// --- bounded text -------------------------------------------------------
+
+export interface BoundedText {
+  text: string;
+  truncated: boolean;
+  /** UTF-8 byte length of the original input. */
+  originalBytes: number;
+  /** UTF-8 byte length of the returned (possibly truncated) text. */
+  returnedBytes: number;
+}
+
+/**
+ * Truncates `text` to at most `maxBytes` UTF-8 bytes, never splitting a
+ * Unicode code point (and therefore never emitting a lone UTF-16
+ * surrogate half). Used by transcript/question views to enforce
+ * per-part/total-result byte budgets with deterministic, UTF-8-safe
+ * truncation and explicit metadata — never silent.
+ *
+ * Iterates by Unicode CODE POINT (`for...of` over a string walks
+ * complete code points — a surrogate pair counts as one iteration
+ * step), not by UTF-16 code unit or byte offset. A code-unit-indexed
+ * binary search can land between a high and low surrogate (each emoji
+ * is 2 UTF-16 code units but 1 code point); this walk can only ever
+ * stop on a whole-code-point boundary, so a budget too small for even
+ * the first code point yields an empty string rather than a
+ * partial/corrupt one.
+ */
+export function boundText(text: string, maxBytes: number): BoundedText {
+  const encoder = new TextEncoder();
+  const originalBytes = encoder.encode(text).length;
+
+  if (originalBytes <= maxBytes) {
+    return {
+      text,
+      truncated: false,
+      originalBytes,
+      returnedBytes: originalBytes,
+    };
+  }
+
+  let returnedText = "";
+  let returnedBytes = 0;
+  for (const codePoint of text) {
+    const codePointBytes = encoder.encode(codePoint).length;
+    if (returnedBytes + codePointBytes > maxBytes) break;
+    returnedText += codePoint;
+    returnedBytes += codePointBytes;
+  }
+
+  return {
+    text: returnedText,
+    truncated: true,
+    originalBytes,
+    returnedBytes,
+  };
+}
+
+// --- transcript (ide_get_transcript) ---------------------------------------
+
+/** Per-part UTF-8 byte cap applied AFTER role/type allowlisting, before the
+ * total-result cap below — frozen per the plan's deferred-implementation
+ * decision. Chosen well under the 128 KiB total cap so a handful of
+ * oversized parts can never alone exhaust the whole result. */
+export const TRANSCRIPT_PART_BYTE_CAP = 8 * 1024;
+
+/** Total serialized-byte cap across every admitted part's (already
+ * per-part-bounded) text — frozen per the plan's deferred-implementation
+ * decision ("no larger than 128 KiB"). Enforced by `toTranscriptView`
+ * itself (part-by-part accumulation), not by the caller. */
+export const TRANSCRIPT_TOTAL_BYTE_CAP = 128 * 1024;
+
+/** One admitted transcript part — role + free text ONLY. `role` is
+ * restricted to `"user" | "assistant"` (never `"system"`/other future
+ * roles); the free `text` is preserved VERBATIM (once per-part-truncated)
+ * even if it contains paths, secrets, or instructions — it is the
+ * caller's job to treat it as untrusted, bearer-authorized data, never as
+ * a command or as already-scrubbed content. */
+export interface TranscriptPartView {
+  role: "user" | "assistant";
+  text: string;
+  truncated: boolean;
+}
+
+export interface TranscriptView {
+  sessionId: string;
+  messages: TranscriptPartView[];
+  truncated: boolean;
+  bytes: { returned: number; original: number };
+}
+
+/** Raw shape this view accepts — a structural subset of
+ * `@fro.bot/space-bus/core`'s `SessionMessage`, read defensively (every
+ * field typed `unknown`) so a malformed/poisoned upstream message
+ * degrades to an omitted part rather than throwing. */
+interface RawTranscriptMessage {
+  role?: unknown;
+  parts?: unknown;
+}
+
+interface RawTranscriptPart {
+  type?: unknown;
+  text?: unknown;
+}
+
+const ADMITTED_ROLES = new Set(["user", "assistant"]);
+
+/**
+ * Builds the strict, allowlisted transcript view `ide_get_transcript`
+ * returns. This is the ENTIRE MCP-facing disclosure boundary for
+ * transcript content — see `src/ide/commands.ts` KTD5's doc comment and
+ * the module header above.
+ *
+ * Admits ONLY `role: "user" | "assistant"` messages, and within an
+ * admitted message ONLY `type: "text"` parts with a string `text` field
+ * — every other role (`"system"`, any future role), every non-`"text"`
+ * part type (tool calls/results, reasoning, images, files, patches,
+ * anything not on this allowlist), and any part missing a string `text`
+ * field is silently dropped, never partially admitted. Chronological
+ * order is PRESERVED exactly as `rawMessages` arrives (this function
+ * performs no reordering) — the caller (`getTranscriptHandler`) is
+ * responsible for requesting/receiving messages in the UI's
+ * oldest-first chronological order.
+ *
+ * Truncation is two-tier and fully deterministic:
+ * 1. Each admitted part's text is independently bounded to
+ *    `TRANSCRIPT_PART_BYTE_CAP` via `boundText` (UTF-8-safe, never splits
+ *    a code point).
+ * 2. The already-part-bounded parts are then accumulated in order against
+ *    a running `TRANSCRIPT_TOTAL_BYTE_CAP` budget; the first part that
+ *    would exceed the remaining total budget is itself re-bounded to
+ *    exactly the remaining budget (again UTF-8-safe) and marked
+ *    truncated, and every part after it is dropped entirely (never
+ *    partially included out of order).
+ *
+ * `truncated` at the top level is true if ANY part was truncated (at
+ * either tier) OR any part was dropped by the total-byte cutoff — a
+ * caller can rely on the top-level flag alone without inspecting every
+ * part.
+ */
+export function toTranscriptView(
+  sessionId: string,
+  rawMessages: readonly RawTranscriptMessage[],
+): TranscriptView {
+  const admittedParts: { role: "user" | "assistant"; text: string }[] = [];
+
+  for (const raw of rawMessages) {
+    if (raw === null || typeof raw !== "object") continue;
+    const role = str(raw.role);
+    if (role === undefined || !ADMITTED_ROLES.has(role)) continue;
+    const parts = Array.isArray(raw.parts) ? raw.parts : [];
+    for (const rawPart of parts as RawTranscriptPart[]) {
+      if (rawPart === null || typeof rawPart !== "object") continue;
+      if (str(rawPart.type) !== "text") continue;
+      const text = str(rawPart.text);
+      if (text === undefined) continue;
+      admittedParts.push({ role: role as "user" | "assistant", text });
+    }
+  }
+
+  let originalBytes = 0;
+  let returnedBytes = 0;
+  let anyTruncated = false;
+  const encoder = new TextEncoder();
+  const messages: TranscriptPartView[] = [];
+  let budgetExhausted = false;
+
+  for (const part of admittedParts) {
+    originalBytes += encoder.encode(part.text).length;
+    if (budgetExhausted) {
+      anyTruncated = true;
+      continue;
+    }
+
+    const perPart = boundText(part.text, TRANSCRIPT_PART_BYTE_CAP);
+    const remainingTotal = TRANSCRIPT_TOTAL_BYTE_CAP - returnedBytes;
+    if (remainingTotal <= 0) {
+      budgetExhausted = true;
+      anyTruncated = true;
+      continue;
+    }
+
+    let finalText = perPart.text;
+    let finalTruncated = perPart.truncated;
+    let finalBytes = perPart.returnedBytes;
+    if (perPart.returnedBytes > remainingTotal) {
+      const reBounded = boundText(perPart.text, remainingTotal);
+      finalText = reBounded.text;
+      finalTruncated = true;
+      finalBytes = reBounded.returnedBytes;
+      budgetExhausted = true;
+    }
+
+    if (finalTruncated) anyTruncated = true;
+    returnedBytes += finalBytes;
+    messages.push({
+      role: part.role,
+      text: finalText,
+      truncated: finalTruncated,
+    });
+  }
+
+  return {
+    sessionId,
+    messages,
+    truncated: anyTruncated,
+    bytes: { returned: returnedBytes, original: originalBytes },
+  };
+}
+
+// --- pending questions (ide_list_pending_questions) ------------------------
+
+/** Raw shape this view accepts — a structural subset of
+ * `@fro.bot/space-bus/core`'s `PendingQuestionView`, read defensively (all
+ * fields optional/typed `unknown` where a malformed upstream entry could
+ * poison the shape) so a poisoned/malformed request degrades to omitted
+ * fields rather than throwing. */
+interface RawPendingQuestionOption {
+  label?: unknown;
+  description?: unknown;
+  [key: string]: unknown;
+}
+
+interface RawPendingSubquestion {
+  header?: unknown;
+  question?: unknown;
+  multiple?: unknown;
+  custom?: unknown;
+  options?: unknown;
+  [key: string]: unknown;
+}
+
+interface RawPendingQuestionView {
+  requestId?: unknown;
+  sessionId?: unknown;
+  questions?: unknown;
+  [key: string]: unknown;
+}
+
+export interface PendingQuestionOptionView {
+  label: string;
+  description?: string;
+}
+
+export interface PendingSubquestionView {
+  header?: string;
+  question: string;
+  multiple: boolean;
+  custom: boolean;
+  options: PendingQuestionOptionView[];
+}
+
+export interface PendingQuestionView {
+  requestId: string;
+  sessionId: string;
+  questions: PendingSubquestionView[];
+}
+
+function toOptionView(raw: unknown): PendingQuestionOptionView | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const o = raw as RawPendingQuestionOption;
+  const label = str(o.label);
+  if (label === undefined) return undefined;
+  const description = str(o.description);
+  return {
+    label,
+    ...(description !== undefined && { description }),
+  };
+}
+
+function toSubquestionView(raw: unknown): PendingSubquestionView | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const q = raw as RawPendingSubquestion;
+  const header = str(q.header);
+  const rawOptions = Array.isArray(q.options) ? q.options : [];
+  const options = rawOptions
+    .map(toOptionView)
+    .filter((o): o is PendingQuestionOptionView => o !== undefined);
+  return {
+    ...(header !== undefined && { header }),
+    question: str(q.question) ?? "",
+    multiple: bool(q.multiple) ?? false,
+    custom: bool(q.custom) ?? false,
+    options,
+  };
+}
+
+/**
+ * `ide_list_pending_questions` view: request id, owning session id, and
+ * FULL multi-question metadata (header/question text, `multiple`/
+ * `custom` selection rules, and option labels/descriptions) — the
+ * allowlist boundary for the pending-question disclosure surface. Every
+ * field is read defensively field-by-field from `raw`; no raw upstream
+ * object is ever spread or forwarded verbatim, so an unexpected field
+ * (a path, a credential, a future structural field) added upstream can
+ * never silently leak through this view. A malformed/poisoned request
+ * missing a `requestId`/`sessionId` still returns a (degraded, empty-
+ * string-id) view rather than throwing — the executor is responsible for
+ * discarding entries that don't resolve to a real target.
+ */
+export function pendingQuestionView(raw: unknown): PendingQuestionView {
+  if (raw === null || typeof raw !== "object") {
+    return { requestId: "", sessionId: "", questions: [] };
+  }
+  const r = raw as RawPendingQuestionView;
+  const rawQuestions = Array.isArray(r.questions) ? r.questions : [];
+  return {
+    requestId: str(r.requestId) ?? "",
+    sessionId: str(r.sessionId) ?? "",
+    questions: rawQuestions
+      .map(toSubquestionView)
+      .filter((q): q is PendingSubquestionView => q !== undefined),
+  };
+}

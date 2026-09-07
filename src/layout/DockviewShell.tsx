@@ -17,8 +17,29 @@ import { DockviewReact, type DockviewReadyEvent } from "dockview-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./dockview-theme.css";
 import type { WorkspaceManifest } from "../detect/manifest";
+import type { SessionToolAuditPayload } from "../ide/commands";
+import {
+  type ResolvedProject,
+  type ResolvedSession,
+  type SessionToolDeps,
+  registerDiscoveryContextTools,
+  registerDispatchTool,
+  registerQuestionTools,
+  registerTranscriptTool,
+} from "../ide/executor";
+import { type FocusController, createFocusController } from "../ide/focus";
 import { auditStore } from "../panels/audit-log";
 import { PromptBar } from "../promptbar";
+import {
+  answerQuestion,
+  createDispatchMessageId,
+  dispatch,
+  messages,
+  questions,
+  roster,
+  snapshot,
+  toDispatchArgs,
+} from "../server/bus";
 import { type OpencodeClient, createOpencodeClient } from "../server/client";
 import { type Demux, createDemux } from "../server/demux";
 import { startReconcilePoller } from "../server/reconcile-poller";
@@ -42,6 +63,12 @@ export interface DockviewShellProps {
    * tabs seeded per project with a detected interface. Absent/empty →
    * universal panels only. */
   manifest?: WorkspaceManifest;
+}
+
+interface LiveParamInjectionApi {
+  panels: DockviewApi["panels"];
+  onDidAddPanel: DockviewApi["onDidAddPanel"];
+  onDidLayoutFromJSON: DockviewApi["onDidLayoutFromJSON"];
 }
 
 interface LiveWorkspace {
@@ -175,6 +202,124 @@ export function connectActiveDirectorySse(
   };
 }
 
+/** Prunes the controller's active session if the store no longer has it
+ * for its owning directory — fires on every store change (session-store
+ * notifies on both `applyEvent`'s `session.deleted` and `reconcile()`'s
+ * prune loop). Only clears when the store's session list for that
+ * directory is NON-EMPTY and excludes the id — an empty/unloaded
+ * directory (no reconcile has completed for it yet) must NOT be treated
+ * as "deleted", or a fresh session dispatched into a not-yet-reconciled
+ * directory would get its active session wiped out from under it before
+ * the store even has a chance to catch up. `getSessions` returning `[]`
+ * for a directory that legitimately has zero sessions (empty project) is
+ * indistinguishable from "not yet loaded" with this store's API — an
+ * accepted (documented) tradeoff: worst case, a genuinely-empty
+ * directory's active session survives one extra dispatch attempt if it's
+ * deleted mid-session, which the dispatch path's own existence check
+ * already independently guards against. Delegates the actual clear to
+ * `FocusController.clearSessionIfCurrent`, which is itself a no-op if
+ * the pruned session was already superseded by a newer selection.
+ * Exported for direct testing without mounting the component. */
+export function pruneStaleActiveSession(
+  focus: FocusController,
+  context: BusContext | undefined,
+  store: SessionStore,
+): void {
+  const current = focus.getActiveContext();
+  if (current.sessionId === undefined || current.project === undefined) {
+    return;
+  }
+  const owner = context?.roster.projects.find(
+    (p) => p.name === current.project,
+  );
+  if (!owner) return;
+  const sessionsInDirectory = store.getSessions(owner.expandedPath);
+  if (sessionsInDirectory.length === 0) return;
+  const stillExists = sessionsInDirectory.some(
+    (s) => s.id === current.sessionId,
+  );
+  if (!stillExists) {
+    focus.clearSessionIfCurrent(current.sessionId, owner.expandedPath);
+  }
+}
+
+/** Builds the `SessionToolDeps` bag the MCP bridge routes discovery/
+ * context/focus session-tool requests against — the single place that
+ * wires `context`/`live`/`focus`/`auditStore` into the shape
+ * `runSessionTool` expects. Exported (pure, no React) so tests can
+ * exercise the exact production wiring without mounting a component or a
+ * DOM renderer. Returns `undefined` when `context`/`live` aren't ready
+ * yet (workspace not connected) — the bridge treats that as
+ * `sessionTools` being absent (`unavailable`/`not_sent`), never a crash. */
+export function buildSessionToolDeps(
+  context: BusContext | undefined,
+  live: LiveWorkspace | undefined,
+  focus: FocusController,
+  recordAudit: (event: SessionToolAuditPayload) => void,
+): SessionToolDeps | undefined {
+  if (!context || !live) return undefined;
+  return {
+    context,
+    store: live.store,
+    bus: {
+      roster,
+      snapshot,
+      toDispatchArgs,
+      createDispatchMessageId,
+      // `dispatch`'s real parameter type is a `project`-XOR-`sessionId`
+      // discriminated union; `SessionToolDispatchArgs` collapses both to
+      // optional since the executor always constructs the value via
+      // `toDispatchArgs` first (which re-imposes the real shape) before
+      // ever calling `dispatch` — this executor never calls `dispatch`
+      // with a raw, unvalidated object.
+      dispatch: (args, opts) =>
+        dispatch(args as Parameters<typeof dispatch>[0], opts),
+      messages,
+      // Same discriminated-union-to-both-optional bridge as `dispatch`
+      // above — `questions()`'s real parameter is `project`-XOR-`sessionId`;
+      // the executor always constructs it with exactly one set, proven by
+      // target resolution before `ide_list_pending_questions` ever calls
+      // through this facade field.
+      questions: (target, opts) =>
+        questions(target as Parameters<typeof questions>[0], opts),
+      answerQuestion,
+    },
+    refreshProject: (project: ResolvedProject) =>
+      reconcileProject(live.client, live.store, project.expandedPath),
+    focus: {
+      getActiveContext: () => focus.getActiveContext(),
+      selectProject: (project: ResolvedProject) =>
+        focus.selectProject({
+          name: project.name,
+          directory: project.expandedPath,
+        }),
+      selectSession: (session: ResolvedSession) => {
+        const owner = context.roster.projects.find(
+          (p) => p.name === session.project,
+        );
+        if (!owner) return;
+        focus.selectSession({
+          id: session.id,
+          project: session.project,
+          directory: owner.expandedPath,
+        });
+      },
+      onDispatched: (session: ResolvedSession) => {
+        const owner = context.roster.projects.find(
+          (p) => p.name === session.project,
+        );
+        if (!owner) return;
+        focus.selectSession({
+          id: session.id,
+          project: session.project,
+          directory: owner.expandedPath,
+        });
+      },
+    },
+    audit: recordAudit,
+  };
+}
+
 /** Seeds a placeholder tab (placeholder-grade — the real Storybook
  * panel is a follow-up) for every project with a detected `storybook`
  * interface. Projects with no detected interfaces add nothing. */
@@ -237,7 +382,9 @@ interface LiveParamContext {
 function liveParamsForPanel(
   panelType: string,
   ctx: LiveParamContext,
+  existingParams: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  const directory = existingParams.directory ?? ctx.directory;
   switch (panelType) {
     case "roster":
       return {
@@ -249,7 +396,7 @@ function liveParamsForPanel(
     case "sessions":
       return {
         store: ctx.live?.store,
-        directory: ctx.directory,
+        directory,
         onSelectSession: ctx.callbacks.onSelectSession,
       };
     case "transcript":
@@ -262,7 +409,7 @@ function liveParamsForPanel(
         client: ctx.live?.client,
         demux: ctx.live?.demux,
         store: ctx.live?.store,
-        directory: ctx.directory,
+        directory,
         reconnectNonce: ctx.reconnectNonce,
       };
     case "terminal":
@@ -276,25 +423,16 @@ function liveParamsForPanel(
 function seedDefaultLayout(
   adapter: DockviewAdapter,
   context: BusContext | undefined,
-  live: LiveWorkspace | undefined,
   manifest: WorkspaceManifest | undefined,
-  onSelectProject: (name: string) => void,
-  onSelectSession: (sessionId: string) => void,
 ): void {
   const firstProject = context?.roster.projects[0];
-  const liveCtx: LiveParamContext = {
-    context,
-    live,
-    directory: firstProject?.expandedPath,
-    callbacks: { onSelectProject, onSelectSession },
-  };
 
   executeCommand(
     {
       type: "open_panel",
       panelId: "roster",
       panelType: "roster",
-      params: liveParamsForPanel("roster", liveCtx),
+      params: {},
     },
     adapter,
   );
@@ -305,7 +443,7 @@ function seedDefaultLayout(
       panelType: "sessions",
       referencePanelId: "roster",
       direction: "right",
-      params: liveParamsForPanel("sessions", liveCtx),
+      params: {},
     },
     adapter,
   );
@@ -316,7 +454,7 @@ function seedDefaultLayout(
       panelType: "transcript",
       referencePanelId: "sessions",
       direction: "right",
-      params: liveParamsForPanel("transcript", liveCtx),
+      params: {},
     },
     adapter,
   );
@@ -350,27 +488,35 @@ function seedDefaultLayout(
   seedDetectedPanels(adapter, manifest);
 }
 
-/** Re-injects live services into panels restored from a persisted layout.
- * `saveLayout` strips live/sensitive params (see persistence.ts), so a
- * `set_layout`-restored panel mounts with no client/demux/store/context —
- * dockview mounts panels SYNCHRONOUSLY during `set_layout`, before this can
- * run, so there's a brief window where e.g. TranscriptPanel sees no `demux`
- * (or, for pre-fix stale localStorage, a dead `{}`). TranscriptPanel's
- * `typeof demux.subscribe === "function"` guard covers that window; this
- * then triggers a re-render via `updateParameters`, merging live services
- * in WITHOUT clobbering the persisted plain-data params (directory,
- * sessionID, cwd) already present on the panel. */
-function reinjectLiveParams(api: DockviewApi, liveCtx: LiveParamContext): void {
-  for (const panel of api.panels) {
-    // seedDefaultLayout keys the well-known live-service panels by a fixed
-    // id (roster/sessions/transcript/terminal) — that id doubles as the
-    // panel-type signal here, matching liveParamsForPanel's switch. Any
-    // other panel (placeholders, detected-interface tabs) has no live
-    // services to re-inject.
-    const liveParams = liveParamsForPanel(panel.id, liveCtx);
-    if (Object.keys(liveParams).length === 0) continue;
-    panel.api.updateParameters({ ...panel.params, ...liveParams });
-  }
+/** Injects current live services into registered live panel types as panels
+ * are created. Plain serialized params remain authoritative. */
+export function registerLiveParamInjection(
+  api: LiveParamInjectionApi,
+  getLiveCtx: () => LiveParamContext,
+): { dispose(): void } {
+  const inject = (panel: (typeof api.panels)[number]): void => {
+    const existingParams = (panel.params ?? {}) as Record<string, unknown>;
+    const liveParams = liveParamsForPanel(
+      panel.api.component,
+      getLiveCtx(),
+      existingParams,
+    );
+    if (Object.keys(liveParams).length === 0) return;
+    panel.api.updateParameters({ ...existingParams, ...liveParams });
+  };
+
+  const added = api.onDidAddPanel(inject);
+  const restored = api.onDidLayoutFromJSON(() => {
+    for (const panel of api.panels) inject(panel);
+  });
+  for (const panel of api.panels) inject(panel);
+
+  return {
+    dispose() {
+      added.dispose();
+      restored.dispose();
+    },
+  };
 }
 
 export function DockviewShell({
@@ -381,21 +527,62 @@ export function DockviewShell({
   const adapterRef = useRef<DockviewAdapter | undefined>(undefined);
   const bridgeRef = useRef<LayoutBridge | undefined>(undefined);
   const apiRef = useRef<DockviewApi | undefined>(undefined);
+  const liveParamRegistrationRef = useRef<{ dispose(): void } | undefined>(
+    undefined,
+  );
+  const activeDirectoryRef = useRef<string | undefined>(undefined);
+  const reconnectNonceRef = useRef(0);
   // The single active-directory SSE controller (see
   // `connectActiveDirectorySse`) — populated by the effect below, read by
-  // handleSelectProject/handleSelectSession/handleDispatched to switch the
-  // live stream to whichever directory the operator is now looking at.
+  // the focus controller's seams to switch the live stream to whichever
+  // directory the operator is now looking at.
   const activeSseRef = useRef<ActiveDirectorySseHandle | undefined>(undefined);
 
   // Single source of truth for "the session currently shown in the
-  // transcript" (bug 210b/d): updated by handleSelectSession AND
-  // handleDispatched, read by PromptBar (dispatch continues it as a
-  // follow-up when it belongs to the resolved target project) and passed
-  // to both the transcript and sessions panels so their sessionID/
-  // activeSessionId params can never drift apart.
+  // transcript": SET EXCLUSIVELY by the focus controller's
+  // `updateActiveSession` seam (below) — never assigned directly from a UI
+  // handler or dispatch callback, so there is exactly one rule (the
+  // controller's own selectProject/selectSession logic) for when this
+  // clears vs. preserves vs. updates. Read by PromptBar (dispatch
+  // continues it as a follow-up when it belongs to the resolved target
+  // project) and passed to both the transcript and sessions panels so
+  // their sessionID/activeSessionId params can never drift apart.
   const [activeSession, setActiveSession] = useState<
     { sessionId: string; directory: string } | undefined
   >(undefined);
+
+  // Focus controller (see `../ide/focus.ts`) — the SINGLE implementation
+  // both UI click handlers and MCP (`SessionToolDeps.focus`) call, so
+  // "what happens when a project/session is focused" can never drift
+  // between the two entry points. Built once via a ref-guarded
+  // constructor (not per-render) so `SessionToolDeps.focus`'s methods are
+  // stable references across re-renders; its seams close over
+  // `apiRef`/`activeSseRef`, which are refs (not state) precisely so this
+  // controller never goes stale — reading `.current` at call time always
+  // sees whatever adapter/SSE handle is live, without the controller
+  // itself needing to be rebuilt. `updateActiveSession` is wired directly
+  // to React's `setActiveSession` here — the ONLY place `activeSession`
+  // state is ever set.
+  const focusRef = useRef<FocusController | undefined>(undefined);
+  if (!focusRef.current) {
+    focusRef.current = createFocusController({
+      updateTranscriptParams: (params) => {
+        apiRef.current?.getPanel("transcript")?.api.updateParameters(params);
+      },
+      updateSessionsParams: (params) => {
+        apiRef.current?.getPanel("sessions")?.api.updateParameters(params);
+      },
+      updateRosterParams: (params) => {
+        apiRef.current?.getPanel("roster")?.api.updateParameters(params);
+      },
+      setActiveDirectory: (directory) => {
+        activeDirectoryRef.current = directory;
+        activeSseRef.current?.setActiveDirectory(directory);
+      },
+      updateActiveSession: setActiveSession,
+    });
+  }
+  const focus = focusRef.current;
 
   // Synchronous (not effect-populated) live workspace: seedDefaultLayout
   // runs inside onReady, which can fire before a `useEffect` creating this
@@ -423,31 +610,71 @@ export function DockviewShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspacePath]);
 
+  // Refs mirroring `context`/`live` at their current render value — read
+  // by the bridge's `sessionTools` getter (below) at REQUEST time, not
+  // capture time, so an MCP request answered long after the bridge effect
+  // first ran still sees whatever context/live is current, never a
+  // stale closure from the render that mounted the bridge.
+  const contextRef = useRef(context);
+  contextRef.current = context;
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const liveParamCallbacksRef = useRef<LiveParamContext["callbacks"]>({
+    onSelectProject: () => {},
+    onSelectSession: () => {},
+  });
+
   // Mount the ide_* MCP bridge once, torn down on unmount. Any
   // relayed request runs `executeCommand` against whatever adapter is
   // current at call time (adapterRef survives across onReady re-invocation).
+  // `sessionTools` closes over `context`/`live`/`focus` via refs/the
+  // stable `focus` controller, never a stale snapshot: `getActiveContext`
+  // and the two `select*` callbacks read `contextRef.current`/`focus`
+  // (a stable ref-backed object, not per-render state) at CALL time, so a
+  // request answered long after this effect first ran still sees whatever
+  // context/store is current.
   useEffect(() => {
-    const bridge = connectLayoutBridge({
-      get panels() {
-        return adapterRef.current?.panels ?? [];
+    // Explicit, idempotent — never a module-import/render-time side
+    // effect. Safe under React StrictMode's double-invoke and repeated
+    // mounts/HMR: registering an already-registered tool name is a no-op.
+    registerDiscoveryContextTools();
+    registerDispatchTool();
+    registerTranscriptTool();
+    registerQuestionTools();
+    const bridge = connectLayoutBridge(
+      {
+        get panels() {
+          return adapterRef.current?.panels ?? [];
+        },
+        get activePanel() {
+          return adapterRef.current?.activePanel;
+        },
+        addPanel: (spec) => adapterRef.current?.addPanel(spec),
+        removePanel: (id) => adapterRef.current?.removePanel(id),
+        movePanel: (spec) => adapterRef.current?.movePanel(spec),
+        focus: (id) => adapterRef.current?.focus(id),
+        toJSON: () => adapterRef.current?.toJSON() ?? {},
+        fromJSON: (layout) => adapterRef.current?.fromJSON(layout),
+        hasPanel: (id) => adapterRef.current?.hasPanel(id) ?? false,
       },
-      get activePanel() {
-        return adapterRef.current?.activePanel;
+      {
+        getSessionTools: () =>
+          buildSessionToolDeps(
+            contextRef.current,
+            liveRef.current,
+            focus,
+            (event) => auditStore.recordSessionToolEvent(event),
+          ),
       },
-      addPanel: (spec) => adapterRef.current?.addPanel(spec),
-      removePanel: (id) => adapterRef.current?.removePanel(id),
-      movePanel: (spec) => adapterRef.current?.movePanel(spec),
-      focus: (id) => adapterRef.current?.focus(id),
-      toJSON: () => adapterRef.current?.toJSON() ?? {},
-      fromJSON: (layout) => adapterRef.current?.fromJSON(layout),
-      hasPanel: (id) => adapterRef.current?.hasPanel(id) ?? false,
-    });
+    );
     bridgeRef.current = bridge;
     return () => {
       bridge.close();
       bridgeRef.current = undefined;
+      liveParamRegistrationRef.current?.dispose();
+      liveParamRegistrationRef.current = undefined;
     };
-  }, []);
+  }, [focus]);
 
   // The poller + single active-directory SSE stream: creation AND teardown
   // live in this ONE effect, so React.StrictMode's mount→cleanup→mount is
@@ -478,6 +705,7 @@ export function DockviewShell({
         // recovering any message-part deltas missed during this
         // teardown/reopen.
         nonce += 1;
+        reconnectNonceRef.current = nonce;
         apiRef.current
           ?.getPanel("transcript")
           ?.api.updateParameters({ reconnectNonce: nonce });
@@ -515,113 +743,85 @@ export function DockviewShell({
   // (layer 1) already independently guards against.
   useEffect(() => {
     if (!live) return;
-    return live.store.subscribe(() => {
-      setActiveSession((current) => {
-        if (!current) return current;
-        const sessionsInDirectory = live.store.getSessions(current.directory);
-        if (sessionsInDirectory.length === 0) return current;
-        const stillExists = sessionsInDirectory.some(
-          (s) => s.id === current.sessionId,
-        );
-        return stillExists ? current : undefined;
-      });
-    });
-  }, [live]);
+    return live.store.subscribe(() =>
+      pruneStaleActiveSession(focus, context, live.store),
+    );
+  }, [live, context, focus]);
 
-  // Roster row click re-scopes the sessions panel to that
-  // project's directory via dockview-core's updateParameters — the same
-  // primitive handleDispatched already uses for the transcript panel.
-  // No-op if the project name isn't found in the roster (stale click).
+  // Roster row click resolves the clicked name against the live roster
+  // then calls the SAME focus controller MCP's `ide_select_project`
+  // calls — one behavior, two entry points. No-op if the name isn't
+  // found in the roster (stale click, unknown/removed project).
   const handleSelectProject = useCallback(
     (name: string) => {
       const project = context?.roster.projects.find((p) => p.name === name);
       if (!project) return;
-      apiRef.current
-        ?.getPanel("sessions")
-        ?.api.updateParameters({ directory: project.expandedPath });
-      // Issue 3 fix: mirror the newly-selected project onto the roster
-      // panel's `activeDirectory` so its row gets the active highlight —
-      // selecting a project in the roster is itself an "activation" even
-      // before any session in it is picked.
-      apiRef.current
-        ?.getPanel("roster")
-        ?.api.updateParameters({ activeDirectory: project.expandedPath });
-      // Switch the one live SSE stream to the newly-selected project so
-      // its transcript/session events stream immediately.
-      activeSseRef.current?.setActiveDirectory(project.expandedPath);
+      focus.selectProject({
+        name: project.name,
+        directory: project.expandedPath,
+      });
     },
-    [context],
+    [context, focus],
   );
 
-  // Sessions row click points the transcript panel at that
-  // session, mirroring handleDispatched's pattern exactly.
-  // Also mark the selected session active on the sessions panel
-  // (drives the selected-row highlight) alongside pointing the transcript
-  // panel at it — one place updates both so they can never drift.
-  //
-  // The sessions panel is already scoped to a directory (its own
+  // Sessions row click resolves the clicked session against the live
+  // store then calls the SAME focus controller MCP's `ide_select_session`
+  // calls. The sessions panel is already scoped to a directory (its own
   // `directory` param — see SessionsPanel), so the session the operator
-  // just clicked necessarily belongs to that directory. Look it up from
-  // the sessions panel's current params rather than threading a second
-  // argument through every SessionsPanel call site.
-  const handleSelectSession = useCallback((sessionId: string) => {
-    apiRef.current
-      ?.getPanel("transcript")
-      ?.api.updateParameters({ sessionID: sessionId });
-    apiRef.current
-      ?.getPanel("sessions")
-      ?.api.updateParameters({ activeSessionId: sessionId });
-    const sessionsDirectory = (
-      apiRef.current?.getPanel("sessions")?.params as
-        | { directory?: string }
-        | undefined
-    )?.directory;
-    if (sessionsDirectory) {
-      activeSseRef.current?.setActiveDirectory(sessionsDirectory);
-      // Bug 210b/d: lift the selection into the single active-session
-      // source so the NEXT dispatch continues it (PromptBar) and the
-      // sessions/transcript highlight can never diverge from what the
-      // transcript is showing.
-      setActiveSession({ sessionId, directory: sessionsDirectory });
-      // Issue 3 fix: keep the roster row highlight in lockstep with the
-      // session that's now driving the transcript.
-      apiRef.current
-        ?.getPanel("roster")
-        ?.api.updateParameters({ activeDirectory: sessionsDirectory });
-    }
-  }, []);
+  // just clicked necessarily belongs to that directory; looked up from
+  // the store rather than trusting the panel's own params for the
+  // project name. No-op if the session isn't found in the store (stale
+  // click, session deleted since the panel last rendered).
+  const handleSelectSession = useCallback(
+    (sessionId: string) => {
+      const stored = live?.store.getSession(sessionId);
+      if (!stored?.directory) return;
+      const owner = context?.roster.projects.find(
+        (p) => p.expandedPath === stored.directory,
+      );
+      if (!owner) return;
+      focus.selectSession({
+        id: sessionId,
+        project: owner.name,
+        directory: stored.directory,
+      });
+    },
+    [context, live, focus],
+  );
+
+  liveParamCallbacksRef.current = {
+    onSelectProject: handleSelectProject,
+    onSelectSession: handleSelectSession,
+  };
 
   const handleReady = useCallback(
     (event: DockviewReadyEvent) => {
       const adapter = createDockviewAdapter(event.api);
       adapterRef.current = adapter;
 
+      liveParamRegistrationRef.current?.dispose();
+      liveParamRegistrationRef.current = registerLiveParamInjection(
+        event.api,
+        () => {
+          const directory =
+            activeDirectoryRef.current ??
+            contextRef.current?.roster.projects[0]?.expandedPath;
+          return {
+            context: contextRef.current,
+            live: liveRef.current,
+            directory,
+            activeDirectory: directory,
+            reconnectNonce: reconnectNonceRef.current,
+            callbacks: liveParamCallbacksRef.current,
+          };
+        },
+      );
+
       const saved = loadLayout(workspacePath);
       if (saved) {
         executeCommand({ type: "set_layout", layout: saved }, adapter);
-        // Restored panels have no live services (stripped on save, see
-        // persistence.ts) — re-inject them now. dockview already mounted
-        // the panels synchronously above; TranscriptPanel's demux guard
-        // covers the gap between mount and this re-injection.
-        reinjectLiveParams(event.api, {
-          context,
-          live,
-          directory: context?.roster.projects[0]?.expandedPath,
-          activeDirectory: activeSession?.directory,
-          callbacks: {
-            onSelectProject: handleSelectProject,
-            onSelectSession: handleSelectSession,
-          },
-        });
       } else {
-        seedDefaultLayout(
-          adapter,
-          context,
-          live,
-          manifest,
-          handleSelectProject,
-          handleSelectSession,
-        );
+        seedDefaultLayout(adapter, context, manifest);
       }
 
       // Coarse panel-set signature (sorted ids), used to de-dupe/throttle
@@ -649,15 +849,7 @@ export function DockviewShell({
         auditStore.recordNativeLayoutChange(`panels=${panelIds.length}`);
       });
     },
-    [
-      workspacePath,
-      context,
-      manifest,
-      live,
-      handleSelectProject,
-      handleSelectSession,
-      activeSession,
-    ],
+    [workspacePath, context, manifest],
   );
 
   // Transcript auto-select on dispatch. Minimal wiring — no new panel-id
@@ -680,27 +872,39 @@ export function DockviewShell({
   // selected-row highlight.
   const handleDispatched = useCallback(
     (sessionId: string, directory: string) => {
+      const owner = context?.roster.projects.find(
+        (p) => p.expandedPath === directory,
+      );
+      // Same focus controller UI clicks and MCP use — so
+      // `ide_get_active_context` follows a dispatched session exactly as
+      // it follows a click. Falls back to updating panels directly (no
+      // context/session-highlight change) if the dispatched-to directory
+      // doesn't resolve to a current roster project — should not happen
+      // in practice (dispatch only targets resolved roster projects) but
+      // keeps this path defensive rather than throwing on a stale/race
+      // condition.
+      if (owner) {
+        focus.selectSession({ id: sessionId, project: owner.name, directory });
+        return;
+      }
+      // Defensive fallback only (should not happen in practice — dispatch
+      // only targets resolved roster projects): update panels directly
+      // since the focus controller can't be told a project name it can't
+      // resolve, and still set `activeSession` so PromptBar/highlight
+      // state doesn't silently fall behind.
       apiRef.current
         ?.getPanel("transcript")
         ?.api.updateParameters({ directory, sessionID: sessionId });
       apiRef.current
         ?.getPanel("sessions")
         ?.api.updateParameters({ directory, activeSessionId: sessionId });
-      // Issue 3 fix: the roster regression — the dispatched-to project's
-      // row must highlight, mirroring the sessions-view active-row
-      // treatment. Lost when `activeSession` state was introduced without
-      // being threaded to the roster panel's params.
       apiRef.current
         ?.getPanel("roster")
         ?.api.updateParameters({ activeDirectory: directory });
-      // The exact case the hybrid model exists for: a cross-project
-      // dispatch (e.g. @dashboard) must stream live immediately, not wait
-      // for the next poll tick — switch the one active SSE stream to the
-      // dispatched-to directory.
       activeSseRef.current?.setActiveDirectory(directory);
       setActiveSession({ sessionId, directory });
     },
-    [],
+    [context, focus],
   );
 
   return (

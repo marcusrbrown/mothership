@@ -14,7 +14,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
  * `StreamableHTTPServerTransport` wraps IncomingMessage/ServerResponse and
  * doesn't fit Bun's Web-standard Request/Response server model).
  */
-import type { Server, ServerWebSocket } from "bun";
+import type { ServerWebSocket } from "bun";
 import { isAuthorized, unauthorizedResponse } from "./http-auth";
 import { createIdeMcpServer } from "./mcp-server";
 import type { WsBridge } from "./ws-bridge";
@@ -53,7 +53,10 @@ export function createFetchHandler(
 ) {
   return async function fetch(
     req: Request,
-    srv: { upgrade: (req: Request, opts: { data: WsData }) => boolean },
+    srv: {
+      upgrade: (req: Request, opts: { data: WsData }) => boolean;
+      timeout?: (req: Request, seconds: number) => void;
+    },
   ): Promise<Response> {
     const url = new URL(req.url);
 
@@ -77,6 +80,10 @@ export function createFetchHandler(
       if (!isAuthorized(req.headers.get("authorization"), token)) {
         return unauthorizedResponse();
       }
+      // Bun's default request idle timeout is shorter than the inner
+      // authenticated webview operation budget. Extend only this already-
+      // authorized MCP request; unauthenticated routes retain the default.
+      srv.timeout?.(req, 55);
       const { handleRequest, dispose } = await makeMcpRequestHandler();
       let response: Response;
       try {
@@ -116,8 +123,9 @@ export function createFetchHandler(
       });
     }
 
-    // Uniform empty 401 for every other unauthenticated path — no
-    // information leakage about which paths exist (plan requirement).
+    // Every other path gets the exact same empty 401 as an unauthed /ws,
+    // /health, or /mcp request — an unauthenticated caller can never tell
+    // which paths exist from the response shape/status alone.
     return unauthorizedResponse();
   };
 }
@@ -153,7 +161,7 @@ const makeMcpRequestHandler: McpRequestHandlerFactory = async () => {
 
 const handleFetch = createFetchHandler(token, bridge, makeMcpRequestHandler);
 
-const server: Server = Bun.serve<WsData, Record<string, never>>({
+const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   fetch: handleFetch as never,

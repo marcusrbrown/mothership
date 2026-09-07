@@ -4,15 +4,35 @@
  *
  * Run with: bun spikes/0c-server-connectivity/probe.ts
  *
- * Probes the running `opencode serve` instance at 127.0.0.1:4096 (no LLM,
- * no mutation beyond a throwaway probe session) and prints a structured
- * report used to write docs/solutions/2026-07-04-spike-0c-server-connectivity.md.
+ * Probes a running `opencode serve` instance (no LLM; no mutation beyond a
+ * throwaway probe session unless an explicitly disposable blocked-session
+ * fixture is supplied) and prints a structured report used to maintain the
+ * server-contract solution note.
  */
 
 const BASE_URL = process.env.OPENCODE_BASE_URL ?? 'http://127.0.0.1:4096'
 const TAURI_ORIGIN = 'tauri://localhost'
 const PHASE_TIMEOUT_MS = 90_000
 const SSE_OBSERVE_MS = 25_000
+// Basic-auth password for a running managed server, e.g. from
+// `~/.local/state/space-bus/<id>/discovery.json` — required on password-protected
+// deployments (the tracer's "unauthenticated loopback" assumption does not hold
+// for every managed-server instance observed in this environment).
+const AUTH_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD
+const AUTH_USERNAME = process.env.OPENCODE_SERVER_USERNAME ?? 'opencode'
+const PROBE_DIRECTORY = process.env.OPENCODE_PROBE_DIRECTORY
+
+function authHeaders(): Record<string, string> {
+  if (!AUTH_PASSWORD) return {}
+  const token = Buffer.from(`${AUTH_USERNAME}:${AUTH_PASSWORD}`).toString('base64')
+  return {Authorization: `Basic ${token}`}
+}
+
+function withDirectory(path: string): string {
+  if (!PROBE_DIRECTORY) return path
+  const sep = path.includes('?') ? '&' : '?'
+  return `${path}${sep}directory=${encodeURIComponent(PROBE_DIRECTORY)}`
+}
 
 // Endpoints the plan claims exist per "Verified Server Facts" + earlier HANDOFF assumptions.
 const EXPECTED_ENDPOINTS: {method: string; path: string}[] = [
@@ -44,11 +64,20 @@ function jlog(label: string, value: unknown) {
 async function probeOpenApi() {
   section('PHASE 1: GET /doc — OpenAPI endpoint inventory')
   try {
-    const res = await fetch(`${BASE_URL}/doc`)
+    const res = await fetch(`${BASE_URL}/doc`, {headers: authHeaders()})
     if (!res.ok) {
       console.log(`BLOCKED: /doc returned ${res.status} ${res.statusText}`)
+      if (res.status === 401) {
+        console.log(
+          '  Server requires Basic auth. Set OPENCODE_SERVER_PASSWORD (and optionally ' +
+            'OPENCODE_SERVER_USERNAME, default "opencode") from the managed-server discovery file, e.g.:\n' +
+            '  ~/.local/state/space-bus/<id>/discovery.json -> {"password": "..."}',
+        )
+      }
       return
     }
+    const info = (await res.clone().json()) as {info?: {title?: string; version?: string}}
+    console.log('OpenAPI info:', JSON.stringify(info.info))
     const doc = (await res.json()) as {paths?: Record<string, Record<string, unknown>>}
     const paths = doc.paths ?? {}
     const normalizedPaths = Object.keys(paths).map(p => p.replace(/\{[^}]+\}/g, '{id}'))
@@ -95,7 +124,7 @@ async function probeCors() {
 
     const getReq = await fetch(`${BASE_URL}/session/status`, {
       method: 'GET',
-      headers: {Origin: TAURI_ORIGIN},
+      headers: {Origin: TAURI_ORIGIN, ...authHeaders()},
     })
     console.log(`\nGET /session/status (with Origin header) -> ${getReq.status}`)
     jlog('  Access-Control-Allow-Origin', getReq.headers.get('access-control-allow-origin'))
@@ -122,7 +151,7 @@ async function readSse(
     signal: AbortSignal
   },
 ): Promise<void> {
-  const res = await fetch(url, {signal: opts.signal, headers: {Accept: 'text/event-stream'}})
+  const res = await fetch(url, {signal: opts.signal, headers: {Accept: 'text/event-stream', ...authHeaders()}})
   if (!res.ok || !res.body) {
     throw new Error(`SSE connect failed: ${res.status} ${res.statusText}`)
   }
@@ -247,9 +276,9 @@ async function probeQuestionEvents() {
   let sessionId: string | undefined
   try {
     console.log('Creating probe session...')
-    const createRes = await fetch(`${BASE_URL}/session`, {
+    const createRes = await fetch(withDirectory(`${BASE_URL}/session`), {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', ...authHeaders()},
       body: JSON.stringify({title: 'spike-0c-question-probe'}),
     })
     if (!createRes.ok) {
@@ -267,9 +296,9 @@ async function probeQuestionEvents() {
     }
 
     console.log(`\nSending prompt_async to session ${sessionId}...`)
-    const promptRes = await fetch(`${BASE_URL}/session/${sessionId}/prompt_async`, {
+    const promptRes = await fetch(withDirectory(`${BASE_URL}/session/${sessionId}/prompt_async`), {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', ...authHeaders()},
       body: JSON.stringify({
         parts: [
           {
@@ -296,7 +325,7 @@ async function probeQuestionEvents() {
   let questionPayload: unknown
   while (Date.now() < deadline) {
     try {
-      const qRes = await fetch(`${BASE_URL}/question`)
+      const qRes = await fetch(withDirectory(`${BASE_URL}/question`), {headers: authHeaders()})
       if (qRes.ok) {
         const questions = (await qRes.json()) as unknown[]
         if (Array.isArray(questions) && questions.length > 0) {
@@ -318,9 +347,9 @@ async function probeQuestionEvents() {
   } else {
     console.log(`\nReplying to question ${questionId} with {answers: [["Yes"]]}...`)
     try {
-      const replyRes = await fetch(`${BASE_URL}/question/${questionId}/reply`, {
+      const replyRes = await fetch(withDirectory(`${BASE_URL}/question/${questionId}/reply`), {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json', ...authHeaders()},
         body: JSON.stringify({answers: [['Yes']]}),
       })
       console.log(`POST /question/${questionId}/reply -> ${replyRes.status}`)
@@ -340,6 +369,230 @@ async function probeQuestionEvents() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5: message ordering/pagination, session lookup scoping, and
+// space-bus v0.13.1 blocked-session dispatch behavior.
+//
+// Requires OPENCODE_PROBE_DIRECTORY pointing at a project directory with at
+// least one existing session (an unauthenticated/no-directory server has no
+// meaningful roster to characterize this against). Requires
+// OPENCODE_PROBE_SESSION_ID naming a known-existing session in that
+// directory to avoid mutating/creating fixtures during the probe.
+// ---------------------------------------------------------------------------
+async function probeContractCharacterization() {
+  section('PHASE 5: message ordering, pagination, session-lookup scoping')
+
+  if (!PROBE_DIRECTORY) {
+    console.log(
+      'BLOCKED: OPENCODE_PROBE_DIRECTORY not set. Cannot characterize per-directory ' +
+        'message/session routes without a known roster project directory.',
+    )
+    return
+  }
+  const sessionId = process.env.OPENCODE_PROBE_SESSION_ID
+  if (!sessionId) {
+    console.log(
+      'BLOCKED: OPENCODE_PROBE_SESSION_ID not set. Cannot characterize message ordering/' +
+        'pagination or single-session lookup without an existing session id to read ' +
+        '(read-only; this probe never creates one to avoid session-list pollution).',
+    )
+    return
+  }
+
+  console.log(`Using directory=${PROBE_DIRECTORY}, sessionID=${sessionId}`)
+
+  // --- limited-message ordering ---
+  try {
+    const limitedRes = await fetch(withDirectory(`${BASE_URL}/session/${sessionId}/message?limit=3`), {
+      headers: authHeaders(),
+    })
+    console.log(`\nGET /session/${sessionId}/message?limit=3 -> ${limitedRes.status}`)
+    if (limitedRes.ok) {
+      const limited = (await limitedRes.json()) as {info?: {id?: string; time?: {created?: number}}}[]
+      console.log(
+        '  Returned message ids (in response order):',
+        limited.map(m => m.info?.id),
+      )
+      const fullRes = await fetch(withDirectory(`${BASE_URL}/session/${sessionId}/message`), {
+        headers: authHeaders(),
+      })
+      if (fullRes.ok) {
+        const full = (await fullRes.json()) as {info?: {id?: string}}[]
+        console.log(`  Unlimited response count: ${full.length}`)
+        const tail = full.slice(-limited.length).map(m => m.info?.id)
+        const head = full.slice(0, limited.length).map(m => m.info?.id)
+        const limitedIds = limited.map(m => m.info?.id)
+        console.log('  limit=N result matches tail (newest-last) of unlimited:', JSON.stringify(limitedIds) === JSON.stringify(tail))
+        console.log('  limit=N result matches head (oldest-first) of unlimited:', JSON.stringify(limitedIds) === JSON.stringify(head))
+      }
+    } else {
+      console.log('  BLOCKED:', await limitedRes.text().catch(() => '(unreadable)'))
+    }
+  } catch (err) {
+    console.log('BLOCKED (message ordering):', err instanceof Error ? err.message : String(err))
+  }
+
+  // --- pagination fields: `before` is advertised in GET /doc but observed
+  // to reject every value (message id, garbage, with/without limit) with a
+  // generic 400 {"_tag":"BadRequest"} on this deployed version. Characterize
+  // rather than assume; do not build MCP schemas around it until this
+  // passes on a verified build. ---
+  try {
+    const beforeRes = await fetch(
+      withDirectory(`${BASE_URL}/session/${sessionId}/message?limit=2&before=msg_doesnotexist00000000000000`),
+      {headers: authHeaders()},
+    )
+    console.log(`\nGET .../message?limit=2&before=<id> -> ${beforeRes.status}`)
+    console.log('  Body:', await beforeRes.text().catch(() => '(unreadable)'))
+    console.log(
+      '  NOTE: `before` is present in the OpenAPI spec for this route but was observed to',
+      'return 400 BadRequest for every value tried during characterization (valid message',
+      'id, garbage string, with and without `limit`). Treat cursor pagination as',
+      'UNSUPPORTED on this deployed version; do not expose `before`/cursor params in the',
+      'planned ide_get_transcript MCP schema.',
+    )
+  } catch (err) {
+    console.log('BLOCKED (pagination probe):', err instanceof Error ? err.message : String(err))
+  }
+
+  // --- single-session lookup scoping: does GET /session/:id require/scope
+  // by ?directory=, or is it a global lookup across all managed directories? ---
+  try {
+    const noDirRes = await fetch(`${BASE_URL}/session/${sessionId}`, {headers: authHeaders()})
+    console.log(`\nGET /session/${sessionId} (no directory param) -> ${noDirRes.status}`)
+    const wrongDirRes = await fetch(`${BASE_URL}/session/${sessionId}?directory=%2Ftmp%2Fprobe-nonexistent-dir`, {
+      headers: authHeaders(),
+    })
+    console.log(`GET /session/${sessionId}?directory=/tmp/probe-nonexistent-dir -> ${wrongDirRes.status}`)
+    if (noDirRes.ok && wrongDirRes.ok) {
+      const a = (await noDirRes.json()) as {directory?: string}
+      const b = (await wrongDirRes.json()) as {directory?: string}
+      console.log('  Same session returned regardless of directory query value:', a.directory === b.directory)
+      console.log(
+        '  NOTE: GET /session/:id appears to resolve globally by session id, not scoped by',
+        'the `directory` query param — the param may only steer where a POST/mutation',
+        'lands. Session ownership for ide_* tools must still be proven against',
+        'roster/reconciled state before use, not inferred from this response',
+        'alone.',
+      )
+    }
+  } catch (err) {
+    console.log('BLOCKED (session lookup scoping):', err instanceof Error ? err.message : String(err))
+  }
+
+  // --- question list/reply requestID shape sanity re-check (no live
+  // question expected outside probeQuestionEvents(); this only confirms the
+  // route accepts directory-scoped listing) ---
+  try {
+    const qRes = await fetch(withDirectory(`${BASE_URL}/question`), {headers: authHeaders()})
+    console.log(`\nGET /question?directory=... -> ${qRes.status}`)
+    if (qRes.ok) {
+      const questions = (await qRes.json()) as {id?: string; sessionID?: string}[]
+      console.log(`  Pending questions currently returned: ${questions.length}`)
+    }
+  } catch (err) {
+    console.log('BLOCKED (question list re-check):', err instanceof Error ? err.message : String(err))
+  }
+
+  console.log(
+    '\nNOTE: an SSE envelope id (evt_...) cannot be substituted for a question requestID',
+    '(que_...) on POST /question/{requestID}/reply — the path param has an explicit',
+    '`^que` pattern in GET /doc\'s OpenAPI schema, and the request would 400/404 before',
+    'reaching question-matching logic. This is a static schema fact, not something this',
+    'probe re-verifies live to avoid crafting a real (rejected) mutation against a live',
+    'question.',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: space-bus v0.13.1 blocked-session dispatch characterization.
+//
+// Pins the CURRENT implicit question-reply branch in `steerSession()`
+// (node_modules/@fro.bot/space-bus/dist/core.js): a follow-up `dispatch()`
+// call against a session with a pending question silently replies to that
+// question with the follow-up prompt text as a single-string answer
+// (`{answers: [[message]]}`), returning `{mode: "question-reply"}"` instead
+// of sending a new prompt. This is the exact behavior a
+// pending-question-safe dispatch option must be able to opt OUT of for
+// `ide_dispatch_prompt`, while preserving it as the v0.13.1-compatible
+// default for existing callers.
+//
+// This phase requires a session with an ACTUALLY pending question — set
+// OPENCODE_PROBE_BLOCKED_SESSION_ID to exercise it against a live one, or
+// rely on Phase 4's probeQuestionEvents() session/questionId if it produced
+// one in this same run. Otherwise this phase documents the source-verified
+// behavior without a fresh live call (never fabricated: the code excerpt is
+// read directly from the installed package below).
+// ---------------------------------------------------------------------------
+async function probeDispatchBlockedSession() {
+  section('PHASE 6: space-bus v0.13.1 dispatch() vs a session with a pending question')
+
+  try {
+    // The package's `exports` map exposes `./core` (compiled JS via the
+    // `import` condition) but not a raw `./dist/core.js` subpath, so resolve
+    // through the public entry point rather than reaching into `dist/`.
+    const corePublicPath = Bun.resolveSync('@fro.bot/space-bus/core', process.cwd())
+    const coreSrc = await Bun.file(corePublicPath).text()
+    const start = coreSrc.indexOf('function steerSession(')
+    if (start === -1) {
+      console.log('BLOCKED: steerSession() not found in installed @fro.bot/space-bus — package shape changed.')
+    } else {
+      const end = coreSrc.indexOf('\n}\n', start) + 3
+      console.log(`Installed package: ${corePublicPath}`)
+      console.log('Verbatim steerSession() from the installed 0.13.1 build:\n')
+      console.log(coreSrc.slice(start, end))
+      console.log(
+        '\nPINNED BEHAVIOR: when a follow-up dispatch() targets a session with a pending',
+        'question (GET /question filtered by sessionID), steerSession() replies to that',
+        'question with `{answers: [[message]]}` — the follow-up prompt text becomes the',
+        'ENTIRE first-option answer string, silently. It returns `{ok: true, mode:',
+        '"question-reply"}`, never sending the text as a new prompt. A backward-compatible',
+        'opt-out is needed so `ide_dispatch_prompt` can request a typed blocked',
+        'result with NO mutation (no reply sent, no prompt sent) instead of this implicit',
+        'reinterpretation, while existing v0.13.1 callers keep today\'s default.',
+      )
+    }
+  } catch (err) {
+    console.log('BLOCKED (dispatch source characterization):', err instanceof Error ? err.message : String(err))
+  }
+
+  const blockedSessionId = process.env.OPENCODE_PROBE_BLOCKED_SESSION_ID
+  if (!blockedSessionId || !PROBE_DIRECTORY) {
+    console.log(
+      '\nLIVE ROUND TRIP SKIPPED: set OPENCODE_PROBE_BLOCKED_SESSION_ID (and',
+      'OPENCODE_PROBE_DIRECTORY) to a session that currently has a pending question to',
+      'observe a real dispatch()-against-blocked-session call end to end. No such fixture',
+      'was available in this probe run — do not treat the source excerpt above as a',
+      'substitute for a live round trip; re-run this phase once a',
+      'blocked-session fixture is available.',
+    )
+    return
+  }
+
+  try {
+    const {dispatch} = (await import('@fro.bot/space-bus/core')) as {
+      dispatch: (
+        args: {sessionId: string; prompt: string},
+        opts: {context: unknown},
+      ) => Promise<unknown>
+    }
+    const context = {
+      roster: {
+        server: {baseUrl: BASE_URL},
+        projects: [{name: 'probe', path: PROBE_DIRECTORY, description: '', expandedPath: PROBE_DIRECTORY, exists: true}],
+      },
+      credentials: AUTH_PASSWORD ? {username: AUTH_USERNAME, password: AUTH_PASSWORD} : undefined,
+    }
+    const result = await dispatch(
+      {sessionId: blockedSessionId, prompt: 'characterization probe follow-up (should reply to pending question, not steer)'},
+      {context},
+    )
+    console.log('Live dispatch() result against blocked session:', JSON.stringify(result))
+  } catch (err) {
+    console.log('BLOCKED (live dispatch round trip):', err instanceof Error ? err.message : String(err))
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -348,6 +601,8 @@ async function main() {
   await probeCors()
   await probeSse()
   await probeQuestionEvents()
+  await probeContractCharacterization()
+  await probeDispatchBlockedSession()
 
   section('RESTART RESILIENCE')
   console.log(

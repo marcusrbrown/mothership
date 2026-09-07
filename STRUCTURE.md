@@ -49,15 +49,15 @@ Config: `tauri.conf.json` (base), `tauri.dev.conf.json`, `tauri.release.conf.jso
 
 ## `sidecar/ide-server/`
 
-Bun MCP server exposing the 8 `ide_*` tools (`open_panel`, `close_panel`, `split`, `focus`, `move_panel`, `set_layout` as mutations; `list_panels`, `get_layout` as reads) over MCP streamable-HTTP, relaying through a WS bridge into the webview's `executeCommand`.
+Bun MCP server exposing 17 `ide_*` tools over MCP streamable-HTTP, relaying every call through a WS bridge into the webview's `executeCommand`/`runSessionTool` — 8 layout tools (`open_panel`, `close_panel`, `split`, `focus`, `move_panel`, `set_layout` as mutations; `list_panels`, `get_layout` as reads) plus 9 session tools (`list_projects`, `list_sessions`, `get_active_context`, `select_project`, `select_session`, `dispatch_prompt`, `get_transcript`, `list_pending_questions`, `answer_question`). Nothing under this directory reaches a filesystem, subprocess, or space-bus client directly — see `ARCHITECTURE.md`'s "Sidecar security boundary" and its UI↔MCP capability map.
 
 | Path | Purpose |
 | --- | --- |
 | `index.ts` | Entry point: HTTP server, PID liveness check, shutdown handling. |
 | `http-auth.ts` | Bearer token extraction/verification for the HTTP surface. |
-| `ws-bridge.ts` | WS connection to the webview, first-frame auth, request/response correlation. |
-| `mcp-server.ts` | MCP tool definitions, relays each call over the WS bridge. |
-| `redact.ts` | Allowlist serializers (`listPanelsView`, `layoutStructureView`) — the only shapes read tools may return. |
+| `ws-bridge.ts` | WS connection to the webview, first-frame auth, request/response correlation, single-client generation replacement. |
+| `mcp-server.ts` | All 17 MCP tool definitions (schemas, capability annotations, descriptions), relays each call over the WS bridge; owns error-code/message normalization and delivery-class sanitization for every domain. |
+| `redact.ts` | Layout-domain allowlist serializers (`listPanelsView`, `layoutStructureView`) — the only shapes the two layout read tools may return. Session-domain disclosure boundaries (`ProjectView`, `SessionRowView`, transcript/question views) live in `src/ide/views.ts`, enforced in the webview before a response ever reaches this sidecar. |
 
 ## Testing convention
 

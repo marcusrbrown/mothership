@@ -1,8 +1,27 @@
 import { describe, expect, test } from "bun:test";
+import {
+  __resetDiscoveryContextRegistrationForTests,
+  __resetDispatchToolRegistrationForTests,
+  __resetSessionToolsForTests,
+  registerDiscoveryContextTools,
+  registerDispatchTool,
+  runSessionTool,
+} from "../ide/executor";
+import {
+  type ActiveSession,
+  type FocusSeams,
+  createFocusController,
+} from "../ide/focus";
 import { createDemux } from "../server/demux";
 import { createSessionStore } from "../server/session-store";
 import type { BusContext, SseEvent } from "../server/types";
-import { connectActiveDirectorySse, reconcileProject } from "./DockviewShell";
+import {
+  buildSessionToolDeps,
+  connectActiveDirectorySse,
+  pruneStaleActiveSession,
+  reconcileProject,
+  registerLiveParamInjection,
+} from "./DockviewShell";
 
 /**
  * Regression coverage for the connection-cap hang (fixed after commit
@@ -329,5 +348,907 @@ describe("reconcileProject", () => {
     await reconcileProject(succeedingClient, store, "/repo/a");
 
     expect(store.getSessions("/repo/a").map((s) => s.id)).toEqual(["ses_2"]);
+  });
+});
+
+describe("buildSessionToolDeps + discovery/context/focus tool wiring", () => {
+  function fakeRosterClient(recordedDirectories: string[]) {
+    return {
+      async listSessions(directory: string) {
+        recordedDirectories.push(directory);
+        return { ok: true as const, value: [] };
+      },
+      async getSessionStatus() {
+        return { ok: true as const, value: {} };
+      },
+      async listQuestions() {
+        return { ok: true as const, value: [] };
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: minimal test double
+    } as any;
+  }
+
+  function makeFocus(): {
+    focus: ReturnType<typeof createFocusController>;
+    calls: {
+      transcript: unknown[];
+      sessions: unknown[];
+      roster: unknown[];
+      sse: string[];
+      activeSession: ActiveSession[];
+    };
+  } {
+    const calls = {
+      transcript: [] as unknown[],
+      sessions: [] as unknown[],
+      roster: [] as unknown[],
+      sse: [] as string[],
+      activeSession: [] as ActiveSession[],
+    };
+    const seams: FocusSeams = {
+      updateTranscriptParams: (p) => calls.transcript.push(p),
+      updateSessionsParams: (p) => calls.sessions.push(p),
+      updateRosterParams: (p) => calls.roster.push(p),
+      setActiveDirectory: (d) => calls.sse.push(d),
+      // Mirrors DockviewShell's real wiring: `updateActiveSession` bound
+      // to React `setActiveSession` — here, a plain recorder standing in
+      // for what PromptBar's `activeSession` prop would receive.
+      updateActiveSession: (s) => calls.activeSession.push(s),
+    };
+    return { focus: createFocusController(seams), calls };
+  }
+
+  function ctx(): BusContext {
+    return context([{ name: "dashboard", expandedPath: "/repo/dashboard" }]);
+  }
+
+  test("returns undefined when context or live is missing (bridge treats this as sessionTools unavailable)", () => {
+    const { focus } = makeFocus();
+    expect(
+      buildSessionToolDeps(undefined, undefined, focus, () => {}),
+    ).toBeUndefined();
+  });
+
+  test("ide_list_projects routes through the bridge/executor to a real roster() call instead of unknown_tool/unavailable", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const { focus } = makeFocus();
+    const store = createSessionStore();
+    const client = fakeRosterClient([]);
+    const deps = buildSessionToolDeps(
+      ctx(),
+      { client, demux: createDemux(), store },
+      focus,
+      () => {},
+    );
+    expect(deps).toBeDefined();
+    if (!deps) throw new Error("expected deps");
+
+    const result = await runSessionTool(
+      "ide_list_projects",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    // roster()/snapshot() hit real fetch and fail in this test environment
+    // (no live server) — the point of this test is that routing reaches
+    // the executor at all (a real upstream_error, not unknown_tool or
+    // sessionTools-unavailable), proving production wiring is connected.
+    expect(result.ok === false || result.ok === true).toBe(true);
+    if (!result.ok) {
+      expect(result.error.code).not.toBe("unknown_tool");
+    }
+  });
+
+  test("ide_list_sessions refreshes via the live reconcile seam before reading the store", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const { focus } = makeFocus();
+    const store = createSessionStore();
+    const recordedDirectories: string[] = [];
+    const client = fakeRosterClient(recordedDirectories);
+    const deps = buildSessionToolDeps(
+      ctx(),
+      { client, demux: createDemux(), store },
+      focus,
+      () => {},
+    );
+    if (!deps) throw new Error("expected deps");
+
+    await runSessionTool(
+      "ide_list_sessions",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(recordedDirectories).toContain("/repo/dashboard");
+  });
+
+  test("ide_select_project (MCP) and a UI project selection produce identical panel/SSE/context effects", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const { focus: mcpFocus, calls: mcpCalls } = makeFocus();
+    const store = createSessionStore();
+    const deps = buildSessionToolDeps(
+      ctx(),
+      { client: fakeRosterClient([]), demux: createDemux(), store },
+      mcpFocus,
+      () => {},
+    );
+    if (!deps) throw new Error("expected deps");
+    await runSessionTool(
+      "ide_select_project",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+
+    const { focus: uiFocus, calls: uiCalls } = makeFocus();
+    uiFocus.selectProject({ name: "dashboard", directory: "/repo/dashboard" });
+
+    expect(mcpCalls.sessions).toEqual(uiCalls.sessions);
+    expect(mcpCalls.roster).toEqual(uiCalls.roster);
+    expect(mcpCalls.sse).toEqual(uiCalls.sse);
+    expect(mcpFocus.getActiveContext()).toEqual(uiFocus.getActiveContext());
+    expect(mcpCalls.activeSession[mcpCalls.activeSession.length - 1]).toEqual(
+      uiCalls.activeSession[uiCalls.activeSession.length - 1],
+    );
+  });
+
+  test("MCP and UI project selection clear a previously active session identically when switching directories", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const twoProjectCtx = context([
+      { name: "dashboard", expandedPath: "/repo/dashboard" },
+      { name: "other", expandedPath: "/repo/other" },
+    ]);
+
+    const { focus: mcpFocus, calls: mcpCalls } = makeFocus();
+    mcpFocus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    const deps = buildSessionToolDeps(
+      twoProjectCtx,
+      {
+        client: fakeRosterClient([]),
+        demux: createDemux(),
+        store: createSessionStore(),
+      },
+      mcpFocus,
+      () => {},
+    );
+    if (!deps) throw new Error("expected deps");
+    await runSessionTool(
+      "ide_select_project",
+      { project: "other" },
+      deps,
+      "mcp_tool",
+    );
+
+    const { focus: uiFocus, calls: uiCalls } = makeFocus();
+    uiFocus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    uiFocus.selectProject({ name: "other", directory: "/repo/other" });
+
+    expect(
+      mcpCalls.activeSession[mcpCalls.activeSession.length - 1],
+    ).toBeUndefined();
+    expect(
+      uiCalls.activeSession[uiCalls.activeSession.length - 1],
+    ).toBeUndefined();
+  });
+
+  test("MCP and UI project selection preserve a previously active session identically when re-selecting the same directory", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const { focus: mcpFocus, calls: mcpCalls } = makeFocus();
+    mcpFocus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    const deps = buildSessionToolDeps(
+      ctx(),
+      {
+        client: fakeRosterClient([]),
+        demux: createDemux(),
+        store: createSessionStore(),
+      },
+      mcpFocus,
+      () => {},
+    );
+    if (!deps) throw new Error("expected deps");
+    await runSessionTool(
+      "ide_select_project",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(mcpCalls.activeSession[mcpCalls.activeSession.length - 1]).toEqual({
+      sessionId: "ses_1",
+      directory: "/repo/dashboard",
+    });
+  });
+
+  test("rapid sequential focus calls (as MCP or UI could interleave) resolve last-write-wins for the active session", () => {
+    const { focus, calls } = makeFocus();
+    focus.selectProject({ name: "dashboard", directory: "/repo/dashboard" });
+    focus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    focus.selectProject({ name: "other", directory: "/repo/other" });
+    focus.selectSession({
+      id: "ses_2",
+      project: "other",
+      directory: "/repo/other",
+    });
+
+    expect(calls.activeSession[calls.activeSession.length - 1]).toEqual({
+      sessionId: "ses_2",
+      directory: "/repo/other",
+    });
+  });
+
+  test("ide_select_session (MCP) and a UI session selection produce identical panel/SSE/context effects", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_1", directory: "/repo/dashboard" },
+    });
+
+    const { focus: mcpFocus, calls: mcpCalls } = makeFocus();
+    const deps = buildSessionToolDeps(
+      ctx(),
+      { client: fakeRosterClient([]), demux: createDemux(), store },
+      mcpFocus,
+      () => {},
+    );
+    if (!deps) throw new Error("expected deps");
+    await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_1" },
+      deps,
+      "mcp_tool",
+    );
+
+    const { focus: uiFocus, calls: uiCalls } = makeFocus();
+    uiFocus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+
+    expect(mcpCalls.transcript).toEqual(uiCalls.transcript);
+    expect(mcpCalls.sessions).toEqual(uiCalls.sessions);
+    expect(mcpCalls.roster).toEqual(uiCalls.roster);
+    expect(mcpCalls.sse).toEqual(uiCalls.sse);
+    expect(mcpFocus.getActiveContext()).toEqual(uiFocus.getActiveContext());
+    // The exact PromptBar-facing value: MCP select_session must produce
+    // the identical activeSession update a UI click would.
+    expect(mcpCalls.activeSession[mcpCalls.activeSession.length - 1]).toEqual({
+      sessionId: "ses_1",
+      directory: "/repo/dashboard",
+    });
+    expect(mcpCalls.activeSession[mcpCalls.activeSession.length - 1]).toEqual(
+      uiCalls.activeSession[uiCalls.activeSession.length - 1],
+    );
+  });
+
+  test("switching to a different project clears a stale active session (via ide_select_project)", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const twoProjectCtx = context([
+      { name: "dashboard", expandedPath: "/repo/dashboard" },
+      { name: "other", expandedPath: "/repo/other" },
+    ]);
+    const store = createSessionStore();
+    const { focus, calls } = makeFocus();
+    const deps = buildSessionToolDeps(
+      twoProjectCtx,
+      { client: fakeRosterClient([]), demux: createDemux(), store },
+      focus,
+      () => {},
+    );
+    if (!deps) throw new Error("expected deps");
+
+    await runSessionTool(
+      "ide_select_session",
+      { sessionId: "ses_none" },
+      deps,
+      "mcp_tool",
+    ); // no-op: unknown session, proves no mutation on unknown targets
+    expect(calls.transcript).toHaveLength(0);
+
+    focus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    await runSessionTool(
+      "ide_select_project",
+      { project: "other" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(focus.getActiveContext()).toEqual({ project: "other" });
+  });
+
+  test("focus.getActiveContext follows a dispatched/selected session through the SAME controller MCP reads", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_new", directory: "/repo/dashboard" },
+    });
+    const { focus } = makeFocus();
+    const deps = buildSessionToolDeps(
+      ctx(),
+      { client: fakeRosterClient([]), demux: createDemux(), store },
+      focus,
+      () => {},
+    );
+    if (!deps) throw new Error("expected deps");
+
+    // Simulates handleDispatched calling the same controller.
+    focus.selectSession({
+      id: "ses_new",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+
+    const result = await runSessionTool(
+      "ide_get_active_context",
+      {},
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.data).toEqual({
+      project: "dashboard",
+      sessionId: "ses_new",
+    });
+  });
+
+  test("a dispatched session sets the active session via the same controller (dispatch = selectSession)", () => {
+    const { focus, calls } = makeFocus();
+    // handleDispatched's happy path resolves the dispatched-to directory
+    // against the roster then calls focus.selectSession — identical to a
+    // UI click or MCP select_session, no separate setActiveSession rule.
+    focus.selectSession({
+      id: "ses_dispatched",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    expect(calls.activeSession[calls.activeSession.length - 1]).toEqual({
+      sessionId: "ses_dispatched",
+      directory: "/repo/dashboard",
+    });
+  });
+
+  test("an unknown/stale UI project name performs no mutation", () => {
+    const { focus, calls } = makeFocus();
+    const roster = ctx().roster.projects;
+    const found = roster.find((p) => p.name === "does-not-exist");
+    if (found) {
+      focus.selectProject({ name: found.name, directory: found.expandedPath });
+    }
+    expect(calls.roster).toHaveLength(0);
+    expect(calls.sse).toHaveLength(0);
+  });
+
+  test("the audit callback receives a minimized event with no path/directory content", async () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    registerDiscoveryContextTools();
+
+    const events: unknown[] = [];
+    const { focus } = makeFocus();
+    const store = createSessionStore();
+    const deps = buildSessionToolDeps(
+      ctx(),
+      { client: fakeRosterClient([]), demux: createDemux(), store },
+      focus,
+      (event) => events.push(event),
+    );
+    if (!deps) throw new Error("expected deps");
+
+    await runSessionTool(
+      "ide_select_project",
+      { project: "dashboard" },
+      deps,
+      "mcp_tool",
+    );
+
+    expect(events).toHaveLength(1);
+    const serialized = JSON.stringify(events[0]);
+    expect(serialized).not.toContain("/repo/dashboard");
+  });
+});
+
+describe("live-panel injection", () => {
+  function liveCtx(directory = "/repo/current") {
+    return {
+      context: context([{ name: "current", expandedPath: directory }]),
+      live: {
+        client: fakeClient([]),
+        demux: createDemux(),
+        store: createSessionStore(),
+      },
+      directory,
+      callbacks: {
+        onSelectProject: () => {},
+        onSelectSession: () => {},
+      },
+    };
+  }
+
+  function panel(
+    id: string,
+    params: Record<string, unknown> = {},
+    component = id,
+  ) {
+    const updates: Record<string, unknown>[] = [];
+    return {
+      id,
+      params,
+      updates,
+      api: {
+        component,
+        updateParameters(next: Record<string, unknown>) {
+          updates.push(next);
+        },
+      },
+    };
+  }
+
+  function api(initialPanels: ReturnType<typeof panel>[] = []) {
+    let added: ((value: ReturnType<typeof panel>) => void) | undefined;
+    let restored: (() => void) | undefined;
+    let disposed = false;
+    let restoreDisposed = false;
+    return {
+      panels: initialPanels,
+      onDidAddPanel(listener: (value: ReturnType<typeof panel>) => void) {
+        added = listener;
+        return {
+          dispose() {
+            disposed = true;
+            added = undefined;
+          },
+        };
+      },
+      onDidLayoutFromJSON(listener: () => void) {
+        restored = listener;
+        return {
+          dispose() {
+            restoreDisposed = true;
+            restored = undefined;
+          },
+        };
+      },
+      fireAdded(value: ReturnType<typeof panel>) {
+        this.panels.push(value);
+        added?.(value);
+      },
+      fireRestored() {
+        restored?.();
+      },
+      isDisposed() {
+        return { added: disposed, restored: restoreDisposed };
+      },
+    };
+  }
+
+  test("injects live services into a custom-ID roster added after startup", () => {
+    const initial = panel("roster");
+    const dynamic = panel("roster-from-mcp", {}, "roster");
+    const dock = api([initial]);
+
+    registerLiveParamInjection(dock as never, () => liveCtx());
+    dock.fireAdded(dynamic);
+
+    expect(initial.updates).toHaveLength(1);
+    expect(dynamic.updates).toHaveLength(1);
+    expect(dynamic.updates[0]).toMatchObject({
+      context: expect.any(Object),
+      store: expect.any(Object),
+    });
+  });
+
+  test("fresh seed panels receive the current directory through the shared hook", () => {
+    const sessions = panel("sessions", {}, "sessions");
+    const dock = api([sessions]);
+
+    registerLiveParamInjection(dock as never, () => liveCtx());
+
+    expect(sessions.updates[0]).toMatchObject({
+      directory: "/repo/current",
+      store: expect.any(Object),
+    });
+  });
+
+  test("injects restored custom-ID transcript while preserving serialized targets", () => {
+    const saved = panel(
+      "saved-transcript",
+      {
+        directory: "/repo/saved",
+        sessionID: "ses_saved",
+        cwd: "/repo/saved",
+      },
+      "transcript",
+    );
+
+    const dock = api([saved]);
+    registerLiveParamInjection(dock as never, () => liveCtx());
+
+    expect(saved.updates).toHaveLength(1);
+    expect(saved.updates[0]).toMatchObject({
+      client: expect.any(Object),
+      demux: expect.any(Object),
+      store: expect.any(Object),
+      directory: "/repo/saved",
+      sessionID: "ses_saved",
+      cwd: "/repo/saved",
+    });
+  });
+
+  test("injects replacement panels after Dockview restores JSON", () => {
+    const dock = api();
+    registerLiveParamInjection(dock as never, () => liveCtx());
+    const restored = panel(
+      "restored-sessions",
+      { directory: "/repo/saved", activeSessionId: "ses_saved" },
+      "sessions",
+    );
+    dock.panels.push(restored);
+
+    dock.fireRestored();
+
+    expect(restored.updates).toHaveLength(1);
+    expect(restored.updates[0]).toMatchObject({
+      store: expect.any(Object),
+      directory: "/repo/saved",
+      activeSessionId: "ses_saved",
+    });
+  });
+
+  test("uses the current context for late panels and disposes both listeners", () => {
+    const dock = api();
+    let current = liveCtx("/repo/first");
+    const registration = registerLiveParamInjection(
+      dock as never,
+      () => current,
+    );
+    current = liveCtx("/repo/selected");
+
+    const late = panel("late-sessions", {}, "sessions");
+    dock.fireAdded(late);
+
+    expect(late.updates).toHaveLength(1);
+    expect(late.updates[0]).toMatchObject({
+      directory: "/repo/selected",
+      store: current.live.store,
+    });
+
+    registration.dispose();
+    const afterDispose = panel("after-dispose", {}, "transcript");
+    dock.fireAdded(afterDispose);
+    dock.fireRestored();
+
+    expect(afterDispose.updates).toHaveLength(0);
+    expect(dock.isDisposed()).toEqual({ added: true, restored: true });
+  });
+
+  test("leaves unknown panel types untouched", () => {
+    const dock = api();
+    registerLiveParamInjection(dock as never, () => liveCtx());
+    const unknown = panel("storybook-custom", {}, "placeholder");
+    const terminal = panel("terminal", { cwd: "/repo/saved" }, "terminal");
+
+    dock.fireAdded(unknown);
+    dock.fireAdded(terminal);
+
+    expect(unknown.updates).toHaveLength(0);
+    expect(terminal.updates).toHaveLength(0);
+  });
+});
+
+describe("registerDispatchTool + buildSessionToolDeps dispatch wiring", () => {
+  function fakeRosterClient(recordedDirectories: string[]) {
+    return {
+      async listSessions(directory: string) {
+        recordedDirectories.push(directory);
+        return { ok: true as const, value: [] };
+      },
+      async getSessionStatus() {
+        return { ok: true as const, value: {} };
+      },
+      async listQuestions() {
+        return { ok: true as const, value: [] };
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: minimal test double
+    } as any;
+  }
+
+  function makeFocus(): {
+    focus: ReturnType<typeof createFocusController>;
+    calls: { activeSession: ActiveSession[] };
+  } {
+    const calls = { activeSession: [] as ActiveSession[] };
+    const seams: FocusSeams = {
+      updateTranscriptParams: () => {},
+      updateSessionsParams: () => {},
+      updateRosterParams: () => {},
+      setActiveDirectory: () => {},
+      updateActiveSession: (s) => calls.activeSession.push(s),
+    };
+    return { focus: createFocusController(seams), calls };
+  }
+
+  function ctx(): BusContext {
+    return context([{ name: "dashboard", expandedPath: "/repo/dashboard" }]);
+  }
+
+  test("registration is idempotent and coexists with discovery tool registration", () => {
+    __resetSessionToolsForTests();
+    __resetDiscoveryContextRegistrationForTests();
+    __resetDispatchToolRegistrationForTests();
+    registerDiscoveryContextTools();
+    registerDispatchTool();
+    expect(() => registerDispatchTool()).not.toThrow();
+    expect(() => registerDiscoveryContextTools()).not.toThrow();
+  });
+
+  test("ide_dispatch_prompt routes through the real facade wiring and focuses the resulting session via the same focus controller", async () => {
+    __resetSessionToolsForTests();
+    __resetDispatchToolRegistrationForTests();
+    registerDispatchTool();
+
+    const { focus, calls } = makeFocus();
+    const store = createSessionStore();
+    const deps = buildSessionToolDeps(
+      ctx(),
+      { client: fakeRosterClient([]), demux: createDemux(), store },
+      focus,
+      () => {},
+    );
+    expect(deps).toBeDefined();
+    if (!deps) throw new Error("expected deps");
+
+    // The real space-bus dispatch()/toDispatchArgs() reach out over
+    // fetch in this test environment with no live server — the point
+    // here is proving the wiring reaches the executor at all (a real
+    // upstream failure, never unknown_tool), and that the bus facade's
+    // `onPendingQuestion:"blocked"` hardcoding survives the real
+    // toDispatchArgs() validation.
+    const result = await runSessionTool(
+      "ide_dispatch_prompt",
+      { project: "dashboard", prompt: "hi" },
+      deps,
+      "mcp_tool",
+    );
+    expect(result.ok === false || result.ok === true).toBe(true);
+    if (!result.ok) {
+      expect(result.error.code).not.toBe("unknown_tool");
+    }
+    // No live confirmed dispatch in this environment, so no focus call
+    // is expected — this only proves the call reached the executor
+    // without throwing an unhandled exception.
+    void calls;
+  });
+});
+
+describe("pruneStaleActiveSession", () => {
+  function ctx(): BusContext {
+    return context([{ name: "dashboard", expandedPath: "/repo/dashboard" }]);
+  }
+
+  function makeFocus(): {
+    focus: ReturnType<typeof createFocusController>;
+    calls: {
+      transcript: unknown[];
+      sessions: unknown[];
+      roster: unknown[];
+      sse: string[];
+      activeSession: ActiveSession[];
+    };
+  } {
+    const calls = {
+      transcript: [] as unknown[],
+      sessions: [] as unknown[],
+      roster: [] as unknown[],
+      sse: [] as string[],
+      activeSession: [] as ActiveSession[],
+    };
+    const seams: FocusSeams = {
+      updateTranscriptParams: (p) => calls.transcript.push(p),
+      updateSessionsParams: (p) => calls.sessions.push(p),
+      updateRosterParams: (p) => calls.roster.push(p),
+      setActiveDirectory: (d) => calls.sse.push(d),
+      updateActiveSession: (s) => calls.activeSession.push(s),
+    };
+    return { focus: createFocusController(seams), calls };
+  }
+
+  test("happy path: a deleted session clears via the controller — PromptBar-facing value clears, project/directory context preserved", () => {
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_1", directory: "/repo/dashboard" },
+    });
+    // A second, surviving session keeps the directory's list non-empty
+    // after ses_1 is deleted — an empty list is treated as
+    // "not yet reconciled", not "confirmed empty" (see
+    // `pruneStaleActiveSession`'s doc comment).
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_other", directory: "/repo/dashboard" },
+    });
+    const { focus, calls } = makeFocus();
+    focus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    calls.activeSession.length = 0;
+    calls.transcript.length = 0;
+    calls.sessions.length = 0;
+
+    store.applyEvent({ type: "session.deleted", properties: { id: "ses_1" } });
+    pruneStaleActiveSession(focus, ctx(), store);
+
+    expect(calls.activeSession[calls.activeSession.length - 1]).toBeUndefined();
+    expect(focus.getActiveContext()).toEqual({ project: "dashboard" });
+    expect(calls.transcript[calls.transcript.length - 1]).toEqual({
+      directory: "/repo/dashboard",
+      sessionID: undefined,
+    });
+    expect(calls.sessions[calls.sessions.length - 1]).toEqual({
+      directory: "/repo/dashboard",
+      activeSessionId: undefined,
+    });
+  });
+
+  test("SSE/project stays after a prune — no directory switch, no roster mutation", () => {
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_1", directory: "/repo/dashboard" },
+    });
+    const { focus, calls } = makeFocus();
+    focus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    calls.sse.length = 0;
+    calls.roster.length = 0;
+
+    store.applyEvent({ type: "session.deleted", properties: { id: "ses_1" } });
+    pruneStaleActiveSession(focus, ctx(), store);
+
+    expect(calls.sse).toHaveLength(0);
+    expect(calls.roster).toHaveLength(0);
+  });
+
+  test("no-op: a stale notification for an older/non-current session does nothing", () => {
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_1", directory: "/repo/dashboard" },
+    });
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_2", directory: "/repo/dashboard" },
+    });
+    const { focus, calls } = makeFocus();
+    focus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    focus.selectSession({
+      id: "ses_2",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    calls.activeSession.length = 0;
+
+    // ses_1 (superseded) is deleted server-side; a store notification
+    // fires but must not touch the now-current ses_2.
+    store.applyEvent({ type: "session.deleted", properties: { id: "ses_1" } });
+    pruneStaleActiveSession(focus, ctx(), store);
+
+    expect(calls.activeSession).toHaveLength(0);
+    expect(focus.getActiveContext()).toEqual({
+      project: "dashboard",
+      sessionId: "ses_2",
+    });
+  });
+
+  test("no-op: nothing focused yet", () => {
+    const store = createSessionStore();
+    const { focus, calls } = makeFocus();
+    pruneStaleActiveSession(focus, ctx(), store);
+    expect(calls.activeSession).toHaveLength(0);
+  });
+
+  test("no-op: an empty/not-yet-reconciled directory never prunes a fresh session", () => {
+    const store = createSessionStore();
+    const { focus, calls } = makeFocus();
+    focus.selectSession({
+      id: "ses_fresh",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    calls.activeSession.length = 0;
+
+    pruneStaleActiveSession(focus, ctx(), store);
+
+    expect(calls.activeSession).toHaveLength(0);
+    expect(focus.getActiveContext()).toEqual({
+      project: "dashboard",
+      sessionId: "ses_fresh",
+    });
+  });
+
+  test("race: rapid select then prune-of-superseded-session remains last-state coherent", () => {
+    const store = createSessionStore();
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_1", directory: "/repo/dashboard" },
+    });
+    store.applyEvent({
+      type: "session.created",
+      properties: { id: "ses_2", directory: "/repo/dashboard" },
+    });
+    const { focus } = makeFocus();
+    focus.selectSession({
+      id: "ses_1",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    focus.selectSession({
+      id: "ses_2",
+      project: "dashboard",
+      directory: "/repo/dashboard",
+    });
+    store.applyEvent({ type: "session.deleted", properties: { id: "ses_1" } });
+    pruneStaleActiveSession(focus, ctx(), store);
+
+    expect(focus.getActiveContext()).toEqual({
+      project: "dashboard",
+      sessionId: "ses_2",
+    });
   });
 });

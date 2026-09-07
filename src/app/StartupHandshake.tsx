@@ -104,6 +104,7 @@ export async function isManagedWorkspace(
     const workspace = await loadWorkspace(workspaceDir, {
       readTextFile,
       homeDir: home,
+      pathExists,
     });
     return (
       workspace.kind === "workspace" &&
@@ -128,6 +129,7 @@ export async function connectServer(workspaceDir: string): Promise<
     const workspace = await loadWorkspace(workspaceDir, {
       readTextFile,
       homeDir: home,
+      pathExists,
     });
 
     if (workspace.kind === "error") {
