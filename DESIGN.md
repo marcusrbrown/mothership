@@ -34,4 +34,4 @@ Purposeful and fast (≤250ms), `prefers-reduced-motion` honored. `--ease-spring
 
 ## Quality gate
 
-`npx impeccable detect` runs over `src/` in CI (`.github/workflows/ci.yaml`, design-check job) and fails on any finding. Use `/impeccable shape` before building a new panel type, `/impeccable critique` / `audit` during a phase, `/impeccable polish` at phase gates. PRODUCT.md and this file are the context those commands read — keep them current instead of re-running `/impeccable init`.
+`npx impeccable@3.2.0 detect` (pinned) runs over `src/` in CI (`.github/workflows/ci.yaml`, design-check job) and fails on any finding. Use `/impeccable shape` before building a new panel type, `/impeccable critique` / `audit` during a phase, `/impeccable polish` at phase gates. PRODUCT.md and this file are the context those commands read — keep them current instead of re-running `/impeccable init`.

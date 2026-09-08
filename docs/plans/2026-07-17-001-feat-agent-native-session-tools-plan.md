@@ -1,10 +1,11 @@
 ---
 title: "feat: Add agent-native session tools"
 type: feat
-status: active
+status: completed
 date: 2026-07-17
 origin: docs/brainstorms/2026-07-05-product-identity-release-preparedness-requirements.md
 deepened: 2026-07-17
+closed: 2026-09-07
 ---
 
 # feat: Add agent-native session tools
@@ -600,7 +601,7 @@ flowchart TB
 
 **Verification:** The automated suite and live dogfood sequence prove the full agent-native surface, the security boundary is documented, and every UI/MCP parity row has evidence.
 
-**Implementation verification:** 1,061 tests, typecheck, lint, pinned Impeccable (`[]`), and diff-check pass. An actual LLM controller restricted to the 17 MCP tools created a new fixture, changed layout while it was running, read and answered its single-select question once, observed completion, and dispatched/read an explicit follow-up. Native-window evidence confirms custom-ID roster rendering, the selected fixture transcript, and MCP audit entries. Live checks also drove fixes for dynamic/restored panel context injection and request budgets: 30s per upstream API call, 45s for the relay, 55s for authenticated MCP HTTP requests, and 60s for the SDK. Authentication and non-replay behavior remain unchanged. Final review, commit, and push remain separately gated.
+**Implementation verification:** 1,061 tests, typecheck, lint, pinned Impeccable (`[]`), and diff-check pass. An actual LLM controller restricted to the 17 MCP tools created a new fixture, changed layout while it was running, read and answered its single-select question once, observed completion, and dispatched/read an explicit follow-up. Native-window evidence confirms custom-ID roster rendering, the selected fixture transcript, and MCP audit entries. Live checks also drove fixes for dynamic/restored panel context injection and request budgets: 30s per upstream API call, 45s for the relay, 55s for authenticated MCP HTTP requests, and 60s for the SDK. Authentication and non-replay behavior remain unchanged. Merged to `main` as PR #100 at commit `e083354` (2026-09-07T05:58:27Z) — review, commit, and push are complete. Non-blocking manual-probe and exit-status follow-ups noted in that PR's reviews were accepted as deferred local follow-up, not filed as new GitHub issues.
 
 ---
 

@@ -34,7 +34,7 @@ function withDirectory(path: string): string {
   return `${path}${sep}directory=${encodeURIComponent(PROBE_DIRECTORY)}`
 }
 
-// Endpoints the plan claims exist per "Verified Server Facts" + earlier HANDOFF assumptions.
+// Endpoints described in the plan's "Verified Server Facts" section.
 const EXPECTED_ENDPOINTS: {method: string; path: string}[] = [
   {method: 'post', path: '/session'},
   {method: 'post', path: '/session/{id}/prompt_async'},

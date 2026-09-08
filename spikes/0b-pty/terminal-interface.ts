@@ -1,4 +1,4 @@
-// Reversibility seam for U0.3 (see plan U1.4/HANDOFF): the xterm component
+// Reversibility seam for U0.3 (see plan U1.4): the xterm component
 // consumes ONLY this interface, never the Tauri APIs directly. Swapping the
 // backend (e.g. tauri-plugin-pty, a WebSocket bridge, a mock for tests)
 // means implementing this interface — nothing else changes.

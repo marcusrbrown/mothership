@@ -103,7 +103,7 @@ env:
     This single run does BOTH proactive oversight (detect and report) AND
     reactive autohealing (fix what is safe). Prioritize minimal, reversible
     changes. Read the canonical context first: AGENTS.md (invariants +
-    verification gates), README.md, and HANDOFF.md if present.
+    verification gates), README.md, ARCHITECTURE.md, and STRUCTURE.md.
 
     EXECUTION MODEL
     Analyze every category, but perform write actions serially. Never keep

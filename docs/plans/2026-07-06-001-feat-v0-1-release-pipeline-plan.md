@@ -9,6 +9,10 @@ deepened: 2026-07-06
 
 # feat: Build the v0.1 release pipeline
 
+## Status
+
+All 8 units are implemented and individually verified (sidecar packaging, CSP, Changesets, version workflow, release-critical repo settings automation, the signed/notarized release workflow, updater/checksum/provenance emission, and runbook/custody/checklist docs). The plan stays **active**, not completed: no release tag, draft release, or workflow run has been produced yet, so there is no operational evidence the end-to-end pipeline works against real Apple signing/notarization credentials. `docs/release/v0-1-checklist.md` remains fully unchecked and must stay that way until that operational proof exists — implementation completeness is not release-readiness.
+
 ## Overview
 
 This plan turns the release-blocking infrastructure slice into an executable path: packaged `ide_*` sidecar, strict Tauri CSP, Changesets-driven versioning, and a signed/notarized macOS release workflow with updater artifacts. It deliberately keeps Mothership as the local renderer/attacher; space-bus remains responsible for managed daemon supervision.

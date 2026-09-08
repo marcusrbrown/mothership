@@ -145,7 +145,7 @@ Mothership's identity has also been undersold internally. Managing OpenCode sess
 
 ### Resolve Before Planning
 
-- [Affects R10][User decision] Which permissive license for the open core — MIT or Apache-2.0? (Apache's patent grant is the usual open-core choice; org precedent is MIT.)
+- [Affects R10][User decision] ~~Which permissive license for the open core — MIT or Apache-2.0?~~ **Resolved:** MIT — see `LICENSE` in the repo root.
 - [Affects R10][User decision] Contributor-rights posture before external contributions accumulate — DCO, CLA, or neither. External contributions under a permissive license with no rights agreement make any later open-core line materially harder to draw.
 
 ### Deferred to Planning
@@ -153,9 +153,9 @@ Mothership's identity has also been undersold internally. Managing OpenCode sess
 - [Affects R4][Needs research] Trademark/domain/handle findings for "Mothership" and the go/adjust call.
 - [Affects R15][Technical] Updater feed shape and hosting (GitHub Releases asset vs static endpoint), and CI secrets handling for signing identities.
 - [Affects R17][Technical] Landing page stack and hosting.
-- [Affects R11][Technical] Which Fro Bot triggers to enable at v0.1 (review + mentions certain; schedule/dispatch scope to confirm), the workflow topology (which workflows exist; what runs on PRs vs comments vs schedule), and the secrets provisioning model (PAT, opencode auth/config).
+- [Affects R11][Technical] **Implemented:** Fro Bot triggers and workflow topology exist (`.github/workflows/fro-bot.yaml` — PR/comment/issue/schedule/dispatch) with a secrets provisioning model in place. Live, independently re-verified operational posture (trusted-author gating, no-secrets-on-fork handling) is separate and not re-confirmed here — see Reconciliation below.
 - [Affects R13][Technical] Settings-as-code ownership: which repo-admin surfaces (branch protection, required checks, merge strategy) are automatable from this repo, and what the update workflow needs.
-- [Affects R14][Technical] Changesets adaptation for a non-published desktop app: how version bumps map to Tauri bundle versioning and GitHub Releases with no npm publish step.
+- [Affects R14][Technical] **Implemented:** Changesets adaptation for a non-published desktop app — version bumps map to Tauri bundle versioning and GitHub Releases with no npm publish step (`docs/plans/2026-07-06-001-feat-v0-1-release-pipeline-plan.md`). Operational proof (an actual release run through the pipeline) is separate and still unverified — see Reconciliation below.
 
 ---
 
@@ -164,3 +164,16 @@ Mothership's identity has also been undersold internally. Managing OpenCode sess
 - Org-convention survey (this session): canonical reference files — `fro-bot/space-bus/.github/workflows/{ci,fro-bot,release,update-repo-settings}.yaml`, `.github/renovate.json5`, `.github/settings.yml`; `bfra-me/works` and `marcusrbrown/infra` equivalents for reusable Renovate/release patterns.
 - Market landscape (July 2026, this session): category validated by first-party manager surfaces (Cursor 3, Claude Code agent view, Codex app, Zed Parallel Agents); open-harness niche unheld (OpenCode web UI immature, community UIs churning); Terragon's shutdown as the indie-cloud cautionary tale; differentiation = agent-drivable layout via MCP, renderer-over-a-bus, multi-project workspace, no-embedded-LLM, auditable localhost posture; table-stakes gaps = diff review, worktree surfacing, attention routing, cost passthrough, remote access. Key refs: openai.com/index/introducing-the-codex-app, zed.dev/blog/parallel-agents, code.claude.com/docs/en/agent-view, opencode.ai/docs/web, conductor.build, orbitdock.dev, addyo.substack.com/p/death-of-the-ide.
 - Requirements contract for the tracer: `docs/brainstorms/2026-07-03-workspace-mission-control-requirements.md` (R1–R15 remain the app-behavior contract; this epic does not amend them).
+
+---
+
+## Reconciliation (2026-09-06)
+
+- **License (R10, outstanding question):** resolved MIT. `LICENSE` exists at the repo root; no CONTRIBUTING.md/SECURITY.md/issue-PR templates exist yet — R10's community-files requirement remains open.
+- **Contributor-rights posture (R10, outstanding question):** still unresolved — DCO vs. CLA vs. neither has not been decided. Treat as open.
+- **Reliability track (R16 dependency):** completed for its defined 6 units (`docs/plans/2026-07-05-001-fix-reliability-track-plan.md`) with a live-window verification pass. This is not the sustained daily-driver demonstration R16 itself calls for — R16's sustained-use acceptance remains open.
+- **Release pipeline (R14, R15):** implemented across all 8 units (`docs/plans/2026-07-06-001-feat-v0-1-release-pipeline-plan.md`) — Changesets, signed/notarized macOS workflow, updater metadata, checksums/provenance, repo-settings automation, runbook/custody docs. This is implementation-complete, not operationally certified: no tag, draft release, or workflow run exists yet, so AE2 ("pipeline produces a version bump, changelog, signed+notarized DMG, GitHub Release, and an updater feed the installed app accepts") has not been demonstrated live. `docs/release/v0-1-checklist.md` remains fully unchecked.
+- **Agent-native session tools:** a related, later-scoped plan (`docs/plans/2026-07-17-001-feat-agent-native-session-tools-plan.md`) extended the `ide_*` MCP surface from layout-only to a 17-tool layout+session surface and merged as PR #100 (`e083354`, 2026-09-07). This advances R1's "agent-native shell" trajectory beyond what this epic originally scoped, but it is a separate epic — not a substitute for this document's R6–R9 docs requirements, R11–R13 automation/security posture, or R17 public site, none of which have landed.
+- **R4 (naming diligence), R17 (product site), open-core commercial-line designation (Key Decisions), rebrand gate, and growth/positioning decisions:** all remain unresolved as originally scoped. No naming search, domain/handle audit, landing page, or commercial-line designation has happened.
+- **Scope clarity — v0.1 vs. vision:** R1's "agent-native shell" trajectory (design, ideate, experiment, build with agents) is the named future direction, not a v0.1 claim. The currently shipped surface is mission control (layout + session control over one OpenCode backend); planning/docs surfaces, in-app editing, and automation connectors are unbuilt roadmap items — see `PRODUCT.md` and the implementation plans in `docs/plans/`.
+- **Acceptance examples not demonstrated by generic PR-merge process:** AE1 (Fro Bot PR review/mention automation) and AE3 (v0.1 checklist blocking an unready release) both require R11 (Fro Bot wiring) and R16 (checklist-as-gate) respectively, neither of which is in place as a *gate* — `.github/workflows/fro-bot.yaml` exists with PR/comment/issue/schedule/dispatch triggers, but that is automation existing, not R11's full trusted-author/no-secrets-on-fork posture independently re-verified here. The generic act of PR #100 merging through normal review is not evidence toward AE1, AE2, AE3, or AE4 — those acceptance examples are about this epic's specific docs/release/positioning artifacts, none of which PR #100 touched.

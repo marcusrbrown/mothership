@@ -19,7 +19,7 @@ tags: [pty, portable-pty, xterm, tauri, webgl, spike-0b]
 ## Context
 
 Mothership needs terminals (R3) with the Rust core owning process lifecycle
-(R1). HANDOFF suggested trying `tauri-plugin-pty` first; research showed it is
+(R1). The `tauri-plugin-pty` wrapper was considered first; research showed it is
 a thin, early-stage wrapper over `portable-pty` (wezterm's PTY crate). Spike 0b
 validated going straight to the underlying crate (Marcus-confirmed decision).
 
