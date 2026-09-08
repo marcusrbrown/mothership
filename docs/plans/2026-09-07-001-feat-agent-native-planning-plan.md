@@ -96,51 +96,56 @@ No typed plan-unit, approval-grant, or verification contract was established in 
 {
   "schema_version": 2,
   "verdict": "extend",
-  "scope": "mothership repository (.)",
+  "scope": ".",
   "freshness": {
-    "vcs_reference": "e08335493c7f4f66300c5948d42d69d3656bfcb8",
-    "scope_baseline": "mothership@e083354; repo baseline: Tauri v2 desktop app with typed layout/session control, opencode serve-owned agent state, prompt dispatch/reconciliation, SSE session store, and audit-log ring buffer"
+    "vcs_reference": "2f330265633a537b76a2d7b4388e173edee252e8",
+    "scope_baseline": "U2 refresh at mothership@2f33026: U1 untrusted planning wire contracts are present; no document/unit/revision model exists yet. Existing DOM-free helpers and reconcilable observations are patterns, not Markdown parsers or revision authority."
   },
   "budget": {
-    "max_search_passes": 3,
-    "max_candidate_inspections": 10,
+    "max_search_passes": 2,
+    "max_candidate_inspections": 8,
     "exhausted": false
   },
   "candidates": [
     {
-      "path_or_symbol": "src/promptbar/dispatch.ts:resolveDispatchTarget",
-      "description": "Chooses whether a prompt becomes a follow-up into an existing session or a new control session; owns first-submit vs follow-up routing and the active-session/store existence check.",
-      "disposition": "extend"
-    },
-    {
-      "path_or_symbol": "src/promptbar/dispatch.ts:dispatchPrompt",
-      "description": "Thin prompt-dispatch wrapper that routes by sessionId or project and keeps the control-session fallback logic centralized.",
+      "path_or_symbol": "src/planning/contracts.ts",
+      "description": "Existing planning-domain wire definitions; extend the planning area with pure models without treating these raw schemas as authority.",
       "disposition": "reuse"
     },
     {
-      "path_or_symbol": "src/server/session-store.ts:createSessionStore",
-      "description": "Owns the in-memory session and pending-question model plus reconcile/applyEvent pruning; this is the store-shape truth that prevents stale session references from surviving deletions or reconciles.",
+      "path_or_symbol": "src/planning/contracts.test.ts",
+      "description": "Existing strict-input and source-string preservation test patterns for planning contracts.",
       "disposition": "reuse"
     },
     {
-      "path_or_symbol": "src/ide/executor.ts:dispatchPromptHandler",
-      "description": "Authoritative session-tool execution path that refreshes before mutation, hardcodes blocked-question policy, validates dispatch results, and preserves not-sent vs indeterminate boundaries.",
+      "path_or_symbol": "src/promptbar/serialize.ts",
+      "description": "DOM-free serialization helper pattern only; its plain-text output is not a lossless Markdown model and is not modified by U2.",
       "disposition": "reuse"
     },
     {
-      "path_or_symbol": "src/ide/executor.ts:reconcileDispatchFailure",
-      "description": "Bounded read-only reconciliation after failed dispatch attempts; proves delivery by exact messageId matching or falls back to unconfirmed/unavailable without retrying mutation.",
+      "path_or_symbol": "src/promptbar/controller.ts",
+      "description": "Existing non-destructive failure-preservation pattern for user-authored input; not a new execution dependency of the pure model.",
       "disposition": "reuse"
     },
     {
-      "path_or_symbol": "src/panels/audit-log/audit-store.ts:createAuditStore",
-      "description": "Captures command and session-tool events into the audit log ring buffer; owns human-visible execution history but not approval/revision authority.",
+      "path_or_symbol": "src/promptbar/dispatch.ts",
+      "description": "Explicit target-resolution pattern; does not own document revision identity or proposal application.",
       "disposition": "reuse"
     },
     {
-      "path_or_symbol": "src/ide/commands.ts:session tool schemas and audit payload types",
-      "description": "Defines the typed session-tool argument and audit payload surface, including target validation and branded result schemas used to keep tool execution structurally honest.",
-      "disposition": "extend"
+      "path_or_symbol": "src/server/session-store.ts",
+      "description": "Reconcilable observation pattern, not an immutable revision store; U2 does not add planning state here.",
+      "disposition": "reuse"
+    },
+    {
+      "path_or_symbol": "docs/plans/2026-09-07-001-feat-agent-native-planning-plan.md:U2",
+      "description": "Source-preserving document, unit, revision, and proposal boundaries and their test corpus.",
+      "disposition": "reuse"
+    },
+    {
+      "path_or_symbol": "docs/brainstorms/2026-09-07-agent-native-planning-lifecycle-requirements.md:R12-R18",
+      "description": "Stable units, revision-qualified outcomes, and preservation requirements; observed progress is not execution authority.",
+      "disposition": "reuse"
     }
   ],
   "excluded_scopes": []
@@ -154,8 +159,8 @@ No typed plan-unit, approval-grant, or verification contract was established in 
 | KTD1. Ownership | Protected native planning records hold revisions, approvals, grants, and execution associations. Backend observations remain observations, never an app-owned execution state machine. |
 | KTD2. Agent identity | A trusted host adapter supplies authenticated per-agent context over shared connections. A connector token, display name, transport session, or model argument alone is not a principal. |
 | KTD3. Authority | Native policy checks separate approval and Start grants at invocation. Human operator actions do not require agent grants. Never infer authority from Markdown or editor state. |
-| KTD4. Revision input | Retain immutable full source snapshots plus a deterministic approval-bearing content identity. Execution receives the selected snapshot, not a mutable pathname. |
-| KTD5. Metadata separation | Feedback annotations and observed progress are separate from approval-bearing content. Any recognized in-file progress field must have an explicit grammar; unknown edits remain content changes. |
+| KTD4. Revision input | Retain immutable full source snapshots with SHA-256 identity over the entire canonical UTF-8 Markdown source. Execution receives the selected snapshot, not a mutable pathname. |
+| KTD5. Metadata separation | Feedback and progress use separate typed metadata outside Markdown. Every Markdown edit, including manual checkbox or comment changes, changes content identity; metadata-only updates do not. |
 | KTD6. Publication | A native confined publication service preserves versions and fails closed on unsupported safety guarantees. Hash-check-plus-rename is not advertised as atomic CAS against other editors. |
 | KTD7. Unit identity | Visible stable unit keys survive renaming/reordering; results are qualified by revision. Duplicate/missing keys and invalid dependencies are errors, not invitations to fuzzy matching. |
 | KTD8. Execution integration | Compatible host/backend contracts supply boundary acknowledgments and attributable observations. Session idleness and unbound todo text are insufficient. |
@@ -166,7 +171,9 @@ No typed plan-unit, approval-grant, or verification contract was established in 
 
 Use a documented Markdown dialect with readable unit keys, named dependency references, and explicit acceptance criteria. Support the repository's visible Unit/U conventions; do not silently insert hidden HTML identifiers. Units retain logical identity across revisions, while definition fingerprints and evidence bindings remain revision-specific.
 
-The parser produces a source-preserving model, not a replacement serialization of the file. It distinguishes only explicitly defined progress fields from content. Feedback annotations live outside the source text unless an explicit supported representation is established. A general HTML comment or arbitrary checkbox is not automatically exempt from approval hashing.
+U2 implements the explicit `## Implementation Units` section with column-zero `- [ ] **U1. Title**` markers (including checked variants). Keys are positive decimal `U` identifiers without leading zeros. Dependency declarations precede the first period or semicolon; trailing explanatory prose is not another dependency declaration. Use explicit keys, not ranges. Field labels at column zero delimit fields; literal labels in examples belong inside fenced or indented regions. Frontmatter, fenced code, comments, and indented code are masked for structural recognition but remain in the original source. A returned unit list with diagnostics is not a valid tracking graph; consumers must require zero issues.
+
+The parser produces a source-preserving model, not a replacement serialization of the file. Feedback and progress live in separate typed metadata; there are no in-file exemptions from approval hashing. A manual checkbox or HTML-comment edit changes canonical Markdown content and requires approval of that new revision.
 
 Opening an unsupported document remains a read/edit operation. Approval, Start, and structured tracking require a valid unit contract; show actionable validation results rather than inventing units. Proposed normalization is a reviewable content edit requiring approval.
 
@@ -313,7 +320,7 @@ flowchart TB
 - Final repository checks: 1,104 tests passed; typecheck, lint, and diff checks exited zero. Scoped diagnostics reported no errors or warnings. Existing design-check evidence remains applicable because no UI/style behavior changed.
 - Authenticated host binding, native publication, and actual execution/boundary/evidence integration remain pending U3/U4/U6 producer proofs. U1 completion does not activate them or advance U2.
 
-- [ ] **U2. Implement source-preserving documents, unit identity, and revisions**
+- [x] **U2. Implement source-preserving documents, unit identity, and revisions**
 
 **Goal:** Model editable Markdown, immutable approval-bearing revisions, proposals, and stable units without losing source content.
 
@@ -326,7 +333,7 @@ flowchart TB
 - Create: `src/planning/revisions.ts`, `revisions.test.ts`, `proposals.ts`, `proposals.test.ts`.
 - Create: `src/planning/fixtures/` with representative plan Markdown and unsupported-syntax cases.
 
-**Approach:** Parse readable stable keys, dependencies, and acceptance criteria while retaining original ranges and bytes. Preserve unknown regions. Define content identity and the narrowly recognized progress/annotation representation; never classify arbitrary edits as harmless. Proposals identify their base revision and cannot silently apply to a different draft. Native storage in U3 retains full revision bytes; this unit owns the pure model and validation.
+**Approach:** Parse readable stable keys, dependencies, and acceptance criteria while retaining original ranges and bytes. Preserve unknown regions. Progress and feedback use separate typed metadata outside canonical Markdown; the approval-bearing identity hashes the entire Markdown source. Manually editing a checkbox or comment in that file is a content change requiring reapproval, not an exempt observation update. Proposals identify their base revision and cannot silently apply to a different draft. Native storage in U3 retains full revision bytes; this unit owns only pure models and validation, with no filesystem writes or runtime registration.
 
 **Patterns:** DOM-free panel view modules, discriminated command schemas, and the origin's content-versus-observation distinction.
 
@@ -341,6 +348,8 @@ flowchart TB
 - Integration: content edits require new approval, while a supported progress/annotation update preserves the approval-bearing identity; unknown field edits do not receive this exemption.
 
 **Verification:** The corpus retains source content and yields deterministic identities. Missing historical bytes cannot be papered over by opening the current path.
+
+**Completed U2 evidence:** The four pure model modules retain canonical UTF-8 source and immutable revision/metadata values, reject stale proposals, and parse the actual nine-unit plan without diagnostics. Planning tests total 120; the repository suite passes 1,181 tests. Typecheck, lint, and diff checks exit zero, and the pinned design detector returns `[]`. Regression coverage includes initial metadata-array mutation and multiline criteria that previously truncated at blank lines. Source offsets use UTF-16 code units; hashes cover the full UTF-8 source. This narrow tracking grammar is not a general CommonMark renderer. No filesystem, UI, authority, or execution integration is enabled.
 
 - [ ] **U3. Add confined publication and protected native custody**
 
@@ -415,7 +424,7 @@ flowchart TB
 
 **Requirements:** R1, R3–R11, R17, R18; F1–F4; AE1–AE5, AE7, AE9, AE10, AE12.
 
-**Dependencies:** U2–U4.
+**Dependencies:** U2, U3, U4.
 
 **Files:**
 - Create: `src/planning/commands.ts`, `commands.test.ts`, `executor.ts`, `executor.test.ts`, `views.ts`, `views.test.ts`.
@@ -564,7 +573,7 @@ The header leads with selected revision and target, then delivery/handoff state.
 
 **Requirements:** R1–R18; F1–F4; AE1–AE12.
 
-**Dependencies:** U1–U8, including actual host/publication gate evidence.
+**Dependencies:** U1, U2, U3, U4, U5, U6, U7, U8, including actual host/publication gate evidence.
 
 **Files:**
 - Create: `src/planning/lifecycle.integration.test.ts`, `sidecar/ide-server/planning.integration.test.ts`.
@@ -660,4 +669,4 @@ These are implementation entry gates, not evidence that dependent functionality 
 
 ## Implementation Readiness
 
-U1's bounded contract and source-identification work is complete. Host principal propagation, safe publication, and backend execution/evidence integration remain unproven until their named producing units supply the required evidence; dependent capabilities must not activate beforehand. Remaining units are not implicitly authorized by U1 completion. This document does not establish runtime correctness or authorize dependency, authentication, native-write, CI, or release changes.
+U1's contract/source work and U2's pure document models are complete. Host principal propagation, safe publication, and backend execution/evidence integration remain unproven until their named producing units supply the required evidence; dependent capabilities must not activate beforehand. Remaining units are not implicitly authorized by these completions. This document does not establish runtime integration correctness or authorize dependency, authentication, native-write, CI, or release changes.

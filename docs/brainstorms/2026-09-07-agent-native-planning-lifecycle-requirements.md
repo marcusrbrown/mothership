@@ -70,7 +70,7 @@ Plans today live as Markdown files edited by hand outside the app — the repo's
 - R4. A human may approve a plan revision; an agent requires explicit approval delegation, checked when approval is invoked. Missing or revoked agent delegation blocks approval and never confers Start authority (R11).
 - R5. Approval records the specific plan revision approved; it does not carry forward automatically to a later, edited revision.
 - R6. Any edit to plan content creates a revision requiring its own approval before Start, including wording or typo changes. Historical approval remains attached to the revision it covered and never transfers to the changed content.
-- R7. Feedback comments, review annotations, and execution-status updates do not themselves invalidate an existing approval; only edits to the plan's actual content do (R6).
+- R7. Feedback comments, review annotations, and execution-status updates use separate typed metadata outside canonical Markdown and do not invalidate its approval. Manually editing a checkbox or comment in the Markdown file changes plan content and requires approval of the new revision (R6).
 - R8. Approval alone never dispatches or starts execution.
 
 **Start and execution binding**
