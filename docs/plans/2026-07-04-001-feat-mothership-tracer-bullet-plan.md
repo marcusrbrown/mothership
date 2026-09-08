@@ -60,7 +60,7 @@ Hard boundaries from the origin doc: no writable editor, no bespoke panel format
 - `design/tokens.css` → copied to `src/styles/tokens.css` in U1.1; dockview themes via `--dv-*` CSS custom properties mapped from tokens.
 - `.github/workflows/ci.yaml` design-check gate arms itself the moment `src/` exists.
 
-### Verified Server Facts (July 2026, corrects HANDOFF assumptions)
+### Verified Server Facts (July 2026)
 
 - **CORS is free**: the opencode server's hardcoded allowlist includes `tauri://localhost` / `http(s)://tauri.localhost`. No `--cors` flag, no Rust proxy needed. (Repo is now `anomalyco/opencode`, not `sst/opencode`.)
 - **`GET /vcs/status` does not exist** — it's `GET /vcs` (`{branch}`) + `GET /file/status`.
@@ -78,7 +78,7 @@ Hard boundaries from the origin doc: no writable editor, no bespoke panel format
 - `@codemirror/merge` 6.12.x: `unifiedMergeView` + `EditorView.editable.of(false)` + `mergeControls: false` for read-only diffs (Phase 2).
 - Tiptap v3 (3.27.x): `starter-kit`, `extension-mention`, `suggestion`, `extension-floating-menu` all MIT since June 2025; floating UI via `@floating-ui/dom`.
 - `@modelcontextprotocol/sdk` 1.29.0 stable (2025-03-26 spec); v2 beta, stable expected 2026-07-28 + codemod.
-- **MCP Apps verified**: SEP-1865 Final, spec version `2026-01-26` in `modelcontextprotocol/ext-apps`; `ui://` scheme, MIME `text/html;profile=mcp-app`, tools link UI via `_meta.ui.resourceUri`, sandboxed iframe mandatory, JSON-RPC over postMessage. `@mcp-ui/client` 7.x is the mature host SDK. Resolves HANDOFF's Phase 2 unknown.
+- **MCP Apps verified**: SEP-1865 Final, spec version `2026-01-26` in `modelcontextprotocol/ext-apps`; `ui://` scheme, MIME `text/html;profile=mcp-app`, tools link UI via `_meta.ui.resourceUri`, sandboxed iframe mandatory, JSON-RPC over postMessage. `@mcp-ui/client` 7.x is the mature host SDK.
 
 ### Flow Analysis (must-address items folded into units)
 
@@ -95,7 +95,7 @@ Hard boundaries from the origin doc: no writable editor, no bespoke panel format
 - **MCP SDK v1.29.0 now** (Marcus-confirmed); migrate via codemod after v2 stabilizes.
 - **`ide_*` server topology: Bun sidecar supervised by the Rust core.** The SDK's `StreamableHTTPServerTransport` needs a real HTTP listener; the command executor lives in the webview. Sidecar hosts MCP on `127.0.0.1:<OS-assigned port>` gated by a per-launch bearer token; tool handlers relay typed commands to the webview over a token-authed localhost WebSocket; the webview executes them through the same executor UI handlers use and returns the serialized layout. Rust-side rmcp rejected (stack lock); hand-rolled streamable-HTTP framing in Rust rejected (reimplements the SDK). Also considered: replacing the WS leg with Tauri IPC relayed through the Rust core — rejected because it adds a double-(de)serialization Rust hop and loses TS-to-TS shared typing of the command union; the WS bridge is the simpler sidecar topology.
 - **Token and rendezvous contract (R15).** Rust core generates a cryptographically random token (32+ bytes, per launch — restart invalidates old tokens) and passes it to the sidecar via env var, never argv (`ps`-visible). Sidecar binds an OS-assigned loopback port and reports readiness + port to the Rust core on stdout; Rust writes `{port, token}` to a `0600` rendezvous file under `~/Library/Application Support/<app-id>/` (the "env-readable location" external MCP clients read) and delivers both to the webview via Tauri IPC — the token is never stored on `window` or in webview-global scope. External MCP clients read the rendezvous file; clients whose config would persist the token to disk (Claude Desktop) are out of tracer scope (see Scope Boundaries). Pre-auth HTTP requests get a uniform empty 401 regardless of path/method. WS auth: browser `WebSocket` can't set headers, so the bridge authenticates via first-frame token within a timeout — unauthenticated connections are closed before any command flows.
-- **Tool set (settles the R10/HANDOFF naming drift)**: command union `open_panel | close_panel | split | focus | move_panel | set_layout` → tools `ide_open_panel`, `ide_close_panel`, `ide_split`, `ide_focus`, `ide_move_panel`, `ide_set_layout`, plus reads `ide_list_panels`, `ide_get_layout`. `ide_layout` (requirements doc spelling) is dropped in favor of the get/set pair. Read tools return project *names*, not absolute paths — filesystem paths stay on the bus's designated surface (`bus_roster`), not the UI-introspection tools. `ide_*` tools accept no file path, URL, or shell input and have zero filesystem/subprocess access; the command-union type enforces this boundary.
+- **Tool set (settles the R10 naming drift)**: command union `open_panel | close_panel | split | focus | move_panel | set_layout` → tools `ide_open_panel`, `ide_close_panel`, `ide_split`, `ide_focus`, `ide_move_panel`, `ide_set_layout`, plus reads `ide_list_panels`, `ide_get_layout`. `ide_layout` (requirements doc spelling) is dropped in favor of the get/set pair. Read tools return project *names*, not absolute paths — filesystem paths stay on the bus's designated surface (`bus_roster`), not the UI-introspection tools. `ide_*` tools accept no file path, URL, or shell input and have zero filesystem/subprocess access; the command-union type enforces this boundary.
 - **SSE posture**: treat the event union as open — switch on known `type` strings, log unknowns; reconcile on every (re)connect; parse failures skip the frame, never kill the stream. EventSource can't set headers, so the `/event` URL carries `?directory=` (the server SDK itself rewrites the header to this query param for GETs). If the server turns out to be auth-enabled (`OPENCODE_SERVER_PASSWORD` set), the startup handshake fails loud with the documented constraint — the tracer does not silently degrade.
 - **iframe panels**: `renderer: 'onlyWhenVisible'` always; `srcdoc` for content we control, `src=` only for live dev servers (accepting reload-on-reparent; Phase 2 mitigates via deep-linking).
 - **Config parsing**: mirror space-bus schema `{server: {baseUrl}, projects: [{name, path, description}]}` exactly, including the localhost-hostname guard (R15). Parse once at the boundary; typed thereafter.
@@ -231,7 +231,7 @@ Layout parity invariant made concrete: `UI handler → command` and `ide_* tool 
 
 **Test scenarios:** Test expectation: none — spike. Exit: interactive shell usable; resize correct; process cleanup on panel close verified (no orphan PTYs in `ps`).
 
-**Verification:** Finding doc records the decision rationale (per HANDOFF: document why plugin was skipped) and throughput observations.
+**Verification:** Finding doc records why the plugin was skipped and the throughput observations.
 
 - [ ] **U0.4: Spike 0c — server connectivity + SSE contract probe**
 
