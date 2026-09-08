@@ -1,11 +1,16 @@
 ---
 title: "fix: Reliability track for the daily-driver bar"
 type: fix
-status: active
+status: completed
 date: 2026-07-05
+closed: 2026-09-06
 ---
 
 # fix: Reliability track for the daily-driver bar
+
+## Status
+
+All 6 defined units are completed and verified per Unit 6's live-window runbook (deleted-session recovery, active-project highlight, session-row highlight, transcript routing, live transcript update, parentID-based subagent hiding). This closes the units this plan scoped — it is **not** a certification of sustained daily-driver use or the v0.1 release bar; that demonstration (days of real use, per the epic's R16) remains open in `docs/brainstorms/2026-07-05-product-identity-release-preparedness-requirements.md`. Auto-scroll remains a known non-blocking residual by operator decision.
 
 ## Overview
 

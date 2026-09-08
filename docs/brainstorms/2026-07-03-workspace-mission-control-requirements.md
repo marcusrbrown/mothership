@@ -144,9 +144,9 @@ Agentic development today means Visual Studio Code, Claude Desktop, and an OpenC
 
 ### Deferred to Planning
 
-- [Affects R1][Technical] PTY strategy on Tauri: `tauri-plugin-pty` (single-maintainer risk) vs PTYs in a supervised Bun/Rust sidecar over websocket.
+- [Affects R1][Technical] ~~PTY strategy on Tauri: `tauri-plugin-pty` (single-maintainer risk) vs PTYs in a supervised Bun/Rust sidecar over websocket.~~ **Resolved:** Rust `portable-pty` directly in `src-tauri/` (neither original option) — see Reconciliation below.
 - [Affects R2, R12][Needs research] Tauri multi-webview reality for many concurrent iframes (Storybook + previews + MCP Apps panels) on macOS WKWebView; fallback if quirks bite.
-- [Affects R8][Technical] SSE fan-in shape: one `/event` connection per server with client-side demux, and reconnect/backfill behavior. Note the webview's non-http origin: browser `fetch`/`EventSource` from `tauri://` to `127.0.0.1:4096` needs the server's `--cors` flag or proxying through the Rust core.
+- [Affects R8][Technical] ~~SSE fan-in shape: one `/event` connection per server with client-side demux, and reconnect/backfill behavior.~~ **Resolved, with deviation:** one active-directory SSE connection reconciled against periodic REST polling — a documented departure from the original no-polling framing — see Reconciliation below. Note the webview's non-http origin: browser `fetch`/`EventSource` from `tauri://` to `127.0.0.1:4096` needs the server's `--cors` flag or proxying through the Rust core.
 - [Affects R13][Technical] DIY accept/reject streaming UX on MIT Tiptap vs purchasing AI Toolkit.
 - [Affects R4][Technical] Detector packaging: in-app registry vs per-project skill extensions contributing manifest entries.
 
@@ -158,3 +158,17 @@ Agentic development today means Visual Studio Code, Claude Desktop, and an OpenC
 - MCP Apps: SEP-1865 (Final), spec `2026-01-26`, `modelcontextprotocol/ext-apps`, `@mcp-ui/client` host SDK.
 - Tiptap: MIT/paid split; experiments Voice + Flex (prototypes); AI Toolkit is the paid add-on matching the screenshot UX; sur9e (arspesk/sur9e) as MIT-tier existence proof and files-on-disk cockpit pattern.
 - Stack: dockview vs FlexLayout/react-mosaic/golden-layout; Monaco vs CodeMirror 6; `@xterm/xterm`; Tauri v2 vs Electron trade study.
+
+---
+
+## Reconciliation (2026-09-06)
+
+This section notes where implementation has settled or diverged from the original research without rewriting the dated requirements above; R1–R15 and the flows remain the authoritative behavior contract.
+
+- **PTY strategy (outstanding question, R1):** resolved to Rust `portable-pty` directly in `src-tauri/`, not `tauri-plugin-pty`. Source: `docs/plans/2026-07-04-001-feat-mothership-tracer-bullet-plan.md` Key Technical Decisions.
+- **SSE fan-in (outstanding question, R8):** implemented as one active-directory SSE connection reconciled against periodic REST polling across all projects, not a single always-on global `/event` stream with pure client-side demux. This is a documented deviation from the original "no-polling loops" framing — the hybrid model exists to keep roster status accurate across projects without an unbounded number of concurrent SSE connections. Source: `src/layout/DockviewShell.tsx` active-directory SSE + `src/server/reconcile-poller.ts`; settled architecture per `docs/plans/2026-07-05-001-fix-reliability-track-plan.md` Key Technical Decisions ("the hybrid poll + single-SSE architecture is settled").
+- **R10–R11 (MCP layout surface):** delivered and then substantially extended. The originally scoped `ide_layout`/`ide_open_panel`/`ide_focus`-style surface shipped as 8 layout tools, and a second epic (`docs/plans/2026-07-17-001-feat-agent-native-session-tools-plan.md`, merged PR #100) added 9 session-control tools (discovery, focus, dispatch, bounded transcript reads, pending-question read/answer) for 17 tools total. AE3's acceptance pattern (natural language → typed `ide_*` calls only, tool-call log captured) has been demonstrated for both the original layout-only surface and the expanded session surface via generic PR merge acceptance flows — it has not been separately re-demonstrated against this document's exact original AE3 wording (dashboard Storybook + diff view), since the diff panel referenced there is unbuilt (see below).
+- **R12 (MCP Apps host) and R3/AE1 (diff-centric code view, Storybook panel):** still unbuilt. These were deferred to "Phase 2" in the tracer plan and remain open; no claim is made that AE1 or AE4 have been demonstrated. Implementation status and verification are recorded in `docs/plans/`.
+- **R14 (rich-text doc surfaces):** still deferred, as originally scoped — not started.
+- **Scope note (R3 / "no writable code editor"):** this boundary is correctly read as scoped to v0.1, not a permanent product ban — see `PRODUCT.md`'s anti-references section, which frames in-app editing as a deliberate future decision rather than a closed door.
+- **License:** resolved MIT (see `LICENSE` in the repo root); this closes the R10 licensing outstanding question from the companion product-identity brainstorm, not a question this document itself raised.

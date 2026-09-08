@@ -2,9 +2,9 @@
 
 > The craft your agents report back to.
 
-Mothership is a multimodal agentic IDE — mission control for a workspace of AI coding agents. It is a **renderer for the bus**: `opencode serve` owns all agent state, [space-bus](https://github.com/fro-bot/space-bus) is the control plane, and Mothership is a thin multiplexing client that turns a workspace into an adaptive panel layout.
+Mothership is a multimodal agentic IDE — mission control for a workspace of AI coding agents today, building toward an agent-native shell for designing, ideating, experimenting, and building with agents. It renders a live workspace over a running backend and exposes its own layout and session control as MCP tools, so any agent can drive the same visible, typed controls the operator uses. For the technical ownership model — renderer-over-a-bus, no owned agent state, the control-plane split with [space-bus](https://github.com/fro-bot/space-bus) — see `ARCHITECTURE.md`.
 
-**Status:** early tracer. The shell runs: it opens a `spacebus.json` workspace, streams live session state, dispatches prompts to a control agent, and exposes its own layout as `ide_*` MCP tools so any agent can rearrange the UI. Read-only/diff-centric code view, Storybook panels, and MCP Apps skill panels are planned but not yet built.
+**Status:** past the tracer stage, running from source — no tagged or signed release exists yet. The shell runs on `main`: it opens a `spacebus.json` workspace, streams live session state, dispatches prompts, and exposes 17 `ide_*` MCP tools (8 layout + 9 session control) so any agent can drive the UI and steer sessions the same way the operator does. Read-only/diff-centric code view, Storybook panels, and MCP Apps skill panels are planned but not yet built — see `PRODUCT.md` for the product identity this is building toward and `docs/plans/` for implementation status and verification.
 
 ## Shape
 
@@ -39,6 +39,8 @@ bun run dev          # opens the Tauri window; spawns or adopts opencode serve
 
 The app opens the workspace named by `MOTHERSHIP_WORKSPACE`, or — when that variable is unset — the directory it was launched from. Point it at your own workspace by setting `MOTHERSHIP_WORKSPACE` to any directory containing a [`spacebus.json`](https://github.com/fro-bot/space-bus) roster. A dedicated workspace picker is a follow-up.
 
+If a space-bus-managed `opencode serve` daemon is already running for your workspace, Mothership attaches to it rather than spawning a second one. If none is running, Mothership falls back to its own standalone supervisor (spawn, health-probe, capped-retry restart, and clean shutdown of processes it owns) — an externally managed server is never killed on quit.
+
 Other scripts:
 
 ```sh
@@ -51,9 +53,9 @@ bun run ui:dev       # vite dev server only (no Tauri shell)
 
 Dev-only: the window has no address bar, so `Cmd+R` reloads and `Cmd+Shift+H` returns to the launcher; a `?spike=<id>` launcher exposes the spike harnesses.
 
-## Letting an agent drive the layout
+## Letting an agent drive the app
 
-Mothership exposes its layout as `ide_*` MCP tools (`ide_open_panel`, `ide_split`, `ide_focus`, `ide_move_panel`, `ide_set_layout`, `ide_close_panel`, plus read-only `ide_list_panels` / `ide_get_layout`). Every mutation appears in the in-app audit log with its source.
+Mothership exposes its layout and session control as 17 `ide_*` MCP tools: 8 layout tools (`ide_open_panel`, `ide_split`, `ide_focus`, `ide_move_panel`, `ide_set_layout`, `ide_close_panel`, plus read-only `ide_list_panels` / `ide_get_layout`) and 9 session tools (`ide_list_projects`, `ide_list_sessions`, `ide_get_active_context`, `ide_select_project`, `ide_select_session`, `ide_dispatch_prompt`, `ide_get_transcript`, `ide_list_pending_questions`, `ide_answer_question`). An agent can discover the workspace, focus a project or session, dispatch or continue a prompt, read a bounded transcript, and answer a pending question — all through the same typed executor the UI uses. Every mutation appears in the in-app audit log with its source.
 
 The server binds a random loopback port with a per-launch bearer token, written to a `0600` rendezvous file at `~/Library/Application Support/com.marcusrbrown.mothership/ide-bridge.json`. To connect an opencode agent:
 
@@ -77,7 +79,7 @@ For persistent wiring — so an agent's config doesn't need updating every time 
 
 `scripts/ide-mcp-config.ts` remains the one-shot inspector for the current launch's endpoint; the bridge is for standing configuration that survives restarts.
 
-Read tools return only panel structure and display names — never filesystem paths or credentials — and agents cannot open a terminal panel (no subprocess reach through `ide_*`).
+Read tools return only panel structure, display names, and bounded session/transcript text — never filesystem paths or credentials — and agents cannot open a terminal panel (no subprocess reach through `ide_*`). That distinction matters for transcript reads specifically: the tool allowlists *which structural fields* cross the boundary (roles, part types, byte budgets), but the user/assistant text itself is returned verbatim and is not scrubbed or guaranteed secret-free — treat it as untrusted content that may itself contain paths, secrets, or instructions someone typed into a session.
 
 ## Architecture
 
@@ -91,12 +93,12 @@ Read tools return only panel structure and display names — never filesystem pa
 
 ## Design
 
-Systematic / Fro Bot lineage — afrofuturism × cyberpunk, dark-default, cyan/magenta/orange with strict intent. Design context lives in `PRODUCT.md` + `DESIGN.md`; tokens in `design/tokens.css`. The [Impeccable](https://github.com/pbakaus/impeccable) skill is installed (`.agents/skills/impeccable/`) and CI runs `impeccable detect` as a hard design gate.
+Systematic / Fro Bot lineage — afrofuturism × cyberpunk, dark-default, cyan/magenta/orange with strict intent. Design context lives in `PRODUCT.md` + `DESIGN.md`; tokens in `design/tokens.css`. The [Impeccable](https://github.com/pbakaus/impeccable) skill is installed (`.agents/skills/impeccable/`) and CI runs `npx impeccable@3.2.0 detect` (pinned) as a hard design gate.
 
 ## Reading order
 
 1. `docs/brainstorms/2026-07-03-workspace-mission-control-requirements.md` — what and why (R1–R15, flows, decisions)
-2. `HANDOFF.md` — build sequencing, phase by phase
+2. `ARCHITECTURE.md`, `STRUCTURE.md`, and `docs/plans/` — system boundaries, module map, and implementation plans
 3. `AGENTS.md` — invariants for anyone (human or agent) working in this repo
 4. `PRODUCT.md` + `DESIGN.md` — design context every `/impeccable` command reads
 5. `docs/solutions/` — documented solutions to past problems (platform de-risk findings, server contract facts), organized by category with YAML frontmatter

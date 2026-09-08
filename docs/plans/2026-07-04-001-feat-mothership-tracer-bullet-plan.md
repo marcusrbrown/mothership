@@ -1,13 +1,17 @@
 ---
 title: 'feat: Mothership Phase 0–1 — de-risk spikes and tracer bullet'
 type: feat
-status: active
+status: superseded
 date: 2026-07-04
 origin: docs/brainstorms/2026-07-03-workspace-mission-control-requirements.md
 deepened: 2026-07-04
 ---
 
 # feat: Mothership Phase 0–1 — de-risk spikes and tracer bullet
+
+## Status
+
+Superseded as an execution ledger. The tracer baseline this plan describes was in fact delivered and merged — the shell, command layer, workspace open, SSE live surfaces, terminal, prompt bar, and `ide_*` MCP server all run on `main` today — but the unit checkboxes below were never updated to reflect that and stay unchecked. They are kept as historical record rather than retroactively checked, because doing so would silently certify spike/verification gates (webview/iframe stress, PTY throughput, live AE2/AE3 evidence capture) that were never re-confirmed against this specific ledger. For verification status use the reliability plan (`docs/plans/2026-07-05-001-fix-reliability-track-plan.md`) and the agent-native session-tools plan (`docs/plans/2026-07-17-001-feat-agent-native-session-tools-plan.md`), which are both independently verified and closed. This plan's Phase 2 deferrals — Storybook panel hydration, the MCP Apps host, the diff panel — remain genuinely open; no claim is made here that all of R1–R15 have passed.
 
 ## Overview
 
@@ -499,7 +503,7 @@ Spikes retire the platform bets; tracer proves F1/F2/F3 thin slices with AE2 + A
 ## Sources & References
 
 - **Origin document:** [docs/brainstorms/2026-07-03-workspace-mission-control-requirements.md](../brainstorms/2026-07-03-workspace-mission-control-requirements.md)
-- Build sequencing contract: `HANDOFF.md`; invariants: `AGENTS.md`; design context: `PRODUCT.md`, `DESIGN.md`
+- Implementation plans: `docs/plans/`; invariants: `AGENTS.md`; design context: `PRODUCT.md`, `DESIGN.md`
 - space-bus reference implementation: `~/src/github.com/fro-bot/space-bus` (`src/config.ts`, `src/core.ts`, `src/tools/`)
 - opencode server: https://opencode.ai/docs/server/ ; CORS allowlist in `packages/server/src/cors.ts` (anomalyco/opencode, dev branch)
 - dockview: https://dockview.dev/ ; iframe issues #162, #486; lifecycle PR #1158

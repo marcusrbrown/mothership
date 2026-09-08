@@ -16,7 +16,6 @@ AGENTS.md       Invariants — read first, authoritative over everything else
 ARCHITECTURE.md How the system works and why
 STRUCTURE.md    This file
 PRODUCT.md / DESIGN.md   Design context the Impeccable skill reads
-HANDOFF.md      Build sequencing, phase by phase
 README.md       Project overview, run instructions
 ```
 
@@ -71,7 +70,7 @@ Bun MCP server exposing 17 `ide_*` tools over MCP streamable-HTTP, relaying ever
 - **Change or add a layout command** → `src/layout/commands.ts` (schema) + `src/layout/executor.ts` (`executeCommand` case). One change point serves both UI and `ide_*` callers — see `ARCHITECTURE.md`'s "typed command layer" section.
 - **Add a new `ide_*` MCP tool** → `sidecar/ide-server/mcp-server.ts` (tool definition + relay) and, if it's a new command, `src/layout/executor.ts`. Read tools must go through `sidecar/ide-server/redact.ts`'s allowlist serializers, never raw panel state.
 - **Filesystem access from the webview** → add a Rust command to `src-tauri/src/workspace_fs.rs`, then a matching `invoke()` wrapper in `src/workspace/tauri-fs.ts`. Do not add `@tauri-apps/plugin-fs` — it's intentionally not a dependency.
-- **Styling** → `src/styles/tokens.css` only. No inline hex or ad-hoc color literals; CI's `impeccable detect` gate blocks them. Documented brand exceptions go in `.impeccable/config.json`, never a rule-wide disable.
+- **Styling** → `src/styles/tokens.css` only. No inline hex or ad-hoc color literals; CI's pinned `npx impeccable@3.2.0 detect` gate blocks them. Documented brand exceptions go in `.impeccable/config.json`, never a rule-wide disable.
 - **opencode session/transcript state** → `src/server/` (`client.ts`, `session-store.ts`, `reconcile-poller.ts`). Never persist this state to disk — it's owned by `opencode serve`.
 - **Requirements / design decisions** → `docs/brainstorms/`. Build plans → `docs/plans/`. Past problem writeups (with YAML frontmatter for lookup) → `docs/solutions/`.
 
@@ -81,7 +80,7 @@ Bun MCP server exposing 17 `ide_*` tools over MCP streamable-HTTP, relaying ever
 - `scripts/ide-mcp-bridge.ts` — persistent stdio-to-streamable-HTTP bridge for standing agent MCP config, re-reads the rendezvous file each start so it survives app restarts.
 - `scripts/sync-version.ts`, `scripts/apply-release-settings.ts`, `scripts/verify-release-settings.ts`, `scripts/validate-updater-manifest.ts`, `scripts/release-policy.ts` — release pipeline tooling; see `docs/release/`.
 - `.github/workflows/ci.yaml` — typecheck, test, lint, design-check gates.
-- `.github/workflows/fro-bot.yaml` — brand-voice / positioning-copy checks (e.g. the "fleet" ban in public copy).
+- `.github/workflows/fro-bot.yaml` — brand-voice / positioning-copy guidance (e.g. the "fleet" ban) given as instructions to the Fro Bot LLM review/response agent. This is agent judgment, not a deterministic CI gate — nothing greps public copy and fails the build on "fleet"; treat it as a review nudge, not enforcement.
 - `.github/workflows/release.yaml` — signed/notarized build pipeline, runs only in the `release` environment with required reviewers.
 - `.github/workflows/version.yml` — version bump automation.
 

@@ -1,6 +1,6 @@
 # mothership — Development
 
-Multimodal agentic IDE: Tauri v2 desktop app rendering a workspace of OpenCode agents coordinated by space-bus. Requirements: `docs/brainstorms/2026-07-03-workspace-mission-control-requirements.md` (R1–R15 are the contract). Build plan: `HANDOFF.md`.
+Multimodal agentic IDE: Tauri v2 desktop app rendering a workspace of OpenCode agents coordinated by space-bus. Requirements: `docs/brainstorms/2026-07-03-workspace-mission-control-requirements.md` (R1–R15 are the contract). Implementation plans and verification criteria: `docs/plans/`.
 
 ## Invariants
 
@@ -27,4 +27,4 @@ Multimodal agentic IDE: Tauri v2 desktop app rendering a workspace of OpenCode a
 
 ## Verification
 
-`bun run typecheck`, `bun run test`, `bun run lint` must pass; `npx impeccable@3.2.0 detect --json src` must return `[]` (CI design-check gate; pin the version — a floating `npx impeccable` can resolve to an older major in CI that predates `.impeccable/config.json`'s `ignoreValues` schema and false-positives documented brand exceptions); UI changes need a screenshot or a short doc note; Phase gates in `HANDOFF.md` define done. The standing dogfood check: an agent connected only through the `ide_*` MCP surface (`scripts/ide-mcp-bridge.ts`, no terminal/subprocess access) can, while a delegated task runs, rearrange the layout, discover the active project/session, dispatch a prompt, read the resulting transcript, and answer a pending question — observing the same state UI/audit-log convergence a human driving the app would see. See `ARCHITECTURE.md`'s UI↔MCP capability map for the full outcome ↔ tool ↔ shared-executor correspondence this check exercises.
+`bun run typecheck`, `bun run test`, `bun run lint` must pass; `npx impeccable@3.2.0 detect --json src` must return `[]` (CI design-check gate; pin the version — a floating `npx impeccable` can resolve to an older major in CI that predates `.impeccable/config.json`'s `ignoreValues` schema and false-positives documented brand exceptions); UI changes need a screenshot or a short doc note. The applicable implementation plan in `docs/plans/` defines unit-specific verification; operational release gates live in `docs/release/`. The standing dogfood check: an agent connected only through the `ide_*` MCP surface (`scripts/ide-mcp-bridge.ts`, no terminal/subprocess access) can, while a delegated task runs, rearrange the layout, discover the active project/session, dispatch a prompt, read the resulting transcript, and answer a pending question — observing the same state UI/audit-log convergence a human driving the app would see. See `ARCHITECTURE.md`'s UI↔MCP capability map for the full outcome ↔ tool ↔ shared-executor correspondence this check exercises.
