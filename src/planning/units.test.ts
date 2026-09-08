@@ -522,6 +522,50 @@ describe("error: missing/duplicate/malformed unit structure", () => {
     expect(result.issues.some((i) => i.kind === "duplicate-key")).toBe(true);
   });
 
+  test("characterization: a duplicated key is excluded from units (not just flagged), and a dependent on that excluded key gets its own unknown-dependency issue", () => {
+    const source = `## Implementation Units
+
+- [ ] **U1. First copy**
+
+**Dependencies:** None
+
+- [ ] **U1. Second copy**
+
+**Dependencies:** None
+
+- [ ] **U2. Depends on the duplicated key**
+
+**Dependencies:** U1
+`;
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+
+    // Both U1 markers are excluded; only U2 survives into `units`.
+    expect(result.units.map((u) => u.key)).toEqual(["U2"]);
+
+    // One duplicate-key issue per U1 marker instance.
+    const duplicateIssues = result.issues.filter(
+      (i) => i.kind === "duplicate-key" && i.unitKey === "U1",
+    );
+    expect(duplicateIssues).toHaveLength(2);
+
+    // U2's dependency on the now-excluded U1 is unknown, not silently kept.
+    expect(
+      result.issues.some(
+        (i) => i.kind === "unknown-dependency" && i.unitKey === "U2",
+      ),
+    ).toBe(true);
+    const u2 = result.units.find((u) => u.key === "U2");
+    expect(u2?.dependencies).toEqual({
+      kind: "invalid",
+      reason: "unknown-dependency",
+    });
+
+    // Parsing never mutates the source document.
+    expect(doc.value.source).toBe(source);
+  });
+
   test("a leading-zero key is malformed, not silently accepted", () => {
     const source = `## Implementation Units
 

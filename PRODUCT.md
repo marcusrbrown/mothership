@@ -16,9 +16,9 @@ A single technical operator first (Marcus), with open-source developers running 
 
 Terse, operational, precise. Status over prose. Honest about reality: stale data says stale, a blocked session says blocked and why, a working-tree diff is labeled working-tree. Never imply an agent is working when it's waiting. Describe what the app does today in present tense; describe what it will do in roadmap terms — never present tense for unshipped capability.
 
-## Backend posture
+## Product boundary
 
-OpenCode is the current backend, not the product's identity — it's the vehicle, not the sell. The app never calls an LLM itself; agent state and intelligence live entirely with the backend it renders. Mothership stays a local-first renderer and attacher: it owns UI state only, and it never becomes an "OpenCode UI" in how it's described.
+Describe Mothership through the workflows it supports, independently of its backend. Keep backend-specific implementation details in `ARCHITECTURE.md`.
 
 ## Licensing
 

@@ -51,6 +51,17 @@ export interface UnitsIssue {
   readonly unitKey?: string;
 }
 
+/**
+ * `units` is not a raw marker inventory: a unit key declared more than once
+ * (duplicate-key) is excluded from `units` entirely, and each duplicate
+ * marker instead produces its own `duplicate-key` issue in `issues`. Any
+ * other unit that referenced the excluded key as a dependency gets an
+ * `unknown-dependency` issue (its `dependencies` becomes `{ kind: "invalid" }`)
+ * — the excluded key is simply not a known key. Consumers that need a
+ * trustworthy set of trackable units must require `issues.length === 0`;
+ * `units` alone is not sufficient to detect this class of problem. The
+ * underlying document/source is never mutated by parsing.
+ */
 export interface UnitsParseResult {
   readonly units: readonly ParsedUnit[];
   readonly issues: readonly UnitsIssue[];
@@ -304,6 +315,13 @@ interface MutableUnit {
   criteria: CriteriaField[];
 }
 
+/**
+ * Parses `## Implementation Units` markers and their fields from `document`.
+ * See {@link UnitsParseResult} for the duplicate-key exclusion contract:
+ * excluded units are absent from `units`, not merely flagged, and their
+ * dependents are separately flagged as `unknown-dependency`. `document` is
+ * read only — its source is never modified.
+ */
 export function parseUnits(document: PlanDocument): UnitsParseResult {
   const source = document.source;
   const lines = splitLines(source);
