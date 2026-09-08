@@ -342,6 +342,110 @@ still inside outer
   });
 });
 
+describe("HTML comment masking: cursor-based line intersection regressions", () => {
+  test("two non-overlapping comments with a real unit in the gap between them are all handled correctly", () => {
+    const source = `## Implementation Units
+
+<!-- fake block one:
+- [ ] **U8. Fake in first comment**
+-->
+
+- [ ] **U1. Real unit between comments**
+
+**Dependencies:** None
+
+<!-- fake block two:
+- [ ] **U9. Fake in second comment**
+-->
+
+- [ ] **U2. Real unit after both comments**
+
+**Dependencies:** U1
+`;
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+    expect(result.units.map((u) => u.key)).toEqual(["U1", "U2"]);
+    expect(doc.value.source).toContain("Fake in first comment");
+    expect(doc.value.source).toContain("Fake in second comment");
+  });
+
+  test("two HTML comments on the same line both mask that line without masking the line before or after", () => {
+    const source = `## Implementation Units
+
+- [ ] **U1. Before the comment line**
+
+**Dependencies:** None
+
+<!-- one --> text between <!-- two: - [ ] **U9. Fake** -->
+
+- [ ] **U2. After the comment line**
+
+**Dependencies:** U1
+`;
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+    expect(result.units.map((u) => u.key)).toEqual(["U1", "U2"]);
+    expect(doc.value.source).toContain("Fake");
+  });
+
+  test("a comment closing exactly at end-of-file with no trailing newline is masked", () => {
+    const source =
+      "## Implementation Units\n\n- [ ] **U1. Real unit**\n\n**Dependencies:** None\n\n<!-- - [ ] **U9. Fake trailing** -->";
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+    expect(result.units.map((u) => u.key)).toEqual(["U1"]);
+    expect(doc.value.source).toContain("Fake trailing");
+  });
+
+  test("a multiline comment spanning many lines masks every intersected line, not just the first", () => {
+    const commentLines = Array.from(
+      { length: 20 },
+      (_, i) => `- [ ] **U${i + 8}. Fake line ${i}**`,
+    ).join("\n");
+    const source = `## Implementation Units
+
+- [ ] **U1. Before the big comment**
+
+**Dependencies:** None
+
+<!--
+${commentLines}
+-->
+
+- [ ] **U2. After the big comment**
+
+**Dependencies:** U1
+`;
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+    expect(result.units.map((u) => u.key)).toEqual(["U1", "U2"]);
+  });
+
+  test("many short single-line comments interleaved with real units all resolve correctly (cursor never regresses)", () => {
+    const parts: string[] = ["## Implementation Units", ""];
+    const expectedKeys: string[] = [];
+    for (let i = 1; i <= 15; i++) {
+      parts.push(`<!-- - [ ] **U${100 + i}. Fake ${i}** -->`, "");
+      parts.push(
+        `- [ ] **U${i}. Real ${i}**`,
+        "",
+        "**Dependencies:** None",
+        "",
+      );
+      expectedKeys.push(`U${i}`);
+    }
+    const source = parts.join("\n");
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+    expect(result.units.map((u) => u.key)).toEqual(expectedKeys);
+  });
+});
+
 describe("rename/reorder preserves unit key identity", () => {
   const base = `## Implementation Units
 
@@ -493,6 +597,38 @@ describe("dependency validity: unknown, self, and cycle references", () => {
     expect(result.issues.some((i) => i.kind === "dependency-cycle")).toBe(true);
   });
 
+  test("ordinary acyclic dependents of a cycle member are not themselves marked as in-cycle", () => {
+    const source = `## Implementation Units
+
+- [ ] **U1. Cycle member A**
+
+**Dependencies:** U2
+
+- [ ] **U2. Cycle member B**
+
+**Dependencies:** U1
+
+- [ ] **U3. Ordinary dependent of a cycle member**
+
+**Dependencies:** U2
+`;
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+    const u1 = result.units.find((u) => u.key === "U1");
+    const u2 = result.units.find((u) => u.key === "U2");
+    const u3 = result.units.find((u) => u.key === "U3");
+    expect(u1?.dependencies.kind).toBe("invalid");
+    expect(u2?.dependencies.kind).toBe("invalid");
+    // U3 merely depends on a cycle member; it is not a cycle member itself and
+    // its own "keys" dependency must survive untouched.
+    expect(u3?.dependencies).toEqual({ kind: "keys", keys: ["U2"] });
+    const cycleIssue = result.issues.find((i) => i.kind === "dependency-cycle");
+    expect(cycleIssue?.message).toContain("U1");
+    expect(cycleIssue?.message).toContain("U2");
+    expect(cycleIssue?.message).not.toContain("U3");
+  });
+
   test("contradictory 'None' plus explicit keys is invalid", () => {
     const source = `## Implementation Units
 
@@ -509,6 +645,99 @@ describe("dependency validity: unknown, self, and cycle references", () => {
     const result = parseUnits(doc.value);
     const u2 = result.units.find((u) => u.key === "U2");
     expect(u2?.dependencies.kind).toBe("invalid");
+  });
+});
+
+describe("cycle detection: deep chains must not overflow the call stack", () => {
+  // Forward-referencing chain: U(i) depends on U(i+1). U1 is first in
+  // insertion order and still WHITE when the top-level loop reaches it, so
+  // its DFS must descend through every unit down to Un before anything is
+  // colored BLACK — this is the shape that actually exercises call-stack
+  // depth. (A backward-referencing chain does NOT: each predecessor is
+  // already BLACK from its own earlier top-level visit, so the DFS never
+  // recurses more than one level deep regardless of chain length.)
+  function buildForwardChainSource(n: number): string {
+    const parts: string[] = ["## Implementation Units", ""];
+    for (let i = 1; i <= n; i++) {
+      const dep = i === n ? "None" : `U${i + 1}`;
+      parts.push(
+        `- [ ] **U${i}. Unit ${i}**`,
+        "",
+        `**Dependencies:** ${dep}`,
+        "",
+      );
+    }
+    return parts.join("\n");
+  }
+
+  test("a deep forward-referencing chain U1\u2192U2\u2192...\u2192U50000 parses without a RangeError and reports no cycle", () => {
+    const n = 50000;
+    const source = buildForwardChainSource(n);
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const start = performance.now();
+    const result = parseUnits(doc.value);
+    const elapsedMs = performance.now() - start;
+    console.log(
+      `deep chain n=${n} parseUnits elapsed=${elapsedMs.toFixed(1)}ms`,
+    );
+
+    expect(result.units.length).toBe(n);
+    expect(result.issues.some((i) => i.kind === "dependency-cycle")).toBe(
+      false,
+    );
+    const first = result.units.find((u) => u.key === "U1");
+    const last = result.units.find((u) => u.key === `U${n}`);
+    expect(first?.dependencies).toEqual({ kind: "keys", keys: ["U2"] });
+    expect(last?.dependencies).toEqual({ kind: "none" });
+    // No unit in a pure linear chain should be invalidated as a cycle member.
+    expect(result.units.every((u) => u.dependencies.kind !== "invalid")).toBe(
+      true,
+    );
+  });
+
+  test("a deep forward chain with a cycle discovered at the bottom of the DFS detects exactly that cycle, not the whole chain", () => {
+    const n = 20000;
+    const deps: string[] = new Array(n + 1).fill("");
+    for (let i = 1; i < n; i++) {
+      deps[i] = `U${i + 1}`;
+    }
+    // Un normally has no deps (chain terminus). Give it a back-edge to
+    // U(n-1) instead, closing a 2-cycle that the DFS only discovers after
+    // recursing all the way down through U1→U2→...→U(n-1)→Un.
+    deps[n] = `U${n - 1}`;
+    const parts: string[] = ["## Implementation Units", ""];
+    for (let i = 1; i <= n; i++) {
+      parts.push(
+        `- [ ] **U${i}. Unit ${i}**`,
+        "",
+        `**Dependencies:** ${deps[i]}`,
+        "",
+      );
+    }
+    const source = parts.join("\n");
+    const doc = parseDocument(source);
+    if (!doc.ok) throw new Error("fixture must parse");
+    const result = parseUnits(doc.value);
+
+    expect(result.units.length).toBe(n);
+    const cycleIssue = result.issues.find((i) => i.kind === "dependency-cycle");
+    expect(cycleIssue).toBeDefined();
+    expect(cycleIssue?.message).toContain(`U${n - 1}`);
+    expect(cycleIssue?.message).toContain(`U${n}`);
+    const uLast = result.units.find((u) => u.key === `U${n}`);
+    const uPrev = result.units.find((u) => u.key === `U${n - 1}`);
+    expect(uLast?.dependencies.kind).toBe("invalid");
+    expect(uPrev?.dependencies.kind).toBe("invalid");
+    // Everything upstream of the cycle is an ordinary acyclic chain leading
+    // into it and must not be swept into the cycle itself.
+    const u1 = result.units.find((u) => u.key === "U1");
+    const uMid = result.units.find((u) => u.key === `U${Math.floor(n / 2)}`);
+    expect(u1?.dependencies.kind).toBe("keys");
+    expect(uMid?.dependencies.kind).toBe("keys");
+    const cycleMembers = new Set(cycleIssue?.message.match(/U\d+/g) ?? []);
+    expect(cycleMembers.has("U1")).toBe(false);
+    expect(cycleMembers.has(`U${Math.floor(n / 2)}`)).toBe(false);
   });
 });
 

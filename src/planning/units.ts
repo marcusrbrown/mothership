@@ -136,16 +136,24 @@ function computeMask(source: string, lines: Line[]): boolean[] {
   }
 
   // HTML comments: computed over raw char ranges, then intersected with lines.
+  // matchAll yields matches in ascending source order and comment ranges never
+  // overlap, and `lines` is itself sorted by ascending, non-overlapping
+  // [start, end) offsets, so a single forward cursor suffices in place of a
+  // per-match rescan of every line.
   const commentRe = /<!--[\s\S]*?-->/g;
+  let lineCursor = 0;
   for (const match of source.matchAll(commentRe)) {
     const from = match.index;
     const to = from + match[0].length;
-    for (const line of lines) {
-      if (line.start < to && line.end > from) {
-        const idx = lines.indexOf(line);
-        if (idx >= 0) mask[idx] = true;
-      }
+    while (lineCursor < lines.length && (lines[lineCursor]?.end ?? 0) <= from) {
+      lineCursor++;
     }
+    let idx = lineCursor;
+    while (idx < lines.length && (lines[idx]?.start ?? 0) < to) {
+      mask[idx] = true;
+      idx++;
+    }
+    lineCursor = idx;
   }
 
   // Indented code: >=4 leading spaces or a leading tab, non-blank.
@@ -478,27 +486,50 @@ export function parseUnits(document: PlanDocument): UnitsParseResult {
   const color = new Map<string, number>();
   const inCycle = new Set<string>();
 
-  function visit(key: string, stack: string[]): void {
+  // Explicit frames avoid call-stack limits on deep chains. Only the active
+  // path segment reached by a back-edge is marked as cyclic, not its dependents.
+  interface Frame {
+    key: string;
+    deps: readonly string[];
+    nextDepIndex: number;
+  }
+
+  function pushFrame(key: string, activePath: string[], frames: Frame[]): void {
     color.set(key, GRAY);
-    stack.push(key);
+    activePath.push(key);
     const unit = byKey.get(key);
     const deps =
       unit?.dependencies.kind === "keys" ? unit.dependencies.keys : [];
-    for (const dep of deps) {
-      const depColor = color.get(dep) ?? WHITE;
-      if (depColor === WHITE) {
-        visit(dep, stack);
-      } else if (depColor === GRAY) {
-        const cycleStart = stack.indexOf(dep);
-        for (const k of stack.slice(cycleStart)) inCycle.add(k);
+    frames.push({ key, deps, nextDepIndex: 0 });
+  }
+
+  function visitFrom(rootKey: string): void {
+    const activePath: string[] = [];
+    const frames: Frame[] = [];
+    pushFrame(rootKey, activePath, frames);
+
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1] as Frame;
+      if (frame.nextDepIndex < frame.deps.length) {
+        const dep = frame.deps[frame.nextDepIndex] as string;
+        frame.nextDepIndex++;
+        const depColor = color.get(dep) ?? WHITE;
+        if (depColor === WHITE) {
+          pushFrame(dep, activePath, frames);
+        } else if (depColor === GRAY) {
+          const cycleStart = activePath.indexOf(dep);
+          for (const k of activePath.slice(cycleStart)) inCycle.add(k);
+        }
+      } else {
+        activePath.pop();
+        color.set(frame.key, BLACK);
+        frames.pop();
       }
     }
-    stack.pop();
-    color.set(key, BLACK);
   }
 
   for (const key of byKey.keys()) {
-    if ((color.get(key) ?? WHITE) === WHITE) visit(key, []);
+    if ((color.get(key) ?? WHITE) === WHITE) visitFrom(key);
   }
 
   if (inCycle.size > 0) {

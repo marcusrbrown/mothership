@@ -349,7 +349,7 @@ flowchart TB
 
 **Verification:** The corpus retains source content and yields deterministic identities. Missing historical bytes cannot be papered over by opening the current path.
 
-**Completed U2 evidence:** The four pure model modules retain canonical UTF-8 source and immutable revision/metadata values, reject stale proposals, and parse the actual nine-unit plan without diagnostics. Planning tests total 120; the repository suite passes 1,181 tests. Typecheck, lint, and diff checks exit zero, and the pinned design detector returns `[]`. Regression coverage includes initial metadata-array mutation and multiline criteria that previously truncated at blank lines. Source offsets use UTF-16 code units; hashes cover the full UTF-8 source. This narrow tracking grammar is not a general CommonMark renderer. No filesystem, UI, authority, or execution integration is enabled.
+**Completed U2 evidence:** The four pure model modules retain canonical UTF-8 source and immutable revision/metadata values, reject stale proposals, and parse the actual nine-unit plan without diagnostics. Planning tests total 128; the repository suite passes 1,189 tests. Typecheck, lint, and diff checks exit zero, and the pinned design detector returns `[]`. Regression coverage includes initial metadata-array mutation, multiline criteria, comment-mask intersections, and deep dependency chains/cycles. Comment masking uses a forward-only scan; dependency traversal uses an explicit stack. Source offsets use UTF-16 code units; hashes cover the full UTF-8 source. This narrow tracking grammar is not a general CommonMark renderer. No filesystem, UI, authority, or execution integration is enabled.
 
 - [ ] **U3. Add confined publication and protected native custody**
 
