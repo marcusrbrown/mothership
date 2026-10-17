@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@fro.bot/space-bus": "0.15.0",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@tiptap/core": "^3",
