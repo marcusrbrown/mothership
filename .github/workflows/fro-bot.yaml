@@ -351,6 +351,13 @@ jobs:
           auth-json: ${{ secrets.OPENCODE_AUTH_JSON }}
           model: ${{ vars.FRO_BOT_MODEL }}
           opencode-config: ${{ secrets.OPENCODE_CONFIG }}
+          # The daily pass and dispatched prompts deliver fixes as branch + PR; the
+          # default (auto -> working-dir) discards them. Other events stay on auto.
+          output-mode: >-
+            ${{
+              (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+              && 'branch-pr' || 'auto'
+            }}
           prompt: ${{ env.TASK_PROMPT }}
           isolate-agent: 'true'
           trace-endpoint: https://traces.fro.bot/marcusrbrown/v1/traces
