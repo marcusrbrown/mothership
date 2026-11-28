@@ -37,7 +37,7 @@ async function mount() {
       root.render(<Spike />);
       return;
     }
-    console.error(`spike "${spikeId}" not found; available:`, spikes);
+    console.error("spike not found:", spikeId, "available:", spikes);
   }
   root.render(
     <React.StrictMode>
